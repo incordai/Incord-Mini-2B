@@ -1,8 +1,13 @@
+#![cfg(feature = "mock-weights")]
+
 use qor4b::server::auth::admin::AdminState;
 use qor4b::server::auth::middleware::AuthState;
 use qor4b::server::auth::ratelimit::RateLimiter;
 use qor4b::server::db::open;
+use qor4b::server::http::handlers::chat::ChatState;
 use qor4b::server::http::router::build_router;
+use qor4b::server::scheduler::queue::Queue;
+use qor4b::server::usage::tracker::UsageTracker;
 use redb::Database;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -32,7 +37,44 @@ impl TestServer {
         let admin = Arc::new(AdminState {
             admin_token: admin_token.clone(),
         });
-        let router = build_router(auth, admin);
+
+        let queue = Queue::new(10);
+        let weights = Arc::new(qor4b::gemv::mock::tiny_weights());
+        let tokenizer = build_test_tokenizer();
+        let usage = UsageTracker::new(db.clone());
+
+        // Spawn 1 worker for tests. We use a dedicated OS thread with its own
+        // multi-thread Tokio runtime so that the worker's spawn_blocking + block_on
+        // does not interfere with the current_thread runtime used by #[tokio::test].
+        {
+            let worker = qor4b::server::scheduler::worker::Worker {
+                id: 0,
+                weights: weights.clone(),
+                tokenizer: tokenizer.clone(),
+                queue: queue.clone(),
+            };
+            std::thread::spawn(move || {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("worker runtime")
+                    .block_on(async move {
+                        // spawn() internally uses spawn_blocking which needs a
+                        // multi-thread runtime to avoid blocking the test runtime.
+                        let _ = worker.spawn().await;
+                    });
+            });
+        }
+
+        let chat_state = Arc::new(ChatState {
+            queue,
+            weights,
+            tokenizer,
+            usage,
+        });
+
+        let router = build_router(auth, admin, chat_state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -61,4 +103,17 @@ impl Drop for TestServer {
     fn drop(&mut self) {
         self.handle.abort();
     }
+}
+
+/// Construct a tokenizer for tests. Looks for tokenizer.json at well-known paths.
+fn build_test_tokenizer() -> Arc<qor4b::tokenizer::QoraTokenizer> {
+    let candidates = ["model/tokenizer.json", "tests/fixtures/tokenizer.json"];
+    for path in candidates {
+        if std::path::Path::new(path).exists()
+            && let Ok(t) = qor4b::tokenizer::QoraTokenizer::from_file(std::path::Path::new(path))
+        {
+            return Arc::new(t);
+        }
+    }
+    panic!("integration tests need a tokenizer.json file; expected at one of: {candidates:?}");
 }

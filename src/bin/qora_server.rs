@@ -33,13 +33,55 @@ async fn main() -> anyhow::Result<()> {
         .into_bytes();
 
     let auth = Arc::new(qor4b::server::auth::middleware::AuthState {
-        db,
+        db: db.clone(),
         server_secret: Arc::new(server_secret),
         limiter: qor4b::server::auth::ratelimit::RateLimiter::new(),
     });
     let admin_state = Arc::new(qor4b::server::auth::admin::AdminState { admin_token });
 
-    let router = build_router(auth, admin_state);
+    let weights = Arc::new(
+        qor4b::save::load_model(&config.model.path)
+            .with_context(|| format!("loading model from {}", config.model.path.display()))?,
+    );
+    let tokenizer = Arc::new(
+        qor4b::tokenizer::QoraTokenizer::from_file(&config.model.tokenizer)
+            .map_err(|e| anyhow::anyhow!("{}", e))
+            .with_context(|| {
+                format!(
+                    "loading tokenizer from {}",
+                    config.model.tokenizer.display()
+                )
+            })?,
+    );
+
+    let queue = qor4b::server::scheduler::queue::Queue::new(config.scheduler.max_queue);
+
+    // Spawn N worker threads. Conservative default (kernel work is internally rayon-parallelized,
+    // so too many workers contend for memory bandwidth). Cap at min(cpus, 8) for v1.
+    let num_workers = std::thread::available_parallelism()
+        .map(|p| p.get().min(8))
+        .unwrap_or(2);
+    for id in 0..num_workers {
+        qor4b::server::scheduler::worker::Worker {
+            id,
+            weights: weights.clone(),
+            tokenizer: tokenizer.clone(),
+            queue: queue.clone(),
+        }
+        .spawn();
+    }
+    tracing::info!(num_workers, "spawned worker threads");
+
+    let usage = qor4b::server::usage::tracker::UsageTracker::new(db.clone());
+
+    let chat_state = Arc::new(qor4b::server::http::handlers::chat::ChatState {
+        queue,
+        weights,
+        tokenizer,
+        usage,
+    });
+
+    let router = build_router(auth, admin_state, chat_state);
 
     match (&config.server.tls_cert, &config.server.tls_key) {
         (Some(cert), Some(key)) => {
