@@ -1,4 +1,5 @@
 pub mod queue;
+pub mod worker;
 
 #[derive(Debug, Clone)]
 pub enum Event {
