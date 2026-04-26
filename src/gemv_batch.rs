@@ -109,3 +109,51 @@ mod tests {
         }
     }
 }
+
+use crate::gemv::Weight;
+
+/// Embed N tokens. Returns a [N, hidden] flattened vector (f32).
+pub fn batched_embed_lookup(
+    embed: &Weight,
+    token_ids: &[u32],
+    hidden: usize,
+) -> Vec<f32> {
+    let n = token_ids.len();
+    let mut out = vec![0.0f32; n * hidden];
+
+    // Parallelize the gathers — each token is an independent vocab row read.
+    out.par_chunks_mut(hidden)
+        .zip(token_ids.par_iter())
+        .for_each(|(slot_out, &tid)| {
+            let row = crate::gemv::embed_lookup(embed, tid as usize, hidden);
+            slot_out.copy_from_slice(&row);
+        });
+
+    out
+}
+
+#[cfg(test)]
+#[cfg(feature = "mock-weights")]
+mod embed_tests {
+    use super::*;
+    use crate::gemv::mock::tiny_weights;
+
+    #[test]
+    fn batched_embed_matches_single() {
+        let w = tiny_weights();
+        let tokens = [3u32, 7, 11];
+        let batched = batched_embed_lookup(&w.embed, &tokens, w.hidden);
+        for (i, &tid) in tokens.iter().enumerate() {
+            let single = crate::gemv::embed_lookup(&w.embed, tid as usize, w.hidden);
+            let slice = &batched[i * w.hidden..(i + 1) * w.hidden];
+            assert_eq!(slice, single.as_slice(), "embed mismatch at slot {i} token {tid}");
+        }
+    }
+
+    #[test]
+    fn batched_embed_empty_input() {
+        let w = tiny_weights();
+        let out = batched_embed_lookup(&w.embed, &[], w.hidden);
+        assert!(out.is_empty());
+    }
+}
