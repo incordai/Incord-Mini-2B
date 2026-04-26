@@ -57,3 +57,7 @@ tokio-test = "0.4"
 default = []
 gpu = ["cortex"]
 gpu-metal = ["cortex"]
+
+[[test]]
+name = "http_basic"
+path = "tests/integration/http_basic.rs"
