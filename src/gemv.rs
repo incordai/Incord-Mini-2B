@@ -1801,7 +1801,10 @@ pub mod mock {
         layer_types.push(LayerType::FullAttn);
 
         Qor4bConfig {
-            vocab_size: 256,
+            // 248_070 covers all real tokenizer IDs (max special token = 248_069).
+            // The embedding table is vocab * hidden = 248_070 * 64 * 2B ≈ 31 MB —
+            // acceptable for integration tests that exercise the real tokenizer.
+            vocab_size: 248_070,
             hidden_size: 64,
             num_layers: 4,
             num_attn_heads: 2,
@@ -1825,7 +1828,7 @@ pub mod mock {
             vision_ffn: 128,
             patch_size: 4,
             spatial_merge_size: 2,
-            num_position_embeddings: 64,
+            num_position_embeddings: 512,
         }
     }
 
@@ -1896,7 +1899,8 @@ pub mod mock {
         let embed = f16_zeros(vocab, hidden);
 
         // RoPE tables sized for max_position_embeddings x rope_dim/2 entries per position.
-        let max_pos: usize = 64;
+        // 512 is enough to cover real chat prompts (system prompt + user message) in tests.
+        let max_pos: usize = 512;
         let rope_dim = config.rope_dim();
         let rope_cos = vec![1.0f32; max_pos * (rope_dim / 2)];
         let rope_sin = vec![0.0f32; max_pos * (rope_dim / 2)];
@@ -1932,7 +1936,7 @@ pub mod mock {
         fn tiny_weights_dimensions() {
             let w = tiny_weights();
             assert_eq!(w.hidden, 64);
-            assert_eq!(w.vocab, 256);
+            assert_eq!(w.vocab, 248_070);
             assert_eq!(w.layers.len(), 4);
             // 3 DeltaNet + 1 FullAttn
             let n_delta = w

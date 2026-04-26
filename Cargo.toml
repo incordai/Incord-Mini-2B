@@ -76,3 +76,8 @@ path = "tests/integration/http_basic.rs"
 [[test]]
 name = "auth_flow"
 path = "tests/integration/auth_flow.rs"
+
+[[test]]
+name = "chat_completions"
+path = "tests/integration/chat_completions.rs"
+required-features = ["mock-weights"]
