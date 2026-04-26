@@ -1777,3 +1777,176 @@ fn prefill_attn_layer(
         x[j] += mlp_out[j];
     }
 }
+
+// ============================================================
+// Mock weights (tiny stub for tests)
+// ============================================================
+
+#[cfg(any(test, feature = "mock-weights"))]
+pub mod mock {
+    //! Tiny stub model weights for tests. Tiny dimensions, deterministic outputs.
+    //! Allocates zero-filled F16 weights at every projection.
+
+    use super::*;
+    use crate::config::{LayerType, Qor4bConfig};
+    use half::f16;
+
+    /// Build a tiny config with the same fields as Qor4bConfig::default_4b
+    /// but with small dimensions (suitable for unit-test speed).
+    pub fn tiny_config() -> Qor4bConfig {
+        let mut layer_types = Vec::with_capacity(4);
+        layer_types.push(LayerType::DeltaNet);
+        layer_types.push(LayerType::DeltaNet);
+        layer_types.push(LayerType::DeltaNet);
+        layer_types.push(LayerType::FullAttn);
+
+        Qor4bConfig {
+            vocab_size: 256,
+            hidden_size: 64,
+            num_layers: 4,
+            num_attn_heads: 2,
+            num_kv_heads: 1,
+            attn_head_dim: 32,
+            num_qk_heads: 2,
+            num_v_heads: 4,
+            deltanet_head_dim: 16,
+            conv_kernel_size: 4,
+            intermediate_size: 128,
+            rope_theta: 10_000.0,
+            partial_rotary_factor: 0.25,
+            rms_norm_eps: 1e-6,
+            eos_token_id: 0,
+            tie_word_embeddings: true,
+            layer_types,
+            has_vision: false,
+            vision_hidden: 64,
+            vision_layers: 2,
+            vision_heads: 2,
+            vision_ffn: 128,
+            patch_size: 4,
+            spatial_merge_size: 2,
+            num_position_embeddings: 64,
+        }
+    }
+
+    /// Helper: zero-filled F16 weight of shape [k, n].
+    fn f16_zeros(k: usize, n: usize) -> Weight {
+        Weight::F16(F16Weight {
+            data: vec![f16::from_f32(0.0); k * n],
+            k,
+            n,
+        })
+    }
+
+    /// Build a tiny ModelWeights with all-zero F16 weights at every projection.
+    /// Vision is None because tiny_config().has_vision = false.
+    pub fn tiny_weights() -> ModelWeights {
+        let config = tiny_config();
+        let hidden = config.hidden_size;
+        let vocab = config.vocab_size;
+        let intermediate = config.intermediate_size;
+        let qkv_dim = config.deltanet_qkv_dim();
+        let num_v_heads = config.num_v_heads;
+        let v_dim = num_v_heads * config.deltanet_head_dim;
+        let kernel = config.conv_kernel_size;
+
+        let mut layers = Vec::with_capacity(config.num_layers);
+        for lt in &config.layer_types {
+            match lt {
+                LayerType::DeltaNet => {
+                    layers.push(HybridLayerWeights::DeltaNet(DeltaNetLayerWeights {
+                        in_proj_qkv:  f16_zeros(hidden, qkv_dim),
+                        in_proj_a:    f16_zeros(hidden, num_v_heads),
+                        in_proj_b:    f16_zeros(hidden, num_v_heads),
+                        in_proj_z:    f16_zeros(hidden, v_dim),
+                        out_proj:     f16_zeros(v_dim, hidden),
+                        conv1d_weight: vec![0.0f32; qkv_dim * kernel],
+                        a_log:         vec![0.0f32; num_v_heads],
+                        dt_bias:       vec![0.0f32; num_v_heads],
+                        attn_norm_weight: vec![f16::from_f32(1.0); config.deltanet_head_dim],
+                        gate_proj:  f16_zeros(hidden, intermediate),
+                        up_proj:    f16_zeros(hidden, intermediate),
+                        down_proj:  f16_zeros(intermediate, hidden),
+                        input_norm:        vec![f16::from_f32(1.0); hidden],
+                        post_attn_norm:    vec![f16::from_f32(1.0); hidden],
+                    }));
+                }
+                LayerType::FullAttn => {
+                    // q_proj outputs interleaved [Q, gate] per head: 2 x q_dim total
+                    let q_dim  = config.num_attn_heads * config.attn_head_dim;
+                    let kv_dim = config.num_kv_heads   * config.attn_head_dim;
+                    layers.push(HybridLayerWeights::FullAttn(FullAttnLayerWeights {
+                        q_proj: f16_zeros(hidden, q_dim * 2),
+                        k_proj: f16_zeros(hidden, kv_dim),
+                        v_proj: f16_zeros(hidden, kv_dim),
+                        o_proj: f16_zeros(q_dim, hidden),
+                        q_norm: vec![f16::from_f32(1.0); config.attn_head_dim],
+                        k_norm: vec![f16::from_f32(1.0); config.attn_head_dim],
+                        gate_proj: f16_zeros(hidden, intermediate),
+                        up_proj:   f16_zeros(hidden, intermediate),
+                        down_proj: f16_zeros(intermediate, hidden),
+                        input_norm:     vec![f16::from_f32(1.0); hidden],
+                        post_attn_norm: vec![f16::from_f32(1.0); hidden],
+                    }));
+                }
+            }
+        }
+
+        // Embedding: vocab x hidden — embed_lookup uses token_id * hidden as row offset.
+        let embed = f16_zeros(vocab, hidden);
+
+        // RoPE tables sized for max_position_embeddings x rope_dim/2 entries per position.
+        let max_pos: usize = 64;
+        let rope_dim = config.rope_dim();
+        let rope_cos = vec![1.0f32; max_pos * (rope_dim / 2)];
+        let rope_sin = vec![0.0f32; max_pos * (rope_dim / 2)];
+
+        ModelWeights {
+            layers,
+            embed,
+            vocab,
+            hidden,
+            final_norm: vec![f16::from_f32(1.0); hidden],
+            rope_cos,
+            rope_sin,
+            config,
+            format_name: "F16-mock",
+            vision: None,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn tiny_weights_does_not_panic_on_forward_decode() {
+            let w = tiny_weights();
+            let mut cache = HybridCache::new(&w.config);
+            // Valid token_id (vocab is small, use 1).
+            let logits = forward_decode(&w, 1, &mut cache);
+            assert_eq!(logits.len(), w.vocab);
+        }
+
+        #[test]
+        fn tiny_weights_dimensions() {
+            let w = tiny_weights();
+            assert_eq!(w.hidden, 64);
+            assert_eq!(w.vocab, 256);
+            assert_eq!(w.layers.len(), 4);
+            // 3 DeltaNet + 1 FullAttn
+            let n_delta = w
+                .layers
+                .iter()
+                .filter(|l| matches!(l, HybridLayerWeights::DeltaNet(_)))
+                .count();
+            let n_full = w
+                .layers
+                .iter()
+                .filter(|l| matches!(l, HybridLayerWeights::FullAttn(_)))
+                .count();
+            assert_eq!(n_delta, 3);
+            assert_eq!(n_full, 1);
+        }
+    }
+}

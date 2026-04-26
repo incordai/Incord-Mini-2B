@@ -67,6 +67,7 @@ tokio-test = "0.4"
 default = []
 gpu = ["cortex"]
 gpu-metal = ["cortex"]
+mock-weights = []
 
 [[test]]
 name = "http_basic"
