@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use crate::server::db::{USAGE, next_usage_id};
 use anyhow::Context;
 use redb::{Database, ReadableTable};
 use serde::{Deserialize, Serialize};
-use crate::server::db::{USAGE, next_usage_id};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRecord {
@@ -14,7 +14,7 @@ pub struct UsageRecord {
     pub output_tokens: u32,
     pub started_at: i64,
     pub duration_ms: u32,
-    pub status: String,    // "success" | "error" | "timeout" | "cancelled"
+    pub status: String, // "success" | "error" | "timeout" | "cancelled"
 }
 
 const BINCODE_CFG: bincode::config::Configuration = bincode::config::standard();
@@ -25,11 +25,14 @@ pub struct UsageTracker {
 }
 
 impl UsageTracker {
-    pub fn new(db: Arc<Database>) -> Self { Self { db } }
+    pub fn new(db: Arc<Database>) -> Self {
+        Self { db }
+    }
 
     pub fn record(&self, r: UsageRecord) -> anyhow::Result<()> {
         let id = next_usage_id(&self.db)?;
-        let value = bincode::serde::encode_to_vec(&r, BINCODE_CFG).context("bincode UsageRecord")?;
+        let value =
+            bincode::serde::encode_to_vec(&r, BINCODE_CFG).context("bincode UsageRecord")?;
         let write = self.db.begin_write()?;
         {
             let mut t = write.open_table(USAGE)?;
@@ -47,7 +50,9 @@ impl UsageTracker {
             let (_, v) = entry?;
             let (rec, _): (UsageRecord, usize) =
                 bincode::serde::decode_from_slice(v.value(), BINCODE_CFG)?;
-            if rec.user_id == user_id { n += 1; }
+            if rec.user_id == user_id {
+                n += 1;
+            }
         }
         Ok(n)
     }
@@ -65,10 +70,17 @@ mod tests {
         let db = open(&dir.path().join("test.redb")).unwrap();
         let t = UsageTracker::new(db);
         t.record(UsageRecord {
-            request_id: "r1".into(), user_id: "u1".into(), key_id: "k1".into(),
-            model: "qora-4b".into(), input_tokens: 10, output_tokens: 20,
-            started_at: 1, duration_ms: 100, status: "success".into(),
-        }).unwrap();
+            request_id: "r1".into(),
+            user_id: "u1".into(),
+            key_id: "k1".into(),
+            model: "qora-4b".into(),
+            input_tokens: 10,
+            output_tokens: 20,
+            started_at: 1,
+            duration_ms: 100,
+            status: "success".into(),
+        })
+        .unwrap();
         assert_eq!(t.count("u1").unwrap(), 1);
         assert_eq!(t.count("u2").unwrap(), 0);
     }

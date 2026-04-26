@@ -7,19 +7,18 @@
 //!
 //! Server secret comes from env at startup; never persisted.
 
-use std::path::Path;
-use std::sync::Arc;
 use anyhow::Context;
 use redb::{Database, ReadableTable, TableDefinition};
+use std::path::Path;
+use std::sync::Arc;
 
-pub const KEYS_BY_ID: TableDefinition<&str, &[u8]>  = TableDefinition::new("keys_by_id");
-pub const ID_BY_HMAC: TableDefinition<&[u8], &str>  = TableDefinition::new("id_by_hmac");
-pub const USAGE:      TableDefinition<u64, &[u8]>   = TableDefinition::new("usage");
+pub const KEYS_BY_ID: TableDefinition<&str, &[u8]> = TableDefinition::new("keys_by_id");
+pub const ID_BY_HMAC: TableDefinition<&[u8], &str> = TableDefinition::new("id_by_hmac");
+pub const USAGE: TableDefinition<u64, &[u8]> = TableDefinition::new("usage");
 
 /// Opens (or creates) the database file. Initializes the table set on first run.
 pub fn open(path: &Path) -> anyhow::Result<Arc<Database>> {
-    let db = Database::create(path)
-        .with_context(|| format!("open redb at {}", path.display()))?;
+    let db = Database::create(path).with_context(|| format!("open redb at {}", path.display()))?;
 
     // Touch every table once so they exist before first read attempt.
     let write = db.begin_write()?;
@@ -38,10 +37,7 @@ pub fn open(path: &Path) -> anyhow::Result<Arc<Database>> {
 pub fn next_usage_id(db: &Database) -> anyhow::Result<u64> {
     let read = db.begin_read()?;
     let table = read.open_table(USAGE)?;
-    let last = table
-        .last()?
-        .map(|(k, _)| k.value())
-        .unwrap_or(0);
+    let last = table.last()?.map(|(k, _)| k.value()).unwrap_or(0);
     Ok(last + 1)
 }
 

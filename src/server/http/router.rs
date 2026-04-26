@@ -1,9 +1,12 @@
-use axum::{Router, middleware as axum_mw, routing::{delete, get, post}};
-use std::sync::Arc;
-use crate::server::auth::admin::{admin_guard, AdminState};
+use crate::server::auth::admin::{AdminState, admin_guard};
 use crate::server::auth::middleware::AuthState;
 use crate::server::http::handlers;
 use crate::server::http::middleware::request_id_middleware;
+use axum::{
+    Router, middleware as axum_mw,
+    routing::{delete, get, post},
+};
+use std::sync::Arc;
 
 pub fn build_router(auth: Arc<AuthState>, admin: Arc<AdminState>) -> Router {
     Router::new()
@@ -26,12 +29,12 @@ pub fn build_router(auth: Arc<AuthState>, admin: Arc<AdminState>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use tower::ServiceExt;
     use crate::server::auth::ratelimit::RateLimiter;
     use crate::server::db::open;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
     use tempfile::tempdir;
+    use tower::ServiceExt;
 
     fn test_states() -> (Arc<AuthState>, Arc<AdminState>, tempfile::TempDir) {
         let dir = tempdir().unwrap();
@@ -41,7 +44,9 @@ mod tests {
             server_secret: Arc::new(b"test-secret".to_vec()),
             limiter: RateLimiter::new(),
         });
-        let admin = Arc::new(AdminState { admin_token: "admin-token".to_string() });
+        let admin = Arc::new(AdminState {
+            admin_token: "admin-token".to_string(),
+        });
         (auth, admin, dir)
     }
 
@@ -50,7 +55,12 @@ mod tests {
         let (auth, admin, _dir) = test_states();
         let app = build_router(auth, admin);
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -61,11 +71,18 @@ mod tests {
         let (auth, admin, _dir) = test_states();
         let app = build_router(auth, admin);
         let response = app
-            .oneshot(Request::builder().uri("/v1/models").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(body["data"][0]["id"], "qora-4b");
     }
@@ -86,7 +103,12 @@ mod tests {
         let (auth, admin, _dir) = test_states();
         let app = build_router(auth, admin);
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert!(response.headers().contains_key("x-request-id"));

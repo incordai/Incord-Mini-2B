@@ -1,18 +1,18 @@
 //! API key model. Lookup uses HMAC-SHA256 (O(1) index); Argon2 provides
 //! defense-in-depth verification on the matched record.
 
-use std::sync::Arc;
 use anyhow::Context;
+use argon2::password_hash::{SaltString, rand_core::OsRng};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
-use argon2::password_hash::{rand_core::OsRng, SaltString};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use redb::{Database, ReadableTable};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::server::db::{KEYS_BY_ID, ID_BY_HMAC};
+use crate::server::db::{ID_BY_HMAC, KEYS_BY_ID};
 
 pub const KEY_PREFIX: &str = "qora_";
 pub const HMAC_LEN: usize = 32;
@@ -66,7 +66,7 @@ impl From<&StoredKey> for ApiKey {
 
 #[derive(Debug)]
 pub struct NewKey {
-    pub raw_key: String,    // shown to admin once, never stored
+    pub raw_key: String, // shown to admin once, never stored
     pub key: ApiKey,
 }
 
@@ -95,7 +95,11 @@ pub fn hash_key_argon2(raw: &str) -> anyhow::Result<String> {
 pub fn verify_argon2(raw: &str, hash: &str) -> bool {
     PasswordHash::new(hash)
         .ok()
-        .map(|p| Argon2::default().verify_password(raw.as_bytes(), &p).is_ok())
+        .map(|p| {
+            Argon2::default()
+                .verify_password(raw.as_bytes(), &p)
+                .is_ok()
+        })
         .unwrap_or(false)
 }
 
@@ -129,8 +133,7 @@ pub fn create_key(
         tpm_limit,
     };
 
-    let value = bincode::serde::encode_to_vec(&stored, BINCODE_CFG)
-        .context("bincode StoredKey")?;
+    let value = bincode::serde::encode_to_vec(&stored, BINCODE_CFG).context("bincode StoredKey")?;
 
     let write = db.begin_write()?;
     {
@@ -141,7 +144,10 @@ pub fn create_key(
     }
     write.commit()?;
 
-    Ok(NewKey { raw_key: raw, key: ApiKey::from(&stored) })
+    Ok(NewKey {
+        raw_key: raw,
+        key: ApiKey::from(&stored),
+    })
 }
 
 /// Look up a presented raw key. Returns Some(ApiKey) if active and verified.
@@ -192,17 +198,17 @@ pub fn lookup_by_raw(
     let now = Utc::now().timestamp();
     let mut updated = stored.clone();
     updated.last_used_at = Some(now);
-    if let Ok(value) = bincode::serde::encode_to_vec(&updated, BINCODE_CFG) {
-        if let Ok(write) = db.begin_write() {
-            let _ = (|| -> anyhow::Result<()> {
-                {
-                    let mut keys = write.open_table(KEYS_BY_ID)?;
-                    keys.insert(stored.id.as_str(), value.as_slice())?;
-                }
-                write.commit()?;
-                Ok(())
-            })();
-        }
+    if let Ok(value) = bincode::serde::encode_to_vec(&updated, BINCODE_CFG)
+        && let Ok(write) = db.begin_write()
+    {
+        let _ = (|| -> anyhow::Result<()> {
+            {
+                let mut keys = write.open_table(KEYS_BY_ID)?;
+                keys.insert(stored.id.as_str(), value.as_slice())?;
+            }
+            write.commit()?;
+            Ok(())
+        })();
     }
 
     Ok(Some(ApiKey::from(&updated)))
@@ -243,7 +249,9 @@ mod tests {
         open(&path).unwrap()
     }
 
-    fn secret() -> Vec<u8> { b"test-secret-do-not-use-in-prod".to_vec() }
+    fn secret() -> Vec<u8> {
+        b"test-secret-do-not-use-in-prod".to_vec()
+    }
 
     #[test]
     fn raw_key_format() {

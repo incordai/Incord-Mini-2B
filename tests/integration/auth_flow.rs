@@ -11,7 +11,9 @@ async fn admin_can_create_key() {
         .json(&json!({
             "user_id":"user1","name":"test","rpm_limit":60,"tpm_limit":60_000
         }))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["raw_key"].as_str().unwrap().starts_with("qora_"));
@@ -23,7 +25,9 @@ async fn missing_admin_token_returns_401() {
     let resp = reqwest::Client::new()
         .post(server.url("/v1/admin/keys"))
         .json(&json!({"user_id":"u","name":"n","rpm_limit":1,"tpm_limit":1}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 401);
 }
 
@@ -34,7 +38,9 @@ async fn wrong_admin_token_returns_401() {
         .post(server.url("/v1/admin/keys"))
         .bearer_auth("wrong-token")
         .json(&json!({"user_id":"u","name":"n","rpm_limit":1,"tpm_limit":1}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 401);
 }
 
@@ -45,14 +51,18 @@ async fn revoke_key_works() {
         .post(server.url("/v1/admin/keys"))
         .bearer_auth(&server.admin_token)
         .json(&json!({"user_id":"u","name":"n","rpm_limit":1,"tpm_limit":1}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     let body: serde_json::Value = resp.json().await.unwrap();
     let id = body["id"].as_str().unwrap().to_string();
 
     let resp = reqwest::Client::new()
         .delete(server.url(&format!("/v1/admin/keys/{id}")))
         .bearer_auth(&server.admin_token)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
 
     // v1 behavior: revoke is idempotent (re-revoking an already-revoked key
@@ -60,6 +70,8 @@ async fn revoke_key_works() {
     let resp = reqwest::Client::new()
         .delete(server.url(&format!("/v1/admin/keys/{id}")))
         .bearer_auth(&server.admin_token)
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
 }

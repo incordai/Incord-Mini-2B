@@ -1,9 +1,12 @@
-use std::sync::Arc;
-use axum::{extract::{State, Path}, Json};
-use serde::{Deserialize, Serialize};
 use crate::server::auth::keys::{create_key, revoke_key};
 use crate::server::auth::middleware::AuthState;
 use crate::server::error::ServerError;
+use axum::{
+    Json,
+    extract::{Path, State},
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Deserialize)]
 pub struct CreateKeyRequest {
@@ -25,8 +28,15 @@ pub async fn create_key_handler(
     State(state): State<Arc<AuthState>>,
     Json(req): Json<CreateKeyRequest>,
 ) -> Result<Json<CreateKeyResponse>, ServerError> {
-    let nk = create_key(&state.db, &state.server_secret, &req.user_id, &req.name, req.rpm_limit, req.tpm_limit)
-        .map_err(|e| ServerError::Db(e.to_string()))?;
+    let nk = create_key(
+        &state.db,
+        &state.server_secret,
+        &req.user_id,
+        &req.name,
+        req.rpm_limit,
+        req.tpm_limit,
+    )
+    .map_err(|e| ServerError::Db(e.to_string()))?;
     Ok(Json(CreateKeyResponse {
         id: nk.key.id,
         raw_key: nk.raw_key,
@@ -40,6 +50,8 @@ pub async fn revoke_key_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
     let ok = revoke_key(&state.db, &id).map_err(|e| ServerError::Db(e.to_string()))?;
-    if !ok { return Err(ServerError::BadRequest(format!("no key with id {id}"))); }
+    if !ok {
+        return Err(ServerError::BadRequest(format!("no key with id {id}")));
+    }
     Ok(Json(serde_json::json!({"id": id, "revoked": true})))
 }

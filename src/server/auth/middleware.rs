@@ -1,9 +1,14 @@
-use std::sync::Arc;
-use axum::{extract::{Request, State}, http::header::AUTHORIZATION, middleware::Next, response::Response};
-use redb::Database;
-use crate::server::auth::keys::{lookup_by_raw, ApiKey};
+use crate::server::auth::keys::{ApiKey, lookup_by_raw};
 use crate::server::auth::ratelimit::RateLimiter;
 use crate::server::error::ServerError;
+use axum::{
+    extract::{Request, State},
+    http::header::AUTHORIZATION,
+    middleware::Next,
+    response::Response,
+};
+use redb::Database;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AuthState {
