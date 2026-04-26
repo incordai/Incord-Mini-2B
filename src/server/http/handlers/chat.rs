@@ -1,26 +1,29 @@
-use std::sync::Arc;
-use axum::{extract::State, Extension, Json};
 use axum::response::IntoResponse;
+use axum::{Extension, Json, extract::State};
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::gemv::HybridCache;
+use crate::gemv::ModelWeights;
 use crate::server::auth::keys::ApiKey;
 use crate::server::error::{ServerError, ServerResult};
 use crate::server::http::sse::into_sse_response;
-use crate::server::openai::request::{ChatCompletionRequest, MessageContent, ContentPart, Message};
+use crate::server::openai::request::{ChatCompletionRequest, ContentPart, Message, MessageContent};
 use crate::server::openai::response::{
-    ChatCompletionResponse, Choice, ResponseMessage, Usage,
-    ChatCompletionChunk, ChunkChoice, ChunkDelta,
+    ChatCompletionChunk, ChatCompletionResponse, Choice, ChunkChoice, ChunkDelta, ResponseMessage,
+    Usage,
 };
-use crate::server::scheduler::{queue::{PendingRequest, Queue}, Event as SchedEvent, FinishReason};
+use crate::server::scheduler::{
+    Event as SchedEvent, FinishReason,
+    queue::{PendingRequest, Queue},
+};
+use crate::server::session::core::Session;
 use crate::server::session::sampler::Sampler;
-use crate::server::session::session::Session;
 use crate::server::usage::tracker::{UsageRecord, UsageTracker};
 use crate::tokenizer::QoraTokenizer;
-use crate::gemv::ModelWeights;
 
 #[derive(Clone)]
 pub struct ChatState {
@@ -36,7 +39,10 @@ pub async fn chat_completions(
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, ServerError> {
     if req.model != "qora-4b" {
-        return Err(ServerError::BadRequest(format!("unknown model: {}", req.model)));
+        return Err(ServerError::BadRequest(format!(
+            "unknown model: {}",
+            req.model
+        )));
     }
 
     // Build the user message string. OpenAI sends a sequence of system/user/assistant messages;
@@ -47,7 +53,9 @@ pub async fn chat_completions(
     let think = req.think.unwrap_or(true);
     let max_tokens = req.max_tokens.unwrap_or(1024) as usize;
 
-    let prompt_tokens = state.tokenizer.format_chat(&user_message, think, max_tokens);
+    let prompt_tokens = state
+        .tokenizer
+        .format_chat(&user_message, think, max_tokens);
 
     // Build session
     let session = Session {
@@ -71,19 +79,37 @@ pub async fn chat_completions(
     };
 
     let (tx, rx) = mpsc::channel::<SchedEvent>(64);
-    let pending = PendingRequest { session, sse_tx: tx };
-    state.queue.push(pending).map_err(|_| ServerError::QueueFull { retry_after_secs: 5 })?;
+    let pending = PendingRequest {
+        session,
+        sse_tx: tx,
+    };
+    state
+        .queue
+        .push(pending)
+        .map_err(|_| ServerError::QueueFull {
+            retry_after_secs: 5,
+        })?;
 
     if req.stream {
-        Ok(stream_response(state, req.model.clone(), prompt_tokens.len(), rx).await.into_response())
+        Ok(
+            stream_response(state, req.model.clone(), prompt_tokens.len(), rx)
+                .await
+                .into_response(),
+        )
     } else {
-        Ok(non_stream_response(state, req.model.clone(), key, prompt_tokens.len(), rx).await?.into_response())
+        Ok(
+            non_stream_response(state, req.model.clone(), key, prompt_tokens.len(), rx)
+                .await?
+                .into_response(),
+        )
     }
 }
 
 fn render_user_message(messages: &[Message]) -> ServerResult<String> {
     if messages.is_empty() {
-        return Err(ServerError::BadRequest("messages array must not be empty".into()));
+        return Err(ServerError::BadRequest(
+            "messages array must not be empty".into(),
+        ));
     }
     let mut combined = String::new();
     for m in messages {
@@ -129,8 +155,13 @@ async fn non_stream_response(
                 content.push_str(&text);
                 output_tokens += 1;
             }
-            SchedEvent::Finish(r) => { finish = r; break; }
-            SchedEvent::Error(e) => { return Err(ServerError::Inference(e)); }
+            SchedEvent::Finish(r) => {
+                finish = r;
+                break;
+            }
+            SchedEvent::Error(e) => {
+                return Err(ServerError::Inference(e));
+            }
         }
     }
 
@@ -141,7 +172,10 @@ async fn non_stream_response(
         model: model.clone(),
         choices: vec![Choice {
             index: 0,
-            message: ResponseMessage { role: "assistant".into(), content },
+            message: ResponseMessage {
+                role: "assistant".into(),
+                content,
+            },
             finish_reason: Some(finish.as_openai().into()),
         }],
         usage: Usage {
@@ -188,7 +222,10 @@ async fn stream_response(
                         model: model.clone(),
                         choices: vec![ChunkChoice {
                             index: 0,
-                            delta: ChunkDelta { role: None, content: Some(text) },
+                            delta: ChunkDelta {
+                                role: None,
+                                content: Some(text),
+                            },
                             finish_reason: None,
                         }],
                     };

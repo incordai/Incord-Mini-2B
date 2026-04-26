@@ -3,7 +3,7 @@ pub mod worker;
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    Token(u32, String),       // token id + decoded string
+    Token(u32, String), // token id + decoded string
     Finish(FinishReason),
     Error(String),
 }

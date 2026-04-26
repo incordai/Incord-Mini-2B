@@ -1794,11 +1794,12 @@ pub mod mock {
     /// Build a tiny config with the same fields as Qor4bConfig::default_4b
     /// but with small dimensions (suitable for unit-test speed).
     pub fn tiny_config() -> Qor4bConfig {
-        let mut layer_types = Vec::with_capacity(4);
-        layer_types.push(LayerType::DeltaNet);
-        layer_types.push(LayerType::DeltaNet);
-        layer_types.push(LayerType::DeltaNet);
-        layer_types.push(LayerType::FullAttn);
+        let layer_types = vec![
+            LayerType::DeltaNet,
+            LayerType::DeltaNet,
+            LayerType::DeltaNet,
+            LayerType::FullAttn,
+        ];
 
         Qor4bConfig {
             // 248_070 covers all real tokenizer IDs (max special token = 248_069).
@@ -1858,26 +1859,26 @@ pub mod mock {
             match lt {
                 LayerType::DeltaNet => {
                     layers.push(HybridLayerWeights::DeltaNet(DeltaNetLayerWeights {
-                        in_proj_qkv:  f16_zeros(hidden, qkv_dim),
-                        in_proj_a:    f16_zeros(hidden, num_v_heads),
-                        in_proj_b:    f16_zeros(hidden, num_v_heads),
-                        in_proj_z:    f16_zeros(hidden, v_dim),
-                        out_proj:     f16_zeros(v_dim, hidden),
+                        in_proj_qkv: f16_zeros(hidden, qkv_dim),
+                        in_proj_a: f16_zeros(hidden, num_v_heads),
+                        in_proj_b: f16_zeros(hidden, num_v_heads),
+                        in_proj_z: f16_zeros(hidden, v_dim),
+                        out_proj: f16_zeros(v_dim, hidden),
                         conv1d_weight: vec![0.0f32; qkv_dim * kernel],
-                        a_log:         vec![0.0f32; num_v_heads],
-                        dt_bias:       vec![0.0f32; num_v_heads],
+                        a_log: vec![0.0f32; num_v_heads],
+                        dt_bias: vec![0.0f32; num_v_heads],
                         attn_norm_weight: vec![f16::from_f32(1.0); config.deltanet_head_dim],
-                        gate_proj:  f16_zeros(hidden, intermediate),
-                        up_proj:    f16_zeros(hidden, intermediate),
-                        down_proj:  f16_zeros(intermediate, hidden),
-                        input_norm:        vec![f16::from_f32(1.0); hidden],
-                        post_attn_norm:    vec![f16::from_f32(1.0); hidden],
+                        gate_proj: f16_zeros(hidden, intermediate),
+                        up_proj: f16_zeros(hidden, intermediate),
+                        down_proj: f16_zeros(intermediate, hidden),
+                        input_norm: vec![f16::from_f32(1.0); hidden],
+                        post_attn_norm: vec![f16::from_f32(1.0); hidden],
                     }));
                 }
                 LayerType::FullAttn => {
                     // q_proj outputs interleaved [Q, gate] per head: 2 x q_dim total
-                    let q_dim  = config.num_attn_heads * config.attn_head_dim;
-                    let kv_dim = config.num_kv_heads   * config.attn_head_dim;
+                    let q_dim = config.num_attn_heads * config.attn_head_dim;
+                    let kv_dim = config.num_kv_heads * config.attn_head_dim;
                     layers.push(HybridLayerWeights::FullAttn(FullAttnLayerWeights {
                         q_proj: f16_zeros(hidden, q_dim * 2),
                         k_proj: f16_zeros(hidden, kv_dim),
@@ -1886,9 +1887,9 @@ pub mod mock {
                         q_norm: vec![f16::from_f32(1.0); config.attn_head_dim],
                         k_norm: vec![f16::from_f32(1.0); config.attn_head_dim],
                         gate_proj: f16_zeros(hidden, intermediate),
-                        up_proj:   f16_zeros(hidden, intermediate),
+                        up_proj: f16_zeros(hidden, intermediate),
                         down_proj: f16_zeros(intermediate, hidden),
-                        input_norm:     vec![f16::from_f32(1.0); hidden],
+                        input_norm: vec![f16::from_f32(1.0); hidden],
                         post_attn_norm: vec![f16::from_f32(1.0); hidden],
                     }));
                 }

@@ -1,8 +1,8 @@
-use std::sync::Arc;
-use crate::gemv::{ModelWeights, prefill, forward_decode};
-use crate::tokenizer::QoraTokenizer;
+use crate::gemv::{ModelWeights, forward_decode, prefill};
 use crate::server::scheduler::queue::{PendingRequest, Queue};
 use crate::server::scheduler::{Event, FinishReason};
+use crate::tokenizer::QoraTokenizer;
+use std::sync::Arc;
 
 pub struct Worker {
     pub id: usize,
@@ -34,7 +34,9 @@ impl Worker {
         // Decode loop
         for _step in 0..session.max_new_tokens {
             // Sample next token
-            let token = session.sampler.sample(&mut logits, &session.generated_tokens);
+            let token = session
+                .sampler
+                .sample(&mut logits, &session.generated_tokens);
             session.generated_tokens.push(token);
 
             // Decode token to text for SSE delta.

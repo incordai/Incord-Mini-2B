@@ -67,7 +67,12 @@ impl TestServer {
             });
         }
 
-        let chat_state = Arc::new(ChatState { queue, weights, tokenizer, usage });
+        let chat_state = Arc::new(ChatState {
+            queue,
+            weights,
+            tokenizer,
+            usage,
+        });
 
         let router = build_router(auth, admin, chat_state);
 
@@ -102,15 +107,12 @@ impl Drop for TestServer {
 
 /// Construct a tokenizer for tests. Looks for tokenizer.json at well-known paths.
 fn build_test_tokenizer() -> Arc<qor4b::tokenizer::QoraTokenizer> {
-    let candidates = [
-        "model/tokenizer.json",
-        "tests/fixtures/tokenizer.json",
-    ];
+    let candidates = ["model/tokenizer.json", "tests/fixtures/tokenizer.json"];
     for path in candidates {
-        if std::path::Path::new(path).exists() {
-            if let Ok(t) = qor4b::tokenizer::QoraTokenizer::from_file(std::path::Path::new(path)) {
-                return Arc::new(t);
-            }
+        if std::path::Path::new(path).exists()
+            && let Ok(t) = qor4b::tokenizer::QoraTokenizer::from_file(std::path::Path::new(path))
+        {
+            return Arc::new(t);
         }
     }
     panic!("integration tests need a tokenizer.json file; expected at one of: {candidates:?}");

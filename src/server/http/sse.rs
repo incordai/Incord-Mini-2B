@@ -7,6 +7,9 @@ pub fn into_sse_response<S>(stream: S) -> Sse<impl Stream<Item = Result<Event, I
 where
     S: Stream<Item = Event> + Send + 'static,
 {
-    Sse::new(stream.map(Ok::<_, Infallible>))
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text(": keepalive"))
+    Sse::new(stream.map(Ok::<_, Infallible>)).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text(": keepalive"),
+    )
 }

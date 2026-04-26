@@ -1,7 +1,7 @@
+use crate::server::session::core::Session;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
-use crate::server::session::session::Session;
 
 pub struct PendingRequest {
     pub session: Session,
@@ -24,10 +24,10 @@ impl Queue {
     }
 
     /// Try to push a request. Returns Err if queue full.
-    pub fn push(&self, req: PendingRequest) -> Result<(), PendingRequest> {
+    pub fn push(&self, req: PendingRequest) -> Result<(), Box<PendingRequest>> {
         let mut q = self.inner.lock().unwrap();
         if q.len() >= self.max_size {
-            return Err(req);
+            return Err(Box::new(req));
         }
         q.push_back(req);
         self.notify.notify_one();

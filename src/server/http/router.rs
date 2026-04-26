@@ -1,9 +1,12 @@
-use axum::{Router, middleware as axum_mw, routing::{delete, get, post}};
-use std::sync::Arc;
-use crate::server::auth::admin::{admin_guard, AdminState};
-use crate::server::auth::middleware::{auth_middleware, AuthState};
+use crate::server::auth::admin::{AdminState, admin_guard};
+use crate::server::auth::middleware::{AuthState, auth_middleware};
 use crate::server::http::handlers::{self, chat::ChatState};
 use crate::server::http::middleware::request_id_middleware;
+use axum::{
+    Router, middleware as axum_mw,
+    routing::{delete, get, post},
+};
+use std::sync::Arc;
 
 pub fn build_router(
     auth: Arc<AuthState>,
@@ -12,12 +15,18 @@ pub fn build_router(
 ) -> Router {
     let admin_routes = Router::new()
         .route("/v1/admin/keys", post(handlers::admin::create_key_handler))
-        .route("/v1/admin/keys/{id}", delete(handlers::admin::revoke_key_handler))
+        .route(
+            "/v1/admin/keys/{id}",
+            delete(handlers::admin::revoke_key_handler),
+        )
         .with_state(auth.clone())
         .layer(axum_mw::from_fn_with_state(admin.clone(), admin_guard));
 
     let chat_routes = Router::new()
-        .route("/v1/chat/completions", post(handlers::chat::chat_completions))
+        .route(
+            "/v1/chat/completions",
+            post(handlers::chat::chat_completions),
+        )
         .route_layer(axum_mw::from_fn_with_state(auth.clone(), auth_middleware))
         .with_state(chat_state);
 
@@ -32,16 +41,21 @@ pub fn build_router(
 #[cfg(all(test, feature = "mock-weights"))]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use tower::ServiceExt;
     use crate::server::auth::ratelimit::RateLimiter;
     use crate::server::db::open;
     use crate::server::scheduler::queue::Queue;
     use crate::server::usage::tracker::UsageTracker;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
     use tempfile::tempdir;
+    use tower::ServiceExt;
 
-    fn test_states() -> (Arc<AuthState>, Arc<AdminState>, Arc<ChatState>, tempfile::TempDir) {
+    fn test_states() -> (
+        Arc<AuthState>,
+        Arc<AdminState>,
+        Arc<ChatState>,
+        tempfile::TempDir,
+    ) {
         let dir = tempdir().unwrap();
         let db = open(&dir.path().join("test.redb")).unwrap();
         let auth = Arc::new(AuthState {
@@ -49,7 +63,9 @@ mod tests {
             server_secret: Arc::new(b"test-secret".to_vec()),
             limiter: RateLimiter::new(),
         });
-        let admin = Arc::new(AdminState { admin_token: "admin-token".to_string() });
+        let admin = Arc::new(AdminState {
+            admin_token: "admin-token".to_string(),
+        });
 
         // Build a tiny ChatState. We don't actually exercise it in router tests —
         // those tests only hit /health, /v1/models, /admin/* and unauth chat (returns 401 before touching state).
@@ -57,7 +73,12 @@ mod tests {
         let weights = Arc::new(crate::gemv::mock::tiny_weights());
         let tokenizer = build_test_tokenizer();
         let usage = UsageTracker::new(db.clone());
-        let chat_state = Arc::new(ChatState { queue, weights, tokenizer, usage });
+        let chat_state = Arc::new(ChatState {
+            queue,
+            weights,
+            tokenizer,
+            usage,
+        });
 
         (auth, admin, chat_state, dir)
     }
@@ -69,15 +90,13 @@ mod tests {
     fn build_test_tokenizer() -> Arc<crate::tokenizer::QoraTokenizer> {
         // For mock-weights builds, look for the tokenizer at a well-known test fixture path
         // OR the model dir alongside model.qor4b.
-        let candidates = [
-            "model/tokenizer.json",
-            "tests/fixtures/tokenizer.json",
-        ];
+        let candidates = ["model/tokenizer.json", "tests/fixtures/tokenizer.json"];
         for path in candidates {
-            if std::path::Path::new(path).exists() {
-                if let Ok(t) = crate::tokenizer::QoraTokenizer::from_file(std::path::Path::new(path)) {
-                    return Arc::new(t);
-                }
+            if std::path::Path::new(path).exists()
+                && let Ok(t) =
+                    crate::tokenizer::QoraTokenizer::from_file(std::path::Path::new(path))
+            {
+                return Arc::new(t);
             }
         }
         panic!("router tests need a tokenizer.json file; expected at one of: {candidates:?}");
@@ -88,7 +107,12 @@ mod tests {
         let (auth, admin, chat, _dir) = test_states();
         let app = build_router(auth, admin, chat);
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -99,7 +123,12 @@ mod tests {
         let (auth, admin, chat, _dir) = test_states();
         let app = build_router(auth, admin, chat);
         let response = app
-            .oneshot(Request::builder().uri("/v1/models").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -121,7 +150,12 @@ mod tests {
         let (auth, admin, chat, _dir) = test_states();
         let app = build_router(auth, admin, chat);
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert!(response.headers().contains_key("x-request-id"));

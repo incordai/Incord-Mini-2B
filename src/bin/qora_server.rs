@@ -39,11 +39,20 @@ async fn main() -> anyhow::Result<()> {
     });
     let admin_state = Arc::new(qor4b::server::auth::admin::AdminState { admin_token });
 
-    let weights = Arc::new(qor4b::save::load_model(&config.model.path)
-        .with_context(|| format!("loading model from {}", config.model.path.display()))?);
-    let tokenizer = Arc::new(qor4b::tokenizer::QoraTokenizer::from_file(&config.model.tokenizer)
-        .map_err(|e| anyhow::anyhow!("{}", e))
-        .with_context(|| format!("loading tokenizer from {}", config.model.tokenizer.display()))?);
+    let weights = Arc::new(
+        qor4b::save::load_model(&config.model.path)
+            .with_context(|| format!("loading model from {}", config.model.path.display()))?,
+    );
+    let tokenizer = Arc::new(
+        qor4b::tokenizer::QoraTokenizer::from_file(&config.model.tokenizer)
+            .map_err(|e| anyhow::anyhow!("{}", e))
+            .with_context(|| {
+                format!(
+                    "loading tokenizer from {}",
+                    config.model.tokenizer.display()
+                )
+            })?,
+    );
 
     let queue = qor4b::server::scheduler::queue::Queue::new(config.scheduler.max_queue);
 
@@ -58,7 +67,8 @@ async fn main() -> anyhow::Result<()> {
             weights: weights.clone(),
             tokenizer: tokenizer.clone(),
             queue: queue.clone(),
-        }.spawn();
+        }
+        .spawn();
     }
     tracing::info!(num_workers, "spawned worker threads");
 
