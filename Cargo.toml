@@ -43,6 +43,16 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# NEW M2 auth/db dependencies (pure Rust — no C bindings)
+redb = "2"
+bincode = { version = "2", features = ["serde"] }
+argon2 = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+rand_core = { version = "0.6", features = ["std"] }
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+
 [dependencies.cortex]
 git = "https://github.com/qora-protocol/cortex"
 features = ["ndarray"]
