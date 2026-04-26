@@ -174,8 +174,8 @@ impl DeltaNetState {
 
 /// KV cache entry for a full attention layer.
 pub struct KvCacheEntry {
-    pub k: Vec<f32>, // [seq_len, kv_heads, head_dim]
-    pub v: Vec<f32>,
+    pub k: Vec<f16>, // [seq_len, kv_heads, head_dim] flat — stored as f16 (50% vs f32)
+    pub v: Vec<f16>,
     pub seq_len: usize,
 }
 
@@ -1119,6 +1119,13 @@ fn forward_deltanet_decode(
 // Full attention single-step forward
 // ============================================================
 
+/// Dot product between an f16 KV-cache slice and an f32 query vector.
+/// Dequantizes each f16 element on the fly; no extra allocation.
+#[inline]
+fn dot_f16_f32(k: &[f16], q: &[f32]) -> f32 {
+    k.iter().zip(q).map(|(&kv, &qv)| kv.to_f32() * qv).sum()
+}
+
 /// Process one token through a full attention (GQA) layer.
 /// q_proj outputs [2 * q_dim] when attn_output_gate=true: first half Q, second half gate.
 fn forward_attn_decode(
@@ -1177,9 +1184,9 @@ fn forward_attn_decode(
         offset,
     );
 
-    // Append to KV cache
-    kv.k.extend_from_slice(&k_new);
-    kv.v.extend_from_slice(&v_new);
+    // Append to KV cache (quantize f32 → f16 on write)
+    kv.k.extend(k_new.iter().map(|&v| f16::from_f32(v)));
+    kv.v.extend(v_new.iter().map(|&v| f16::from_f32(v)));
     kv.seq_len = offset + 1;
     let kv_seq_len = kv.seq_len;
 
@@ -1197,18 +1204,14 @@ fn forward_attn_decode(
                 let mut scores = vec![0.0f32; kv_seq_len];
                 for (s, score) in scores.iter_mut().enumerate().take(kv_seq_len) {
                     let k_off = s * kv_stride + kv_h * head_dim;
-                    let mut dot = 0.0f32;
-                    for (d, &qv) in q_vec.iter().enumerate().take(head_dim) {
-                        dot += qv * kv.k[k_off + d];
-                    }
-                    *score = dot * scale;
+                    *score = dot_f16_f32(&kv.k[k_off..k_off + head_dim], q_vec) * scale;
                 }
                 softmax_raw(&mut scores);
                 let mut head_out = vec![0.0f32; head_dim];
                 for (s, &sc) in scores.iter().enumerate().take(kv_seq_len) {
                     let v_off = s * kv_stride + kv_h * head_dim;
                     for (d, ho) in head_out.iter_mut().enumerate().take(head_dim) {
-                        *ho += sc * kv.v[v_off + d];
+                        *ho += sc * kv.v[v_off + d].to_f32();
                     }
                 }
                 head_out
@@ -1224,18 +1227,14 @@ fn forward_attn_decode(
             let mut scores = vec![0.0f32; kv_seq_len];
             for (s, score) in scores.iter_mut().enumerate().take(kv_seq_len) {
                 let k_off = s * kv_stride + kv_h * head_dim;
-                let mut dot = 0.0f32;
-                for (d, &qv) in q_vec.iter().enumerate().take(head_dim) {
-                    dot += qv * kv.k[k_off + d];
-                }
-                *score = dot * scale;
+                *score = dot_f16_f32(&kv.k[k_off..k_off + head_dim], q_vec) * scale;
             }
             softmax_raw(&mut scores);
             let out_off = h * head_dim;
             for (s, &sc) in scores.iter().enumerate().take(kv_seq_len) {
                 let v_off = s * kv_stride + kv_h * head_dim;
                 for d in 0..head_dim {
-                    attn_out[out_off + d] += sc * kv.v[v_off + d];
+                    attn_out[out_off + d] += sc * kv.v[v_off + d].to_f32();
                 }
             }
         }
@@ -1693,9 +1692,9 @@ fn prefill_attn_layer(
         );
     }
 
-    // Store in KV cache
-    kv.k = k_all;
-    kv.v = v_all;
+    // Store in KV cache (quantize f32 → f16 on write)
+    kv.k = k_all.iter().map(|&v| f16::from_f32(v)).collect();
+    kv.v = v_all.iter().map(|&v| f16::from_f32(v)).collect();
     kv.seq_len = seq_len;
 
     // Causal attention — parallel across heads
@@ -1714,18 +1713,14 @@ fn prefill_attn_layer(
                 let mut scores = vec![0.0f32; attend_len];
                 for (t2, score) in scores.iter_mut().enumerate().take(attend_len) {
                     let k_off = t2 * kv_stride + kv_h * head_dim;
-                    let mut dot = 0.0f32;
-                    for (d, &qv) in q_vec.iter().enumerate().take(head_dim) {
-                        dot += qv * kv.k[k_off + d];
-                    }
-                    *score = dot * scale;
+                    *score = dot_f16_f32(&kv.k[k_off..k_off + head_dim], q_vec) * scale;
                 }
                 softmax_raw(&mut scores);
                 let out_base = t1 * head_dim;
                 for (t2, &sc) in scores.iter().enumerate().take(attend_len) {
                     let v_off = t2 * kv_stride + kv_h * head_dim;
                     for d in 0..head_dim {
-                        head_out[out_base + d] += sc * kv.v[v_off + d];
+                        head_out[out_base + d] += sc * kv.v[v_off + d].to_f32();
                     }
                 }
             }

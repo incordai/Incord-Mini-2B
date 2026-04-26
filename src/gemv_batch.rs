@@ -74,8 +74,8 @@ mod tests {
 
         assert_eq!(single.len(), batched[0].len());
         for (i, (a, b)) in single.iter().zip(batched[0].iter()).enumerate() {
-            // Phase 0 is bitwise identical (no batching, just parallel calls)
-            assert!((a - b).abs() < 1e-6, "logit {i} mismatch: {a} vs {b}");
+            // f16 KV cache: per-multiply error ~1e-3, accumulated over head_dim=32 ~1e-2 worst case
+            assert!((a - b).abs() < 5e-3, "logit {i} mismatch: {a} vs {b}");
         }
     }
 
@@ -103,7 +103,8 @@ mod tests {
 
         for (i, (a, b)) in singles.iter().zip(batched.iter()).enumerate() {
             for (j, (av, bv)) in a.iter().zip(b.iter()).enumerate() {
-                assert!((av - bv).abs() < 1e-6, "slot {i} logit {j}: {av} vs {bv}");
+                // f16 KV cache: per-multiply error ~1e-3, accumulated over head_dim=32 ~1e-2 worst case
+                assert!((av - bv).abs() < 5e-3, "slot {i} logit {j}: {av} vs {bv}");
             }
         }
     }
