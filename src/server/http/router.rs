@@ -1,10 +1,12 @@
-use axum::{Router, routing::get};
+use axum::{Router, middleware as axum_middleware, routing::get};
 use crate::server::http::handlers;
+use crate::server::http::middleware::request_id_middleware;
 
 pub fn build_router() -> Router {
     Router::new()
         .route("/health", get(handlers::health::health))
         .route("/v1/models", get(handlers::models::list_models))
+        .layer(axum_middleware::from_fn(request_id_middleware))
 }
 
 #[cfg(test)]
@@ -45,5 +47,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn response_carries_request_id_header() {
+        let app = build_router();
+        let response = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(response.headers().contains_key("x-request-id"));
     }
 }
