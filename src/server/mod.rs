@@ -6,4 +6,5 @@ pub mod db;
 pub mod error;
 pub mod http;
 pub mod openai;
+pub mod session;
 pub mod usage;
