@@ -11,3 +11,5 @@ pub mod system;
 pub mod gpu_loader;
 #[cfg(any(feature = "gpu", feature = "gpu-metal"))]
 pub mod gpu_inference;
+
+pub mod server;
