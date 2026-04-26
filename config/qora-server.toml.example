@@ -1,0 +1,27 @@
+[server]
+bind = "0.0.0.0:443"
+tls_cert = "/opt/qora/certs/fullchain.pem"
+tls_key = "/opt/qora/certs/privkey.pem"
+
+[model]
+path = "/opt/qora/model.qor4b"
+tokenizer = "/opt/qora/tokenizer.json"
+
+[scheduler]
+slot_count = 64
+max_queue = 1000
+max_context = 8192
+request_timeout_secs = 90
+
+[auth]
+admin_token_env = "QORA_ADMIN_TOKEN"
+db_path = "/opt/qora/auth.db"
+
+[limits.default]
+rpm = 60
+tpm = 60000
+
+[observability]
+prometheus_bind = "127.0.0.1:9090"
+log_level = "info"
+log_format = "json"
