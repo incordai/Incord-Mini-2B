@@ -1,8 +1,13 @@
+#![cfg(feature = "mock-weights")]
+
 use qor4b::server::auth::admin::AdminState;
 use qor4b::server::auth::middleware::AuthState;
 use qor4b::server::auth::ratelimit::RateLimiter;
 use qor4b::server::db::open;
+use qor4b::server::http::handlers::chat::ChatState;
 use qor4b::server::http::router::build_router;
+use qor4b::server::scheduler::queue::Queue;
+use qor4b::server::usage::tracker::UsageTracker;
 use redb::Database;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -32,7 +37,14 @@ impl TestServer {
         let admin = Arc::new(AdminState {
             admin_token: admin_token.clone(),
         });
-        let router = build_router(auth, admin);
+
+        let queue = Queue::new(10);
+        let weights = Arc::new(qor4b::gemv::mock::tiny_weights());
+        let tokenizer = build_test_tokenizer();
+        let usage = UsageTracker::new(db.clone());
+        let chat_state = Arc::new(ChatState { queue, weights, tokenizer, usage });
+
+        let router = build_router(auth, admin, chat_state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -61,4 +73,20 @@ impl Drop for TestServer {
     fn drop(&mut self) {
         self.handle.abort();
     }
+}
+
+/// Construct a tokenizer for tests. Looks for tokenizer.json at well-known paths.
+fn build_test_tokenizer() -> Arc<qor4b::tokenizer::QoraTokenizer> {
+    let candidates = [
+        "model/tokenizer.json",
+        "tests/fixtures/tokenizer.json",
+    ];
+    for path in candidates {
+        if std::path::Path::new(path).exists() {
+            if let Ok(t) = qor4b::tokenizer::QoraTokenizer::from_file(std::path::Path::new(path)) {
+                return Arc::new(t);
+            }
+        }
+    }
+    panic!("integration tests need a tokenizer.json file; expected at one of: {candidates:?}");
 }

@@ -33,13 +33,29 @@ async fn main() -> anyhow::Result<()> {
         .into_bytes();
 
     let auth = Arc::new(qor4b::server::auth::middleware::AuthState {
-        db,
+        db: db.clone(),
         server_secret: Arc::new(server_secret),
         limiter: qor4b::server::auth::ratelimit::RateLimiter::new(),
     });
     let admin_state = Arc::new(qor4b::server::auth::admin::AdminState { admin_token });
 
-    let router = build_router(auth, admin_state);
+    let weights = Arc::new(qor4b::save::load_model(&config.model.path)
+        .with_context(|| format!("loading model from {}", config.model.path.display()))?);
+    let tokenizer = Arc::new(qor4b::tokenizer::QoraTokenizer::from_file(&config.model.tokenizer)
+        .map_err(|e| anyhow::anyhow!("{}", e))
+        .with_context(|| format!("loading tokenizer from {}", config.model.tokenizer.display()))?);
+
+    let queue = qor4b::server::scheduler::queue::Queue::new(config.scheduler.max_queue);
+    let usage = qor4b::server::usage::tracker::UsageTracker::new(db.clone());
+
+    let chat_state = Arc::new(qor4b::server::http::handlers::chat::ChatState {
+        queue,
+        weights,
+        tokenizer,
+        usage,
+    });
+
+    let router = build_router(auth, admin_state, chat_state);
 
     match (&config.server.tls_cert, &config.server.tls_key) {
         (Some(cert), Some(key)) => {

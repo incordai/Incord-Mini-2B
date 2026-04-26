@@ -1,3 +1,5 @@
+#![cfg(feature = "mock-weights")]
+
 mod common;
 use common::TestServer;
 use serde_json::json;
