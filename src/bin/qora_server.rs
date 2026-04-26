@@ -8,6 +8,7 @@ use qor4b::server::{
     },
 };
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -20,7 +21,25 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("loading config from {config_path}"))?;
     tracing::info!(?config_path, "config loaded");
 
-    let router = build_router();
+    let db = qor4b::server::db::open(&config.auth.db_path)?;
+    let admin_token = std::env::var(&config.auth.admin_token_env).with_context(|| {
+        format!(
+            "admin token env var {} not set",
+            config.auth.admin_token_env
+        )
+    })?;
+    let server_secret = std::env::var("QORA_SERVER_SECRET")
+        .context("QORA_SERVER_SECRET env var must be set (used for HMAC key index)")?
+        .into_bytes();
+
+    let auth = Arc::new(qor4b::server::auth::middleware::AuthState {
+        db,
+        server_secret: Arc::new(server_secret),
+        limiter: qor4b::server::auth::ratelimit::RateLimiter::new(),
+    });
+    let admin_state = Arc::new(qor4b::server::auth::admin::AdminState { admin_token });
+
+    let router = build_router(auth, admin_state);
 
     match (&config.server.tls_cert, &config.server.tls_key) {
         (Some(cert), Some(key)) => {

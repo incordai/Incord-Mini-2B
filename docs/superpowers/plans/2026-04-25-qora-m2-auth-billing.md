@@ -1,121 +1,134 @@
-# M2 — Auth, API Keys, Rate Limiting, Usage Tracking
+# M2 — Auth, API Keys, Rate Limiting, Usage Tracking (redb)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task.
 
-**Goal:** Add SQLite-backed API keys with Argon2 hashing, sliding-window rate limiting per key, admin endpoints to create/revoke keys, and usage tracking for billing reconciliation. End state: invalid keys → 401, exceeded rate → 429, every successful request logged to DB with token counts.
+**Goal:** Add **redb-backed** API keys with HMAC index + Argon2 verification, sliding-window rate limiting per key, admin endpoints to create/revoke keys, and usage tracking for billing reconciliation. End state: invalid keys → 401, exceeded rate → 429, every successful request logged to redb with token counts.
+
+**Why redb (not SQLite/sqlx):** QORA's core promise is "pure Rust, single binary, no external runtime/C deps." sqlx+SQLite pulls libsqlite3-sys (a C library) which breaks that promise. **redb** is a pure-Rust embedded ACID key-value DB used in production by Iroh and others. Our access pattern (lookup by hash, append usage rows, count/sum) doesn't need SQL — typed tables + iteration are sufficient at v1 scale.
 
 **Prerequisites:** M1 merged. Branch `feature/qora-server-m2-auth` from `feature/qora-server`.
 
-**Architecture:** sqlx 0.8 with SQLite, Argon2 password hashing for keys, per-key sliding window rate limiter using in-memory state with periodic DB writes for usage. Auth implemented as axum middleware that runs before chat handlers.
+**Architecture:**
+- **redb 2** as embedded DB (single file at `auth.redb`).
+- **bincode 2** for serializing structs into byte values.
+- **HMAC-SHA256** with a server secret for fast O(1) key lookup index.
+- **Argon2** as defense-in-depth verifier (only runs on HMAC-matched record).
+- **rate limiter** unchanged: in-memory sliding window, separate from redb.
+- **auth middleware** runs before chat handlers, attaches `ApiKey` to request extensions.
+- **server secret** loaded from env at startup (`QORA_SERVER_SECRET`); never persisted.
 
-**Acceptance test:** `cargo test --test auth_flow` — admin creates key → valid key passes → invalid key 401 → over-limit 429 → usage row written.
+**Acceptance test:** `cargo test --test auth_flow` — admin creates key → valid key passes → invalid key 401 → revoked key 401 → admin endpoint guarded.
 
 ---
 
-## Task 1: Add auth/db dependencies
+## Task 1: Add auth/db dependencies (pure Rust)
 
 **Files:**
 - Modify: `Cargo.toml`
 
 - [ ] **Step 1: Add deps**
 
+Append to `[dependencies]` in `Cargo.toml`:
+
 ```toml
-# In [dependencies], add:
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate", "chrono", "uuid"] }
+redb = "2"
+bincode = { version = "2", features = ["serde"] }
 argon2 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 rand_core = { version = "0.6", features = ["std"] }
 sha2 = "0.10"
 hmac = "0.12"
+hex = "0.4"
 ```
 
-- [ ] **Step 2: Build, expect success**
+All of the above are pure-Rust crates (verify: none has a `*-sys` transitive dep). No SQLite, no native-tls.
+
+- [ ] **Step 2: Build**
 
 ```bash
-cargo check --all-targets
+cargo check --lib
+cargo check --bin qor4b
+cargo check --bin qora-server
 ```
+
+All three must succeed.
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock
-git commit -m "feat(auth): add sqlx, argon2, chrono dependencies"
+git commit -m "feat(auth): add redb + crypto deps (pure Rust, no C bindings)
+
+- redb 2: pure-Rust embedded ACID DB
+- bincode 2: pure-Rust struct serialization
+- argon2 0.5: defense-in-depth verification
+- hmac, sha2: HMAC-SHA256 lookup index
+- hex: raw key encoding
+- rand_core: secure random key generation
+- chrono: timestamp serialization
+
+Replaces planned sqlx+SQLite (libsqlite3-sys is C — breaks pure-Rust ethos)."
 ```
 
 ---
 
-## Task 2: SQLite schema + migrations
+## Task 2: redb tables + Database wrapper
 
 **Files:**
-- Create: `src/server/db/migrations/0001_initial.sql`
 - Create: `src/server/db/mod.rs`
 - Modify: `src/server/mod.rs`
 
-- [ ] **Step 1: Write schema**
-
-Create `src/server/db/migrations/0001_initial.sql`:
-
-```sql
-CREATE TABLE keys (
-    id TEXT PRIMARY KEY,                -- uuid
-    key_hash TEXT NOT NULL UNIQUE,      -- argon2 hash of the raw key
-    user_id TEXT NOT NULL,
-    name TEXT NOT NULL,                 -- human-readable label
-    created_at INTEGER NOT NULL,        -- unix seconds
-    last_used_at INTEGER,               -- unix seconds, null until first use
-    is_active INTEGER NOT NULL DEFAULT 1,
-    rpm_limit INTEGER NOT NULL,
-    tpm_limit INTEGER NOT NULL
-);
-
-CREATE INDEX idx_keys_active ON keys(is_active);
-CREATE INDEX idx_keys_user ON keys(user_id);
-
-CREATE TABLE usage (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    request_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    key_id TEXT NOT NULL,
-    model TEXT NOT NULL,
-    input_tokens INTEGER NOT NULL,
-    output_tokens INTEGER NOT NULL,
-    started_at INTEGER NOT NULL,
-    duration_ms INTEGER NOT NULL,
-    status TEXT NOT NULL,               -- "success", "error", "timeout", "cancelled"
-    FOREIGN KEY (key_id) REFERENCES keys(id)
-);
-
-CREATE INDEX idx_usage_user_started ON usage(user_id, started_at);
-CREATE INDEX idx_usage_started ON usage(started_at);
-```
-
-- [ ] **Step 2: Create db module**
+- [ ] **Step 1: Implement db module**
 
 Create `src/server/db/mod.rs`:
 
 ```rust
+//! redb-backed persistence: API keys + usage records.
+//!
+//! Tables:
+//!   keys_by_id: key_id (UUID str)        -> bincode(StoredKey)
+//!   id_by_hmac: HMAC-SHA256(secret, raw) -> key_id
+//!   usage:      auto-inc u64             -> bincode(StoredUsage)
+//!
+//! Server secret comes from env at startup; never persisted.
+
 use std::path::Path;
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions, SqliteConnectOptions};
-use sqlx::ConnectOptions;
-use std::str::FromStr;
+use std::sync::Arc;
+use anyhow::Context;
+use redb::{Database, ReadableTable, TableDefinition};
 
-pub static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./src/server/db/migrations");
+pub const KEYS_BY_ID: TableDefinition<&str, &[u8]>     = TableDefinition::new("keys_by_id");
+pub const ID_BY_HMAC: TableDefinition<&[u8], &str>     = TableDefinition::new("id_by_hmac");
+pub const USAGE:      TableDefinition<u64, &[u8]>      = TableDefinition::new("usage");
 
-pub async fn open_pool(db_path: &Path) -> anyhow::Result<SqlitePool> {
-    let url = format!("sqlite://{}?mode=rwc", db_path.display());
-    let options = SqliteConnectOptions::from_str(&url)?
-        .create_if_missing(true)
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
-        .disable_statement_logging();
+/// Opens (or creates) the database file. Initializes the table set on first run.
+pub fn open(path: &Path) -> anyhow::Result<Arc<Database>> {
+    let db = Database::create(path).with_context(|| format!("open redb at {}", path.display()))?;
 
-    let pool = SqlitePoolOptions::new()
-        .max_connections(8)
-        .connect_with(options)
-        .await?;
+    // Touch every table once so they exist before first read attempt.
+    let write = db.begin_write()?;
+    {
+        let _ = write.open_table(KEYS_BY_ID)?;
+        let _ = write.open_table(ID_BY_HMAC)?;
+        let _ = write.open_table(USAGE)?;
+    }
+    write.commit()?;
+    Ok(Arc::new(db))
+}
 
-    MIGRATIONS.run(&pool).await?;
-    Ok(pool)
+/// Allocate the next monotonically-increasing usage id.
+/// Implementation: read max key from USAGE table + 1.
+/// (For a write-heavy production deployment, switch to a dedicated counter table.)
+pub fn next_usage_id(db: &Database) -> anyhow::Result<u64> {
+    let read = db.begin_read()?;
+    let table = read.open_table(USAGE)?;
+    let last = table
+        .iter()?
+        .next_back()
+        .transpose()?
+        .map(|(k, _)| k.value())
+        .unwrap_or(0);
+    Ok(last + 1)
 }
 
 #[cfg(test)]
@@ -123,77 +136,121 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[tokio::test]
-    async fn migrations_run_on_fresh_db() {
+    #[test]
+    fn open_creates_fresh_db() {
         let dir = tempdir().unwrap();
-        let db = dir.path().join("test.db");
-        let pool = open_pool(&db).await.unwrap();
-        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM keys")
-            .fetch_one(&pool).await.unwrap();
-        assert_eq!(row.0, 0);
+        let _db = open(&dir.path().join("test.redb")).unwrap();
     }
 
-    #[tokio::test]
-    async fn migrations_idempotent() {
+    #[test]
+    fn open_is_idempotent() {
         let dir = tempdir().unwrap();
-        let db = dir.path().join("test.db");
-        let _ = open_pool(&db).await.unwrap();
-        let _ = open_pool(&db).await.unwrap();
+        let path = dir.path().join("test.redb");
+        let db1 = open(&path).unwrap();
+        drop(db1);
+        let _db2 = open(&path).unwrap();
+    }
+
+    #[test]
+    fn next_usage_id_starts_at_one() {
+        let dir = tempdir().unwrap();
+        let db = open(&dir.path().join("test.redb")).unwrap();
+        assert_eq!(next_usage_id(&db).unwrap(), 1);
     }
 }
 ```
 
-- [ ] **Step 3: Wire in mod.rs**
+- [ ] **Step 2: Wire**
 
 ```rust
-// src/server/mod.rs add:
+// src/server/mod.rs
+pub mod config;
 pub mod db;
+pub mod error;
+pub mod http;
+pub mod openai;
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 3: Tests**
 
 ```bash
 cargo test --lib server::db
 ```
 
-Expected: 2 tests pass.
+Expected: 3 tests pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/server/db/ src/server/mod.rs
-git commit -m "feat(db): SQLite schema + migrations for keys and usage"
+git commit -m "feat(db): redb-backed persistence with KEYS_BY_ID, ID_BY_HMAC, USAGE tables"
 ```
 
 ---
 
-## Task 3: API key model + Argon2 hashing
+## Task 3: API key model with HMAC index + Argon2 verification
 
 **Files:**
 - Create: `src/server/auth/mod.rs`
 - Create: `src/server/auth/keys.rs`
 - Modify: `src/server/mod.rs`
 
-- [ ] **Step 1: Auth module**
+- [ ] **Step 1: Wire**
 
 ```rust
 // src/server/auth/mod.rs
 pub mod keys;
 ```
 
-- [ ] **Step 2: Implement keys with TDD**
+```rust
+// src/server/mod.rs add:
+pub mod auth;
+```
+
+- [ ] **Step 2: Implement keys**
 
 Create `src/server/auth/keys.rs`:
 
 ```rust
+//! API key model. Lookup uses HMAC-SHA256 (O(1) index); Argon2 provides
+//! defense-in-depth verification on the matched record.
+
+use std::sync::Arc;
+use anyhow::Context;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::password_hash::{rand_core::OsRng, SaltString};
 use chrono::Utc;
-use sqlx::SqlitePool;
+use hmac::{Hmac, Mac};
+use redb::{Database, ReadableTable};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use uuid::Uuid;
 
-pub const KEY_PREFIX: &str = "qora_";
+use crate::server::db::{KEYS_BY_ID, ID_BY_HMAC};
 
+pub const KEY_PREFIX: &str = "qora_";
+pub const HMAC_LEN: usize = 32;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Persisted API key record (bincoded into the value bytes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredKey {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    /// HMAC-SHA256(server_secret, raw_key). Used as primary lookup index.
+    pub hmac: Vec<u8>,
+    /// Argon2 hash of the raw key. Verified after HMAC index hit.
+    pub argon2_hash: String,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+    pub is_active: bool,
+    pub rpm_limit: u32,
+    pub tpm_limit: u32,
+}
+
+/// Public API key (without the secret hash material).
 #[derive(Debug, Clone)]
 pub struct ApiKey {
     pub id: String,
@@ -206,21 +263,42 @@ pub struct ApiKey {
     pub tpm_limit: u32,
 }
 
+impl From<&StoredKey> for ApiKey {
+    fn from(s: &StoredKey) -> Self {
+        Self {
+            id: s.id.clone(),
+            user_id: s.user_id.clone(),
+            name: s.name.clone(),
+            created_at: s.created_at,
+            last_used_at: s.last_used_at,
+            is_active: s.is_active,
+            rpm_limit: s.rpm_limit,
+            tpm_limit: s.tpm_limit,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct NewKey {
-    pub raw_key: String,    // returned to admin once, never stored
+    pub raw_key: String,    // shown to admin once, never stored
     pub key: ApiKey,
 }
 
+/// Crypto helpers.
 pub fn generate_raw_key() -> String {
     use rand_core::RngCore;
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
-    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("{KEY_PREFIX}{hex}")
+    format!("{KEY_PREFIX}{}", hex::encode(bytes))
 }
 
-pub fn hash_key(raw: &str) -> anyhow::Result<String> {
+pub fn hmac_index(server_secret: &[u8], raw: &str) -> Vec<u8> {
+    let mut mac = HmacSha256::new_from_slice(server_secret).expect("HMAC accepts any key length");
+    mac.update(raw.as_bytes());
+    mac.finalize().into_bytes().to_vec()
+}
+
+pub fn hash_key_argon2(raw: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let hash = Argon2::default()
         .hash_password(raw.as_bytes(), &salt)
@@ -229,161 +307,243 @@ pub fn hash_key(raw: &str) -> anyhow::Result<String> {
     Ok(hash)
 }
 
-pub fn verify_key(raw: &str, hash: &str) -> bool {
-    let parsed = match PasswordHash::new(hash) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    Argon2::default().verify_password(raw.as_bytes(), &parsed).is_ok()
+pub fn verify_argon2(raw: &str, hash: &str) -> bool {
+    PasswordHash::new(hash)
+        .ok()
+        .map(|p| Argon2::default().verify_password(raw.as_bytes(), &p).is_ok())
+        .unwrap_or(false)
 }
 
-pub async fn create_key(
-    pool: &SqlitePool,
+const BINCODE_CFG: bincode::config::Configuration = bincode::config::standard();
+
+/// Create a new API key. Admin-only entry point.
+pub fn create_key(
+    db: &Arc<Database>,
+    server_secret: &[u8],
     user_id: &str,
     name: &str,
     rpm_limit: u32,
     tpm_limit: u32,
 ) -> anyhow::Result<NewKey> {
     let raw = generate_raw_key();
-    let hash = hash_key(&raw)?;
+    let hmac = hmac_index(server_secret, &raw);
+    let argon2_hash = hash_key_argon2(&raw)?;
     let id = Uuid::new_v4().to_string();
-    let created_at = Utc::now().timestamp();
+    let now = Utc::now().timestamp();
 
-    sqlx::query(
-        "INSERT INTO keys (id, key_hash, user_id, name, created_at, is_active, rpm_limit, tpm_limit)
-         VALUES (?, ?, ?, ?, ?, 1, ?, ?)"
-    )
-    .bind(&id)
-    .bind(&hash)
-    .bind(user_id)
-    .bind(name)
-    .bind(created_at)
-    .bind(rpm_limit as i64)
-    .bind(tpm_limit as i64)
-    .execute(pool).await?;
+    let stored = StoredKey {
+        id: id.clone(),
+        user_id: user_id.to_string(),
+        name: name.to_string(),
+        hmac: hmac.clone(),
+        argon2_hash,
+        created_at: now,
+        last_used_at: None,
+        is_active: true,
+        rpm_limit,
+        tpm_limit,
+    };
 
-    Ok(NewKey {
-        raw_key: raw,
-        key: ApiKey {
-            id, user_id: user_id.to_string(), name: name.to_string(),
-            created_at, last_used_at: None, is_active: true,
-            rpm_limit, tpm_limit,
-        },
-    })
+    let value = bincode::serde::encode_to_vec(&stored, BINCODE_CFG)
+        .context("bincode StoredKey")?;
+
+    let write = db.begin_write()?;
+    {
+        let mut keys = write.open_table(KEYS_BY_ID)?;
+        keys.insert(id.as_str(), value.as_slice())?;
+        let mut hmac_idx = write.open_table(ID_BY_HMAC)?;
+        hmac_idx.insert(hmac.as_slice(), id.as_str())?;
+    }
+    write.commit()?;
+
+    Ok(NewKey { raw_key: raw, key: ApiKey::from(&stored) })
 }
 
-pub async fn lookup_by_raw(pool: &SqlitePool, raw: &str) -> anyhow::Result<Option<ApiKey>> {
+/// Look up a presented raw key. Returns Some(ApiKey) if active and verified.
+/// O(1) index lookup followed by Argon2 verify on the candidate.
+pub fn lookup_by_raw(
+    db: &Arc<Database>,
+    server_secret: &[u8],
+    raw: &str,
+) -> anyhow::Result<Option<ApiKey>> {
     if !raw.starts_with(KEY_PREFIX) {
         return Ok(None);
     }
-    // Fetch all active keys and verify against each. For higher key counts,
-    // partition by an HMAC prefix; v1 doesn't need that complexity.
-    let rows: Vec<(String, String, String, String, i64, Option<i64>, i64, i64, i64)> = sqlx::query_as(
-        "SELECT id, key_hash, user_id, name, created_at, last_used_at, is_active, rpm_limit, tpm_limit
-         FROM keys WHERE is_active = 1"
-    ).fetch_all(pool).await?;
+    let hmac = hmac_index(server_secret, raw);
 
-    for (id, hash, user_id, name, created_at, last_used_at, is_active, rpm, tpm) in rows {
-        if verify_key(raw, &hash) {
-            // Touch last_used_at
-            let now = Utc::now().timestamp();
-            let _ = sqlx::query("UPDATE keys SET last_used_at = ? WHERE id = ?")
-                .bind(now).bind(&id).execute(pool).await;
-            return Ok(Some(ApiKey {
-                id, user_id, name, created_at,
-                last_used_at: Some(now),
-                is_active: is_active != 0,
-                rpm_limit: rpm as u32,
-                tpm_limit: tpm as u32,
-            }));
+    // Phase 1: O(1) HMAC -> id lookup
+    let id = {
+        let read = db.begin_read()?;
+        let idx = read.open_table(ID_BY_HMAC)?;
+        match idx.get(hmac.as_slice())? {
+            Some(v) => v.value().to_string(),
+            None => return Ok(None),
+        }
+    };
+
+    // Phase 2: fetch StoredKey
+    let stored: StoredKey = {
+        let read = db.begin_read()?;
+        let keys = read.open_table(KEYS_BY_ID)?;
+        let bytes = match keys.get(id.as_str())? {
+            Some(v) => v.value().to_vec(),
+            None => return Ok(None),
+        };
+        let (decoded, _): (StoredKey, usize) =
+            bincode::serde::decode_from_slice(&bytes, BINCODE_CFG)
+                .context("bincode StoredKey decode")?;
+        decoded
+    };
+
+    if !stored.is_active {
+        return Ok(None);
+    }
+
+    // Phase 3: defense-in-depth Argon2 verify
+    if !verify_argon2(raw, &stored.argon2_hash) {
+        return Ok(None);
+    }
+
+    // Phase 4: touch last_used_at (best-effort write)
+    let now = Utc::now().timestamp();
+    let mut updated = stored.clone();
+    updated.last_used_at = Some(now);
+    if let Ok(value) = bincode::serde::encode_to_vec(&updated, BINCODE_CFG) {
+        if let Ok(write) = db.begin_write() {
+            let _ = (|| -> anyhow::Result<()> {
+                {
+                    let mut keys = write.open_table(KEYS_BY_ID)?;
+                    keys.insert(stored.id.as_str(), value.as_slice())?;
+                }
+                write.commit()?;
+                Ok(())
+            })();
         }
     }
-    Ok(None)
+
+    Ok(Some(ApiKey::from(&updated)))
 }
 
-pub async fn revoke_key(pool: &SqlitePool, id: &str) -> anyhow::Result<bool> {
-    let res = sqlx::query("UPDATE keys SET is_active = 0 WHERE id = ?")
-        .bind(id).execute(pool).await?;
-    Ok(res.rows_affected() > 0)
+/// Mark a key inactive. Returns true if the key existed.
+pub fn revoke_key(db: &Arc<Database>, id: &str) -> anyhow::Result<bool> {
+    let write = db.begin_write()?;
+    let existed = {
+        let mut keys = write.open_table(KEYS_BY_ID)?;
+        let current = keys.get(id)?.map(|v| v.value().to_vec());
+        match current {
+            Some(bytes) => {
+                let (mut stored, _): (StoredKey, usize) =
+                    bincode::serde::decode_from_slice(&bytes, BINCODE_CFG)?;
+                stored.is_active = false;
+                let value = bincode::serde::encode_to_vec(&stored, BINCODE_CFG)?;
+                keys.insert(id, value.as_slice())?;
+                true
+            }
+            None => false,
+        }
+    };
+    write.commit()?;
+    Ok(existed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::db::open_pool;
+    use crate::server::db::open;
     use tempfile::tempdir;
 
-    async fn fresh_pool() -> SqlitePool {
+    fn fresh_db() -> Arc<Database> {
+        // Leak the tempdir so the file persists for the lifetime of the test.
         let dir = tempdir().unwrap();
-        let db = dir.path().join("test.db");
-        let pool = open_pool(&db).await.unwrap();
-        // Leak the dir to keep db file alive for the test
+        let path = dir.path().join("test.redb");
         std::mem::forget(dir);
-        pool
+        open(&path).unwrap()
     }
+
+    fn secret() -> Vec<u8> { b"test-secret-do-not-use-in-prod".to_vec() }
 
     #[test]
     fn raw_key_format() {
         let raw = generate_raw_key();
         assert!(raw.starts_with(KEY_PREFIX));
-        assert_eq!(raw.len(), KEY_PREFIX.len() + 64);
+        assert_eq!(raw.len(), KEY_PREFIX.len() + 64);  // 32 bytes hex = 64 chars
     }
 
     #[test]
-    fn hash_verifies() {
-        let raw = generate_raw_key();
-        let hash = hash_key(&raw).unwrap();
-        assert!(verify_key(&raw, &hash));
-        assert!(!verify_key("qora_wrong", &hash));
+    fn hmac_is_deterministic_and_distinct() {
+        let s = secret();
+        let a = hmac_index(&s, "qora_a");
+        let b = hmac_index(&s, "qora_a");
+        let c = hmac_index(&s, "qora_b");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 
-    #[tokio::test]
-    async fn create_then_lookup_succeeds() {
-        let pool = fresh_pool().await;
-        let nk = create_key(&pool, "user1", "test", 60, 60_000).await.unwrap();
-        let found = lookup_by_raw(&pool, &nk.raw_key).await.unwrap();
+    #[test]
+    fn argon2_round_trip() {
+        let raw = generate_raw_key();
+        let hash = hash_key_argon2(&raw).unwrap();
+        assert!(verify_argon2(&raw, &hash));
+        assert!(!verify_argon2("qora_wrong", &hash));
+    }
+
+    #[test]
+    fn create_then_lookup() {
+        let db = fresh_db();
+        let s = secret();
+        let nk = create_key(&db, &s, "user1", "test", 60, 60_000).unwrap();
+        let found = lookup_by_raw(&db, &s, &nk.raw_key).unwrap();
         assert!(found.is_some());
         let f = found.unwrap();
         assert_eq!(f.user_id, "user1");
         assert_eq!(f.rpm_limit, 60);
     }
 
-    #[tokio::test]
-    async fn lookup_rejects_unknown_key() {
-        let pool = fresh_pool().await;
-        let found = lookup_by_raw(&pool, "qora_unknown").await.unwrap();
+    #[test]
+    fn lookup_rejects_unknown() {
+        let db = fresh_db();
+        let s = secret();
+        let _ = create_key(&db, &s, "user1", "t", 60, 60_000).unwrap();
+        let found = lookup_by_raw(&db, &s, "qora_unknown").unwrap();
         assert!(found.is_none());
     }
 
-    #[tokio::test]
-    async fn revoked_key_no_longer_found() {
-        let pool = fresh_pool().await;
-        let nk = create_key(&pool, "user1", "test", 60, 60_000).await.unwrap();
-        revoke_key(&pool, &nk.key.id).await.unwrap();
-        let found = lookup_by_raw(&pool, &nk.raw_key).await.unwrap();
+    #[test]
+    fn lookup_rejects_wrong_secret() {
+        let db = fresh_db();
+        let s = secret();
+        let nk = create_key(&db, &s, "user1", "t", 60, 60_000).unwrap();
+        let other = b"different-secret".to_vec();
+        // Different secret -> different HMAC -> index miss
+        let found = lookup_by_raw(&db, &other, &nk.raw_key).unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn revoked_key_no_longer_found() {
+        let db = fresh_db();
+        let s = secret();
+        let nk = create_key(&db, &s, "u", "t", 60, 60_000).unwrap();
+        revoke_key(&db, &nk.key.id).unwrap();
+        let found = lookup_by_raw(&db, &s, &nk.raw_key).unwrap();
         assert!(found.is_none());
     }
 }
 ```
 
-- [ ] **Step 3: Wire and run tests**
-
-```rust
-// src/server/mod.rs add:
-pub mod auth;
-```
+- [ ] **Step 3: Run tests**
 
 ```bash
-cargo test --lib server::auth
+cargo test --lib server::auth::keys
 ```
 
-Expected: 5 tests pass.
+Expected: 7 tests pass.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add src/server/auth/ src/server/mod.rs
-git commit -m "feat(auth): API keys with Argon2 hashing, create/lookup/revoke"
+git commit -m "feat(auth): API keys with HMAC index + Argon2 verification (redb)"
 ```
 
 ---
@@ -394,16 +554,16 @@ git commit -m "feat(auth): API keys with Argon2 hashing, create/lookup/revoke"
 - Create: `src/server/auth/ratelimit.rs`
 - Modify: `src/server/auth/mod.rs`
 
-- [ ] **Step 1: Implement rate limiter**
+In-memory only — does not touch the DB. Same as the original M2 plan; redb change does not affect this layer.
+
+- [ ] **Step 1: Implement**
 
 Create `src/server/auth/ratelimit.rs`:
 
 ```rust
-use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
-use std::sync::Arc;
 
 #[derive(Debug)]
 struct WindowState {
@@ -421,8 +581,6 @@ impl RateLimiter {
         Self { inner: Arc::new(Mutex::new(HashMap::new())) }
     }
 
-    /// Check whether a request fits within the per-key rate budget.
-    /// Returns `Err(retry_after_secs)` when blocked.
     pub fn check_request(&self, key_id: &str, rpm: u32) -> Result<(), u64> {
         let now = Instant::now();
         let cutoff = now - Duration::from_secs(60);
@@ -443,8 +601,6 @@ impl RateLimiter {
         Ok(())
     }
 
-    /// Record token consumption; check against tpm budget.
-    /// Call this for every batch of generated tokens. Returns Err when over budget.
     pub fn record_tokens(&self, key_id: &str, tpm: u32, count: u32) -> Result<(), u64> {
         let now = Instant::now();
         let cutoff = now - Duration::from_secs(60);
@@ -483,8 +639,7 @@ mod tests {
     fn blocks_at_rpm_limit() {
         let l = RateLimiter::new();
         for _ in 0..3 { assert!(l.check_request("k1", 3).is_ok()); }
-        let r = l.check_request("k1", 3);
-        assert!(r.is_err());
+        assert!(l.check_request("k1", 3).is_err());
     }
 
     #[test]
@@ -499,8 +654,7 @@ mod tests {
         let l = RateLimiter::new();
         l.record_tokens("k1", 1000, 600).unwrap();
         l.record_tokens("k1", 1000, 300).unwrap();
-        let r = l.record_tokens("k1", 1000, 200);
-        assert!(r.is_err());
+        assert!(l.record_tokens("k1", 1000, 200).is_err());
     }
 }
 ```
@@ -513,13 +667,13 @@ pub mod keys;
 pub mod ratelimit;
 ```
 
-- [ ] **Step 3: Run tests**
+- [ ] **Step 3: Tests**
 
 ```bash
 cargo test --lib server::auth::ratelimit
 ```
 
-Expected: 4 tests pass.
+Expected: 4 pass.
 
 - [ ] **Step 4: Commit**
 
@@ -536,26 +690,22 @@ git commit -m "feat(auth): sliding-window rate limiter (rpm + tpm)"
 - Create: `src/server/auth/middleware.rs`
 - Modify: `src/server/auth/mod.rs`
 
-- [ ] **Step 1: Implement middleware**
+- [ ] **Step 1: Implement**
 
 Create `src/server/auth/middleware.rs`:
 
 ```rust
-use axum::{
-    extract::{Request, State},
-    http::header::AUTHORIZATION,
-    middleware::Next,
-    response::Response,
-};
-use sqlx::SqlitePool;
 use std::sync::Arc;
+use axum::{extract::{Request, State}, http::header::AUTHORIZATION, middleware::Next, response::Response};
+use redb::Database;
 use crate::server::auth::keys::{lookup_by_raw, ApiKey};
 use crate::server::auth::ratelimit::RateLimiter;
 use crate::server::error::ServerError;
 
 #[derive(Clone)]
 pub struct AuthState {
-    pub pool: SqlitePool,
+    pub db: Arc<Database>,
+    pub server_secret: Arc<Vec<u8>>,
     pub limiter: RateLimiter,
 }
 
@@ -572,7 +722,7 @@ pub async fn auth_middleware(
         .map(|s| s.to_string())
         .ok_or(ServerError::Unauthorized)?;
 
-    let key = lookup_by_raw(&state.pool, &raw_key).await
+    let key = lookup_by_raw(&state.db, &state.server_secret, &raw_key)
         .map_err(|e| ServerError::Db(e.to_string()))?
         .ok_or(ServerError::Unauthorized)?;
 
@@ -602,13 +752,11 @@ pub mod middleware;
 pub mod ratelimit;
 ```
 
-- [ ] **Step 3: Build and check**
+- [ ] **Step 3: Build**
 
 ```bash
 cargo check --all-targets
 ```
-
-Expected: clean.
 
 - [ ] **Step 4: Commit**
 
@@ -619,7 +767,7 @@ git commit -m "feat(auth): axum middleware enforcing API key + rate limit"
 
 ---
 
-## Task 6: Admin endpoint to create/revoke keys
+## Task 6: Admin endpoints + admin guard
 
 **Files:**
 - Create: `src/server/auth/admin.rs`
@@ -627,14 +775,16 @@ git commit -m "feat(auth): axum middleware enforcing API key + rate limit"
 - Modify: `src/server/auth/mod.rs`
 - Modify: `src/server/http/handlers/mod.rs`
 - Modify: `src/server/http/router.rs`
+- Modify: `src/bin/qora_server.rs`
+- Modify: `tests/integration/common.rs`
 
-- [ ] **Step 1: Admin token guard**
+- [ ] **Step 1: Admin guard**
 
 Create `src/server/auth/admin.rs`:
 
 ```rust
-use axum::{extract::{Request, State}, http::header::AUTHORIZATION, middleware::Next, response::Response};
 use std::sync::Arc;
+use axum::{extract::{Request, State}, http::header::AUTHORIZATION, middleware::Next, response::Response};
 use crate::server::error::ServerError;
 
 #[derive(Clone)]
@@ -665,14 +815,14 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 ```
 
-- [ ] **Step 2: Admin handler**
+- [ ] **Step 2: Admin handlers**
 
 Create `src/server/http/handlers/admin.rs`:
 
 ```rust
+use std::sync::Arc;
 use axum::{extract::{State, Path}, Json};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use crate::server::auth::keys::{create_key, revoke_key};
 use crate::server::auth::middleware::AuthState;
 use crate::server::error::ServerError;
@@ -697,8 +847,8 @@ pub async fn create_key_handler(
     State(state): State<Arc<AuthState>>,
     Json(req): Json<CreateKeyRequest>,
 ) -> Result<Json<CreateKeyResponse>, ServerError> {
-    let nk = create_key(&state.pool, &req.user_id, &req.name, req.rpm_limit, req.tpm_limit)
-        .await.map_err(|e| ServerError::Db(e.to_string()))?;
+    let nk = create_key(&state.db, &state.server_secret, &req.user_id, &req.name, req.rpm_limit, req.tpm_limit)
+        .map_err(|e| ServerError::Db(e.to_string()))?;
     Ok(Json(CreateKeyResponse {
         id: nk.key.id,
         raw_key: nk.raw_key,
@@ -711,14 +861,13 @@ pub async fn revoke_key_handler(
     State(state): State<Arc<AuthState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
-    let ok = revoke_key(&state.pool, &id).await
-        .map_err(|e| ServerError::Db(e.to_string()))?;
+    let ok = revoke_key(&state.db, &id).map_err(|e| ServerError::Db(e.to_string()))?;
     if !ok { return Err(ServerError::BadRequest(format!("no key with id {id}"))); }
     Ok(Json(serde_json::json!({"id": id, "revoked": true})))
 }
 ```
 
-- [ ] **Step 3: Wire handlers**
+- [ ] **Step 3: Wire and mount**
 
 ```rust
 // src/server/http/handlers/mod.rs
@@ -732,15 +881,13 @@ pub mod models;
 pub mod admin;
 ```
 
-- [ ] **Step 4: Mount in router with admin guard**
-
-Replace `src/server/http/router.rs` with:
+Update `src/server/http/router.rs`:
 
 ```rust
 use axum::{Router, middleware as axum_mw, routing::{get, post, delete}};
 use std::sync::Arc;
 use crate::server::auth::admin::{admin_guard, AdminState};
-use crate::server::auth::middleware::{auth_middleware, AuthState};
+use crate::server::auth::middleware::AuthState;
 use crate::server::http::handlers;
 use crate::server::http::middleware::request_id_middleware;
 
@@ -757,26 +904,40 @@ pub fn build_router(auth: Arc<AuthState>, admin: Arc<AdminState>) -> Router {
         .merge(admin_routes)
         .layer(axum_mw::from_fn(request_id_middleware))
 }
+
+// router unit tests need to be updated to construct AuthState/AdminState fixtures
+// and call build_router(auth, admin) — see Task 6 Step 5 below.
 ```
 
-- [ ] **Step 5: Update binary and tests**
+- [ ] **Step 4: Update binary**
 
-The binary `src/bin/qora_server.rs` and the test harness `tests/integration/common.rs` now need to construct `AuthState` and `AdminState`. Update binary:
+In `src/bin/qora_server.rs`, after config load:
 
 ```rust
-// in src/bin/qora_server.rs main(), after loading config:
-let pool = qor4b::server::db::open_pool(&config.auth.db_path).await?;
+use std::sync::Arc;
+use anyhow::Context;
+
+let db = qor4b::server::db::open(&config.auth.db_path)?;
 let admin_token = std::env::var(&config.auth.admin_token_env)
     .with_context(|| format!("admin token env var {} not set", config.auth.admin_token_env))?;
-let auth = std::sync::Arc::new(qor4b::server::auth::middleware::AuthState {
-    pool,
+let server_secret = std::env::var("QORA_SERVER_SECRET")
+    .context("QORA_SERVER_SECRET env var must be set (used for HMAC key index)")?
+    .into_bytes();
+
+let auth = Arc::new(qor4b::server::auth::middleware::AuthState {
+    db,
+    server_secret: Arc::new(server_secret),
     limiter: qor4b::server::auth::ratelimit::RateLimiter::new(),
 });
-let admin_state = std::sync::Arc::new(qor4b::server::auth::admin::AdminState { admin_token });
+let admin_state = Arc::new(qor4b::server::auth::admin::AdminState { admin_token });
 let router = qor4b::server::http::router::build_router(auth, admin_state);
 ```
 
-Update `tests/integration/common.rs`:
+(`config.auth.db_path` already exists from M1's config; only the contents change — point it at `/opt/qora/auth.redb` instead of `auth.db`.)
+
+- [ ] **Step 5: Update test harness + router unit tests**
+
+`tests/integration/common.rs`:
 
 ```rust
 use std::path::Path;
@@ -784,15 +945,16 @@ use std::sync::Arc;
 use qor4b::server::auth::admin::AdminState;
 use qor4b::server::auth::middleware::AuthState;
 use qor4b::server::auth::ratelimit::RateLimiter;
-use qor4b::server::db::open_pool;
+use qor4b::server::db::open;
 use qor4b::server::http::router::build_router;
-use sqlx::SqlitePool;
+use redb::Database;
 use tempfile::TempDir;
 
 pub struct TestServer {
     pub addr: std::net::SocketAddr,
-    pub pool: SqlitePool,
+    pub db: Arc<Database>,
     pub admin_token: String,
+    pub server_secret: Arc<Vec<u8>>,
     handle: tokio::task::JoinHandle<()>,
     _dir: TempDir,
 }
@@ -800,9 +962,15 @@ pub struct TestServer {
 impl TestServer {
     pub async fn start() -> Self {
         let dir = TempDir::new().unwrap();
-        let pool = open_pool(&dir.path().join("test.db")).await.unwrap();
+        let db = open(&dir.path().join("test.redb")).unwrap();
         let admin_token = "test-admin".to_string();
-        let auth = Arc::new(AuthState { pool: pool.clone(), limiter: RateLimiter::new() });
+        let server_secret = Arc::new(b"test-secret".to_vec());
+
+        let auth = Arc::new(AuthState {
+            db: db.clone(),
+            server_secret: server_secret.clone(),
+            limiter: RateLimiter::new(),
+        });
         let admin = Arc::new(AdminState { admin_token: admin_token.clone() });
         let router = build_router(auth, admin);
 
@@ -812,7 +980,7 @@ impl TestServer {
             axum::serve(listener, router.into_make_service()).await.unwrap();
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        Self { addr, pool, admin_token, handle, _dir: dir }
+        Self { addr, db, admin_token, server_secret, handle, _dir: dir }
     }
 
     pub fn url(&self, path: &str) -> String { format!("http://{}{}", self.addr, path) }
@@ -823,15 +991,14 @@ impl Drop for TestServer {
 }
 ```
 
-- [ ] **Step 6: Build and run existing tests**
+Update `src/server/http/router.rs` unit tests to construct fixtures: each `build_router()` call site changes to `build_router(test_auth(), test_admin())` where helpers create empty in-memory states. Use a temporary redb file in tempfile::tempdir() for each test.
+
+- [ ] **Step 6: Verify and commit**
 
 ```bash
+cargo test --lib server::
 cargo test --test http_basic
 ```
-
-Expected: tests still pass after the construct-via-state migration.
-
-- [ ] **Step 7: Commit**
 
 ```bash
 git add src/server/auth/admin.rs src/server/http/handlers/admin.rs \
@@ -842,21 +1009,25 @@ git commit -m "feat(auth): admin endpoints to create/revoke API keys"
 
 ---
 
-## Task 7: Usage tracker
+## Task 7: Usage tracker (redb-backed)
 
 **Files:**
 - Create: `src/server/usage/mod.rs`
 - Create: `src/server/usage/tracker.rs`
 - Modify: `src/server/mod.rs`
 
-- [ ] **Step 1: Tracker**
+- [ ] **Step 1: Implement**
 
 Create `src/server/usage/tracker.rs`:
 
 ```rust
-use sqlx::SqlitePool;
+use std::sync::Arc;
+use anyhow::Context;
+use redb::{Database, ReadableTable};
+use serde::{Deserialize, Serialize};
+use crate::server::db::{USAGE, next_usage_id};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRecord {
     pub request_id: String,
     pub user_id: String,
@@ -866,60 +1037,63 @@ pub struct UsageRecord {
     pub output_tokens: u32,
     pub started_at: i64,
     pub duration_ms: u32,
-    pub status: &'static str,    // "success" | "error" | "timeout" | "cancelled"
+    pub status: String,    // "success" | "error" | "timeout" | "cancelled"
 }
+
+const BINCODE_CFG: bincode::config::Configuration = bincode::config::standard();
 
 #[derive(Debug, Clone)]
 pub struct UsageTracker {
-    pool: SqlitePool,
+    db: Arc<Database>,
 }
 
 impl UsageTracker {
-    pub fn new(pool: SqlitePool) -> Self { Self { pool } }
+    pub fn new(db: Arc<Database>) -> Self { Self { db } }
 
-    pub async fn record(&self, r: UsageRecord) -> anyhow::Result<()> {
-        sqlx::query(
-            "INSERT INTO usage (request_id, user_id, key_id, model, input_tokens, output_tokens, started_at, duration_ms, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(&r.request_id)
-        .bind(&r.user_id)
-        .bind(&r.key_id)
-        .bind(&r.model)
-        .bind(r.input_tokens as i64)
-        .bind(r.output_tokens as i64)
-        .bind(r.started_at)
-        .bind(r.duration_ms as i64)
-        .bind(r.status)
-        .execute(&self.pool).await?;
+    pub fn record(&self, r: UsageRecord) -> anyhow::Result<()> {
+        let id = next_usage_id(&self.db)?;
+        let value = bincode::serde::encode_to_vec(&r, BINCODE_CFG).context("bincode UsageRecord")?;
+        let write = self.db.begin_write()?;
+        {
+            let mut t = write.open_table(USAGE)?;
+            t.insert(id, value.as_slice())?;
+        }
+        write.commit()?;
         Ok(())
     }
 
-    pub async fn count(&self, user_id: &str) -> anyhow::Result<i64> {
-        let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM usage WHERE user_id = ?")
-            .bind(user_id).fetch_one(&self.pool).await?;
-        Ok(row.0)
+    pub fn count(&self, user_id: &str) -> anyhow::Result<i64> {
+        let read = self.db.begin_read()?;
+        let table = read.open_table(USAGE)?;
+        let mut n = 0i64;
+        for entry in table.iter()? {
+            let (_, v) = entry?;
+            let (rec, _): (UsageRecord, usize) =
+                bincode::serde::decode_from_slice(v.value(), BINCODE_CFG)?;
+            if rec.user_id == user_id { n += 1; }
+        }
+        Ok(n)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::db::open_pool;
+    use crate::server::db::open;
     use tempfile::tempdir;
 
-    #[tokio::test]
-    async fn record_and_count() {
+    #[test]
+    fn record_and_count() {
         let dir = tempdir().unwrap();
-        let pool = open_pool(&dir.path().join("test.db")).await.unwrap();
-        let t = UsageTracker::new(pool);
+        let db = open(&dir.path().join("test.redb")).unwrap();
+        let t = UsageTracker::new(db);
         t.record(UsageRecord {
             request_id: "r1".into(), user_id: "u1".into(), key_id: "k1".into(),
             model: "qora-4b".into(), input_tokens: 10, output_tokens: 20,
-            started_at: 1, duration_ms: 100, status: "success",
-        }).await.unwrap();
-        assert_eq!(t.count("u1").await.unwrap(), 1);
-        assert_eq!(t.count("u2").await.unwrap(), 0);
+            started_at: 1, duration_ms: 100, status: "success".into(),
+        }).unwrap();
+        assert_eq!(t.count("u1").unwrap(), 1);
+        assert_eq!(t.count("u2").unwrap(), 0);
     }
 }
 ```
@@ -936,39 +1110,40 @@ pub mod tracker;
 pub mod usage;
 ```
 
-- [ ] **Step 3: Run tests**
+- [ ] **Step 3: Tests**
 
 ```bash
 cargo test --lib server::usage
 ```
 
-Expected: 1 test passes.
+Expected: 1 pass.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add src/server/usage/ src/server/mod.rs
-git commit -m "feat(usage): SQLite-backed usage tracker for billing reconciliation"
+git commit -m "feat(usage): redb-backed usage tracker for billing reconciliation"
 ```
 
 ---
 
-## Task 8: Auth flow integration test
+## Task 8: auth_flow integration test
 
 **Files:**
 - Create: `tests/integration/auth_flow.rs`
-- Modify: `Cargo.toml`
+- Modify: `Cargo.toml` (add test target)
 
-- [ ] **Step 1: Add test target**
+- [ ] **Step 1: Add target**
+
+Append to `Cargo.toml`:
 
 ```toml
-# Cargo.toml [[test]]
 [[test]]
 name = "auth_flow"
 path = "tests/integration/auth_flow.rs"
 ```
 
-- [ ] **Step 2: Write end-to-end auth tests**
+- [ ] **Step 2: Tests**
 
 Create `tests/integration/auth_flow.rs`:
 
@@ -977,30 +1152,19 @@ mod common;
 use common::TestServer;
 use serde_json::json;
 
-async fn create_key(server: &TestServer, user: &str, rpm: u32) -> String {
+#[tokio::test]
+async fn admin_can_create_key() {
+    let server = TestServer::start().await;
     let resp = reqwest::Client::new()
         .post(server.url("/v1/admin/keys"))
         .bearer_auth(&server.admin_token)
         .json(&json!({
-            "user_id": user,
-            "name": "test",
-            "rpm_limit": rpm,
-            "tpm_limit": 1_000_000,
+            "user_id":"user1","name":"test","rpm_limit":60,"tpm_limit":60_000
         }))
         .send().await.unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    body["raw_key"].as_str().unwrap().to_string()
-}
-
-#[tokio::test]
-async fn admin_can_create_key_then_user_can_use_it() {
-    let server = TestServer::start().await;
-    let raw = create_key(&server, "user1", 60).await;
-
-    // We need a protected endpoint; use /v1/models with a future protected route.
-    // For now, this test verifies the admin flow only.
-    assert!(raw.starts_with("qora_"));
+    assert!(body["raw_key"].as_str().unwrap().starts_with("qora_"));
 }
 
 #[tokio::test]
@@ -1027,7 +1191,6 @@ async fn wrong_admin_token_returns_401() {
 #[tokio::test]
 async fn revoke_key_works() {
     let server = TestServer::start().await;
-    // Create
     let resp = reqwest::Client::new()
         .post(server.url("/v1/admin/keys"))
         .bearer_auth(&server.admin_token)
@@ -1036,40 +1199,43 @@ async fn revoke_key_works() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let id = body["id"].as_str().unwrap().to_string();
 
-    // Revoke
     let resp = reqwest::Client::new()
         .delete(server.url(&format!("/v1/admin/keys/{id}")))
         .bearer_auth(&server.admin_token)
         .send().await.unwrap();
     assert_eq!(resp.status(), 200);
 
-    // Revoke again — should 400 (no such active key)
+    // Revoking again — already inactive, lookup will not find an active StoredKey,
+    // but the redb record still exists with is_active=false, so revoke_key returns true.
+    // Document v1 behaviour: idempotent revoke. This second call returns 200, not 400.
     let resp = reqwest::Client::new()
         .delete(server.url(&format!("/v1/admin/keys/{id}")))
         .bearer_auth(&server.admin_token)
         .send().await.unwrap();
-    assert_eq!(resp.status(), 400);
+    assert_eq!(resp.status(), 200);
 }
 ```
 
-- [ ] **Step 3: Run integration test**
+> Note: with redb, `revoke_key` finds the record (whether active or not) and sets `is_active=false`. This makes revoke idempotent — a small behavior difference from a SQL `UPDATE WHERE is_active=1`. Documented above; v1-acceptable.
+
+- [ ] **Step 3: Run**
 
 ```bash
 cargo test --test auth_flow
 ```
 
-Expected: 4 tests pass.
+Expected: 4 pass.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add tests/integration/auth_flow.rs Cargo.toml
-git commit -m "test(auth): integration tests for admin flow and key revocation"
+git commit -m "test(auth): integration tests for admin flow + key revocation"
 ```
 
 ---
 
-## Task 9: Module M2 acceptance + merge
+## Task 9: M2 acceptance + merge
 
 - [ ] **Step 1: Run all tests**
 
@@ -1081,23 +1247,23 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-Expected: all green.
-
 - [ ] **Step 2: Milestone commit and merge**
 
 ```bash
 git commit --allow-empty -m "milestone: M2 auth + billing complete
 
-- API keys with Argon2 hashing in SQLite
+- Pure-Rust persistence: redb (no SQLite/libsqlite3-sys)
+- API keys: HMAC-SHA256 index + Argon2 verify
 - Sliding-window rate limiter (rpm + tpm)
 - Auth middleware enforcing keys + limits
-- Admin endpoints to create/revoke keys
-- Usage tracker writes to DB
+- Admin endpoints to create/revoke
+- Usage tracker writes to redb
+- 7 + 4 + 1 + 4 = 16 new tests, all green
 
 Acceptance: cargo test --test auth_flow — 4/4 pass"
 
 git checkout feature/qora-server
-git merge --no-ff feature/qora-server-m2-auth
+git merge --no-ff feature/qora-server-m2-auth -m "Merge M2: auth + billing (redb)"
 git checkout feature/qora-server-m2-auth
 ```
 
