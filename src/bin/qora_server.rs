@@ -1,12 +1,21 @@
-use std::path::PathBuf;
 use anyhow::Context;
-use qor4b::server::{config::ServerConfig, http::{router::build_router, serve::{serve_plain, serve_tls}, tls::load_tls_config}};
+use qor4b::server::{
+    config::ServerConfig,
+    http::{
+        router::build_router,
+        serve::{serve_plain, serve_tls},
+        tls::load_tls_config,
+    },
+};
+use std::path::PathBuf;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "qora-server.toml".to_string());
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "qora-server.toml".to_string());
     let config = ServerConfig::load_from_path(&PathBuf::from(&config_path))
         .with_context(|| format!("loading config from {config_path}"))?;
     tracing::info!(?config_path, "config loaded");
@@ -18,10 +27,10 @@ async fn main() -> anyhow::Result<()> {
             let tls = load_tls_config(cert, key).await?;
             serve_tls(router, &config.server.bind, tls).await
         }
-        (None, None) => {
-            serve_plain(router, &config.server.bind).await
-        }
-        _ => Err(anyhow::anyhow!("tls_cert and tls_key must be set together or both omitted")),
+        (None, None) => serve_plain(router, &config.server.bind).await,
+        _ => Err(anyhow::anyhow!(
+            "tls_cert and tls_key must be set together or both omitted"
+        )),
     }?;
     Ok(())
 }

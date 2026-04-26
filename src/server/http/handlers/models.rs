@@ -1,5 +1,5 @@
-use axum::Json;
 use crate::server::openai::response::{ModelInfo, ModelsListResponse};
+use axum::Json;
 
 pub async fn list_models() -> Json<ModelsListResponse> {
     Json(ModelsListResponse {

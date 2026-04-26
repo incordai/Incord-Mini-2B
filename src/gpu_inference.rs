@@ -11,7 +11,9 @@ use std::time::Instant;
 use crate::config::Qor4bConfig;
 use crate::gemv::ModelWeights;
 use crate::generate::GenerateParams;
-use crate::gpu_loader::{GpuModel, GpuHybridLayer, GpuDeltaNetLayer, GpuFullAttnLayer, load_model_gpu};
+use crate::gpu_loader::{
+    GpuDeltaNetLayer, GpuFullAttnLayer, GpuHybridLayer, GpuModel, load_model_gpu,
+};
 use crate::tokenizer::QoraTokenizer;
 
 // ============================================================
@@ -36,7 +38,7 @@ pub struct GpuDeltaNetState<B: Backend> {
 }
 
 pub struct GpuKvCacheEntry<B: Backend> {
-    pub k: Option<Tensor<B, 3>>,  // [kv_heads, seq_len, head_dim]
+    pub k: Option<Tensor<B, 3>>, // [kv_heads, seq_len, head_dim]
     pub v: Option<Tensor<B, 3>>,
     pub seq_len: usize,
 }
@@ -123,7 +125,7 @@ fn softplus_1d<B: Backend>(x: Tensor<B, 1>) -> Tensor<B, 1> {
 // ============================================================
 
 fn forward_deltanet_decode_gpu<B: Backend>(
-    x: Tensor<B, 2>,           // [1, hidden]
+    x: Tensor<B, 2>, // [1, hidden]
     layer: &GpuDeltaNetLayer<B>,
     state: &mut GpuDeltaNetState<B>,
     config: &Qor4bConfig,
@@ -152,7 +154,9 @@ fn forward_deltanet_decode_gpu<B: Backend>(
     // Cat with buffer: [qkv_dim, buf_len] cat [qkv_dim, 1] → [qkv_dim, ks=4]
     let conv_input = Tensor::cat(vec![state.conv_buf.clone(), qkv_col.clone()], 1);
     // Elementwise multiply with conv weights and sum: [qkv_dim, ks] * [qkv_dim, ks] → sum dim 1 → [qkv_dim]
-    let qkv_conv = (conv_input.clone() * layer.conv1d_weight.clone()).sum_dim(1).reshape([1, qkv_dim]);
+    let qkv_conv = (conv_input.clone() * layer.conv1d_weight.clone())
+        .sum_dim(1)
+        .reshape([1, qkv_dim]);
 
     // Update conv buffer: shift left, append new
     state.conv_buf = conv_input.slice([0..qkv_dim, 1..ks]); // take last buf_len columns
@@ -162,9 +166,9 @@ fn forward_deltanet_decode_gpu<B: Backend>(
     let qkv_act = activation::silu(qkv_conv);
 
     // 5. Split Q, K, V
-    let q = qkv_act.clone().slice([0..1, 0..q_dim]);           // [1, 2048]
+    let q = qkv_act.clone().slice([0..1, 0..q_dim]); // [1, 2048]
     let k = qkv_act.clone().slice([0..1, q_dim..q_dim + k_dim]); // [1, 2048]
-    let v = qkv_act.slice([0..1, q_dim + k_dim..qkv_dim]);     // [1, 4096]
+    let v = qkv_act.slice([0..1, q_dim + k_dim..qkv_dim]); // [1, 4096]
 
     // 6. L2 normalize Q, K per head, scale Q
     let q = q.reshape([num_qk, hd]);
@@ -173,8 +177,14 @@ fn forward_deltanet_decode_gpu<B: Backend>(
     let k = l2_normalize_rows(k);
 
     // 7. Alpha and beta
-    let a_proj = x_norm.clone().matmul(layer.in_proj_a.clone()).reshape([num_v]); // [32]
-    let b_proj = x_norm.clone().matmul(layer.in_proj_b.clone()).reshape([num_v]); // [32]
+    let a_proj = x_norm
+        .clone()
+        .matmul(layer.in_proj_a.clone())
+        .reshape([num_v]); // [32]
+    let b_proj = x_norm
+        .clone()
+        .matmul(layer.in_proj_b.clone())
+        .reshape([num_v]); // [32]
 
     // alpha = exp(-exp(a_log) * softplus(a_proj + dt_bias))
     let a_exp = layer.a_log.clone().exp(); // [32]
@@ -245,11 +255,11 @@ fn forward_deltanet_decode_gpu<B: Backend>(
 // ============================================================
 
 fn forward_attn_decode_gpu<B: Backend>(
-    x: Tensor<B, 2>,           // [1, hidden]
+    x: Tensor<B, 2>, // [1, hidden]
     layer: &GpuFullAttnLayer<B>,
     kv: &mut GpuKvCacheEntry<B>,
     config: &Qor4bConfig,
-    rope_cos: &Tensor<B, 2>,   // [max_pos, half_dim]
+    rope_cos: &Tensor<B, 2>, // [max_pos, half_dim]
     rope_sin: &Tensor<B, 2>,
 ) -> Tensor<B, 2> {
     let num_heads = config.num_attn_heads; // 16
@@ -290,7 +300,8 @@ fn forward_attn_decode_gpu<B: Backend>(
 
     // Split-half RoPE on rotary part
     let q_rotated = apply_partial_rope_gpu(q_rot, rope_cos, rope_sin, num_heads, half_rot, offset);
-    let k_rotated = apply_partial_rope_gpu(k_rot, rope_cos, rope_sin, num_kv_heads, half_rot, offset);
+    let k_rotated =
+        apply_partial_rope_gpu(k_rot, rope_cos, rope_sin, num_kv_heads, half_rot, offset);
 
     // Reassemble: [rotated, pass_through]
     let q_final = Tensor::cat(vec![q_rotated, q_pass], 1); // [16, 256]
@@ -298,13 +309,13 @@ fn forward_attn_decode_gpu<B: Backend>(
 
     // 6. KV cache update: reshape to [heads, 1, head_dim] and cat
     let k_new_3d: Tensor<B, 3> = k_final.unsqueeze_dim::<3>(1); // [4, 1, 256]
-    let v_new_3d: Tensor<B, 3> = v_new.unsqueeze_dim::<3>(1);   // [4, 1, 256]
+    let v_new_3d: Tensor<B, 3> = v_new.unsqueeze_dim::<3>(1); // [4, 1, 256]
 
-    let (k_cache, v_cache) = if let (Some(prev_k), Some(prev_v)) =
-        (kv.k.take(), kv.v.take())
-    {
-        (Tensor::cat(vec![prev_k, k_new_3d], 1),
-         Tensor::cat(vec![prev_v, v_new_3d], 1))
+    let (k_cache, v_cache) = if let (Some(prev_k), Some(prev_v)) = (kv.k.take(), kv.v.take()) {
+        (
+            Tensor::cat(vec![prev_k, k_new_3d], 1),
+            Tensor::cat(vec![prev_v, v_new_3d], 1),
+        )
     } else {
         (k_new_3d, v_new_3d)
     };
@@ -319,13 +330,19 @@ fn forward_attn_decode_gpu<B: Backend>(
 
     // Expand KV heads: [4, seq, 256] → [16, seq, 256]
     let k_exp = if num_kv_groups > 1 {
-        let k4: Tensor<B, 4> = k_cache.clone().unsqueeze_dim::<4>(1).repeat_dim(1, num_kv_groups);
+        let k4: Tensor<B, 4> = k_cache
+            .clone()
+            .unsqueeze_dim::<4>(1)
+            .repeat_dim(1, num_kv_groups);
         k4.reshape([num_heads, kv_seq_len, head_dim])
     } else {
         k_cache.clone()
     };
     let v_exp = if num_kv_groups > 1 {
-        let v4: Tensor<B, 4> = v_cache.clone().unsqueeze_dim::<4>(1).repeat_dim(1, num_kv_groups);
+        let v4: Tensor<B, 4> = v_cache
+            .clone()
+            .unsqueeze_dim::<4>(1)
+            .repeat_dim(1, num_kv_groups);
         v4.reshape([num_heads, kv_seq_len, head_dim])
     } else {
         v_cache.clone()
@@ -373,8 +390,8 @@ fn apply_partial_rope_gpu<B: Backend>(
 ) -> Tensor<B, 2> {
     let rotary_dim = half_rot * 2;
     // Split into first half and second half per head
-    let x_first = x.clone().slice([0..num_heads, 0..half_rot]);       // [heads, 32]
-    let x_second = x.slice([0..num_heads, half_rot..rotary_dim]);      // [heads, 32]
+    let x_first = x.clone().slice([0..num_heads, 0..half_rot]); // [heads, 32]
+    let x_second = x.slice([0..num_heads, half_rot..rotary_dim]); // [heads, 32]
 
     // cos, sin for this position: [1, half_rot] → broadcast over heads
     let cos = cos_table.clone().slice([offset..offset + 1, 0..half_rot]); // [1, 32]
@@ -407,7 +424,12 @@ fn forward_decode_gpu<B: Backend>(
         &device,
     );
 
-    for (i, (layer, entry)) in model.layers.iter().zip(cache.entries.iter_mut()).enumerate() {
+    for (i, (layer, entry)) in model
+        .layers
+        .iter()
+        .zip(cache.entries.iter_mut())
+        .enumerate()
+    {
         x = match (layer, entry) {
             (GpuHybridLayer::DeltaNet(dl), GpuCacheEntry::DeltaNet(ds)) => {
                 forward_deltanet_decode_gpu(x, dl, ds, config)
@@ -434,7 +456,7 @@ fn forward_decode_gpu<B: Backend>(
 /// upload outputs back to GPU for the remaining batch ops (gating, out_proj, MLP).
 /// This avoids seq_len GPU round-trips and achieves ~10x fewer PCIe transfers.
 fn prefill_deltanet_layer_gpu<B: Backend>(
-    x: Tensor<B, 2>,           // [seq_len, hidden] on GPU
+    x: Tensor<B, 2>, // [seq_len, hidden] on GPU
     layer: &GpuDeltaNetLayer<B>,
     state: &mut GpuDeltaNetState<B>,
     config: &Qor4bConfig,
@@ -457,19 +479,29 @@ fn prefill_deltanet_layer_gpu<B: Backend>(
     // ==== GPU BATCH PHASE 1: all projections ====
     let x_norm = rms_norm_1plus(x.clone(), &layer.input_norm_gamma);
     let qkv_all = x_norm.clone().matmul(layer.in_proj_qkv.clone()); // [seq, qkv_dim]
-    let a_all = x_norm.clone().matmul(layer.in_proj_a.clone());       // [seq, num_v]
-    let b_all = x_norm.clone().matmul(layer.in_proj_b.clone());       // [seq, num_v]
-    let z_all = x_norm.matmul(layer.in_proj_z.clone());               // [seq, v_dim]
+    let a_all = x_norm.clone().matmul(layer.in_proj_a.clone()); // [seq, num_v]
+    let b_all = x_norm.clone().matmul(layer.in_proj_b.clone()); // [seq, num_v]
+    let z_all = x_norm.matmul(layer.in_proj_z.clone()); // [seq, v_dim]
 
     // Download batch results + small layer weights to CPU
     let qkv_cpu: Vec<f32> = qkv_all.to_data().to_vec::<f32>().unwrap();
     let a_cpu: Vec<f32> = a_all.to_data().to_vec::<f32>().unwrap();
     let b_cpu: Vec<f32> = b_all.to_data().to_vec::<f32>().unwrap();
 
-    let conv_w: Vec<f32> = layer.conv1d_weight.clone().to_data().to_vec::<f32>().unwrap();
+    let conv_w: Vec<f32> = layer
+        .conv1d_weight
+        .clone()
+        .to_data()
+        .to_vec::<f32>()
+        .unwrap();
     let a_log_data: Vec<f32> = layer.a_log.clone().to_data().to_vec::<f32>().unwrap();
     let dt_bias_data: Vec<f32> = layer.dt_bias.clone().to_data().to_vec::<f32>().unwrap();
-    let attn_norm_w: Vec<f32> = layer.attn_norm_weight.clone().to_data().to_vec::<f32>().unwrap();
+    let attn_norm_w: Vec<f32> = layer
+        .attn_norm_weight
+        .clone()
+        .to_data()
+        .to_vec::<f32>()
+        .unwrap();
 
     // Download state to CPU
     let mut s: Vec<f32> = state.s.clone().to_data().to_vec::<f32>().unwrap();
@@ -549,12 +581,16 @@ fn prefill_deltanet_layer_gpu<B: Backend>(
             let ho = h * hd;
 
             // Decay
-            for i in 0..hd * hd { s[s_off + i] *= alpha; }
+            for i in 0..hd * hd {
+                s[s_off + i] *= alpha;
+            }
 
             // pred = S @ K
             for i in 0..hd {
                 let mut dot = 0.0f32;
-                for j in 0..hd { dot += s[s_off + i * hd + j] * k_exp[ho + j]; }
+                for j in 0..hd {
+                    dot += s[s_off + i * hd + j] * k_exp[ho + j];
+                }
                 pred[ho + i] = dot;
             }
 
@@ -569,7 +605,9 @@ fn prefill_deltanet_layer_gpu<B: Backend>(
             // y = S @ Q
             for i in 0..hd {
                 let mut dot = 0.0f32;
-                for j in 0..hd { dot += s[s_off + i * hd + j] * q_exp[ho + j]; }
+                for j in 0..hd {
+                    dot += s[s_off + i * hd + j] * q_exp[ho + j];
+                }
                 pred[ho + i] = dot;
             }
         }
@@ -579,7 +617,9 @@ fn prefill_deltanet_layer_gpu<B: Backend>(
         for h in 0..num_v {
             let ho = h * hd;
             let mut sum_sq = 0.0f32;
-            for d in 0..hd { sum_sq += pred[ho + d] * pred[ho + d]; }
+            for d in 0..hd {
+                sum_sq += pred[ho + d] * pred[ho + d];
+            }
             let inv_rms = 1.0 / (sum_sq / hd as f32 + 1e-6).sqrt();
             for d in 0..hd {
                 y_out[ho + d] = pred[ho + d] * inv_rms * attn_norm_w[d];
@@ -593,10 +633,7 @@ fn prefill_deltanet_layer_gpu<B: Backend>(
         cortex::tensor::TensorData::new(output_y, [seq_len, v_dim]),
         &device,
     );
-    state.s = Tensor::from_data(
-        cortex::tensor::TensorData::new(s, [num_v, hd, hd]),
-        &device,
-    );
+    state.s = Tensor::from_data(cortex::tensor::TensorData::new(s, [num_v, hd, hd]), &device);
     state.conv_buf = Tensor::from_data(
         cortex::tensor::TensorData::new(conv_buf, [qkv_dim, buf_len]),
         &device,
@@ -644,7 +681,12 @@ fn forward_prefill_gpu<B: Backend>(
     );
 
     // Process layer by layer (x stays on GPU)
-    for (i, (layer, entry)) in model.layers.iter().zip(cache.entries.iter_mut()).enumerate() {
+    for (i, (layer, entry)) in model
+        .layers
+        .iter()
+        .zip(cache.entries.iter_mut())
+        .enumerate()
+    {
         x = match (layer, entry) {
             (GpuHybridLayer::DeltaNet(dl), GpuCacheEntry::DeltaNet(ds)) => {
                 prefill_deltanet_layer_gpu(x, dl, ds, config)
@@ -668,7 +710,7 @@ fn forward_prefill_gpu<B: Backend>(
 
 /// Prefill one full attention layer with all tokens (causal masked attention).
 fn prefill_attn_layer_gpu<B: Backend>(
-    x: Tensor<B, 2>,           // [seq_len, hidden]
+    x: Tensor<B, 2>, // [seq_len, hidden]
     layer: &GpuFullAttnLayer<B>,
     kv: &mut GpuKvCacheEntry<B>,
     config: &Qor4bConfig,
@@ -690,13 +732,18 @@ fn prefill_attn_layer_gpu<B: Backend>(
     // 2. Q+Gate projection
     let q_gate = x_norm.clone().matmul(layer.q_proj.clone()); // [seq, 8192]
     let q_gate_4d = q_gate.reshape([seq_len, num_heads, 2, head_dim]);
-    let q_raw = q_gate_4d.clone().slice([0..seq_len, 0..num_heads, 0..1, 0..head_dim])
+    let q_raw = q_gate_4d
+        .clone()
+        .slice([0..seq_len, 0..num_heads, 0..1, 0..head_dim])
         .reshape([seq_len * num_heads, head_dim]); // [seq*16, 256]
-    let gate = q_gate_4d.slice([0..seq_len, 0..num_heads, 1..2, 0..head_dim])
+    let gate = q_gate_4d
+        .slice([0..seq_len, 0..num_heads, 1..2, 0..head_dim])
         .reshape([seq_len, q_dim]); // [seq, 4096]
 
     // 3. K, V projections
-    let k_raw = x_norm.clone().matmul(layer.k_proj.clone())
+    let k_raw = x_norm
+        .clone()
+        .matmul(layer.k_proj.clone())
         .reshape([seq_len * num_kv_heads, head_dim]); // [seq*4, 256]
     let v_new = x_norm.matmul(layer.v_proj.clone()); // [seq, kv_dim]
 
@@ -709,27 +756,35 @@ fn prefill_attn_layer_gpu<B: Backend>(
     let k_3d = k_normed.reshape([seq_len, num_kv_heads, head_dim]);
 
     // Apply RoPE position by position across sequence
-    let q_rot = q_3d.clone().slice([0..seq_len, 0..num_heads, 0..rotary_dim])
+    let q_rot = q_3d
+        .clone()
+        .slice([0..seq_len, 0..num_heads, 0..rotary_dim])
         .reshape([seq_len * num_heads, rotary_dim]);
-    let q_pass = q_3d.slice([0..seq_len, 0..num_heads, rotary_dim..head_dim])
+    let q_pass = q_3d
+        .slice([0..seq_len, 0..num_heads, rotary_dim..head_dim])
         .reshape([seq_len * num_heads, head_dim - rotary_dim]);
-    let k_rot = k_3d.clone().slice([0..seq_len, 0..num_kv_heads, 0..rotary_dim])
+    let k_rot = k_3d
+        .clone()
+        .slice([0..seq_len, 0..num_kv_heads, 0..rotary_dim])
         .reshape([seq_len * num_kv_heads, rotary_dim]);
-    let k_pass = k_3d.slice([0..seq_len, 0..num_kv_heads, rotary_dim..head_dim])
+    let k_pass = k_3d
+        .slice([0..seq_len, 0..num_kv_heads, rotary_dim..head_dim])
         .reshape([seq_len * num_kv_heads, head_dim - rotary_dim]);
 
     // RoPE for prefill: each position gets its own cos/sin
     let q_rotated = apply_prefill_rope_gpu(q_rot, rope_cos, rope_sin, seq_len, num_heads, half_rot);
-    let k_rotated = apply_prefill_rope_gpu(k_rot, rope_cos, rope_sin, seq_len, num_kv_heads, half_rot);
+    let k_rotated =
+        apply_prefill_rope_gpu(k_rot, rope_cos, rope_sin, seq_len, num_kv_heads, half_rot);
 
-    let q_final = Tensor::cat(vec![q_rotated, q_pass], 1)
-        .reshape([seq_len, num_heads, head_dim]);
-    let k_final = Tensor::cat(vec![k_rotated, k_pass], 1)
-        .reshape([seq_len, num_kv_heads, head_dim]);
+    let q_final = Tensor::cat(vec![q_rotated, q_pass], 1).reshape([seq_len, num_heads, head_dim]);
+    let k_final =
+        Tensor::cat(vec![k_rotated, k_pass], 1).reshape([seq_len, num_kv_heads, head_dim]);
 
     // 6. Store KV cache
     let k_cache = k_final.swap_dims(0, 1); // [kv_heads, seq, head_dim]
-    let v_cache = v_new.reshape([seq_len, num_kv_heads, head_dim]).swap_dims(0, 1);
+    let v_cache = v_new
+        .reshape([seq_len, num_kv_heads, head_dim])
+        .swap_dims(0, 1);
     kv.k = Some(k_cache.clone());
     kv.v = Some(v_cache.clone());
     kv.seq_len = seq_len;
@@ -828,7 +883,9 @@ fn lm_head_cpu(x: &[f32], embed: &[f32], vocab: usize, hidden: usize) -> Vec<f32
             let start = chunk_idx * chunk_size;
             for (j, out) in chunk.iter_mut().enumerate() {
                 let v = start + j;
-                if v >= vocab { break; }
+                if v >= vocab {
+                    break;
+                }
                 let row = &embed[v * hidden..(v + 1) * hidden];
                 let mut dot = 0.0f32;
                 for d in 0..hidden {
@@ -845,7 +902,9 @@ fn lm_head_cpu(x: &[f32], embed: &[f32], vocab: usize, hidden: usize) -> Vec<f32
 // Sampling
 // ============================================================
 
-struct Rng { state: u64 }
+struct Rng {
+    state: u64,
+}
 
 impl Rng {
     fn new() -> Self {
@@ -864,35 +923,53 @@ impl Rng {
     }
 }
 
-fn sample_token_top_k(logits: &[f32], temperature: f32, top_p: f32, top_k: usize, rng: &mut Rng) -> u32 {
+fn sample_token_top_k(
+    logits: &[f32],
+    temperature: f32,
+    top_p: f32,
+    top_k: usize,
+    rng: &mut Rng,
+) -> u32 {
     if temperature <= 0.0 {
-        return logits.iter().enumerate()
+        return logits
+            .iter()
+            .enumerate()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i as u32).unwrap_or(0);
+            .map(|(i, _)| i as u32)
+            .unwrap_or(0);
     }
 
     let inv_temp = 1.0 / temperature;
 
     // Top-k: find k largest logits
-    let mut indexed: Vec<(u32, f32)> = logits.iter().enumerate()
-        .map(|(i, &l)| (i as u32, l)).collect();
+    let mut indexed: Vec<(u32, f32)> = logits
+        .iter()
+        .enumerate()
+        .map(|(i, &l)| (i as u32, l))
+        .collect();
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     indexed.truncate(top_k);
 
     // Softmax over top-k
     let max_logit = indexed[0].1;
-    let mut probs: Vec<(u32, f32)> = indexed.iter()
+    let mut probs: Vec<(u32, f32)> = indexed
+        .iter()
         .map(|&(i, l)| (i, ((l - max_logit) * inv_temp).exp()))
         .collect();
     let sum: f32 = probs.iter().map(|(_, p)| p).sum();
-    for (_, p) in probs.iter_mut() { *p /= sum; }
+    for (_, p) in probs.iter_mut() {
+        *p /= sum;
+    }
 
     // Top-p within top-k
     let mut cumsum = 0.0f32;
     let mut cutoff = probs.len();
     for (i, &(_, p)) in probs.iter().enumerate() {
         cumsum += p;
-        if cumsum >= top_p { cutoff = i + 1; break; }
+        if cumsum >= top_p {
+            cutoff = i + 1;
+            break;
+        }
     }
     let candidates = &probs[..cutoff];
     let total: f32 = candidates.iter().map(|(_, p)| p).sum();
@@ -900,32 +977,45 @@ fn sample_token_top_k(logits: &[f32], temperature: f32, top_p: f32, top_k: usize
     let mut accum = 0.0f32;
     for &(token_id, prob) in candidates {
         accum += prob;
-        if accum >= rand_val { return token_id; }
+        if accum >= rand_val {
+            return token_id;
+        }
     }
     candidates[0].0
 }
 
 fn apply_presence_penalty(logits: &mut [f32], generated: &[u32], penalty: f32) {
-    if penalty <= 0.0 || generated.is_empty() { return; }
+    if penalty <= 0.0 || generated.is_empty() {
+        return;
+    }
     let mut seen = vec![false; logits.len()];
     for &tok in generated {
         let idx = tok as usize;
-        if idx < seen.len() { seen[idx] = true; }
+        if idx < seen.len() {
+            seen[idx] = true;
+        }
     }
     for (idx, &was_seen) in seen.iter().enumerate() {
-        if was_seen { logits[idx] -= penalty; }
+        if was_seen {
+            logits[idx] -= penalty;
+        }
     }
 }
 
 fn apply_repetition_penalty(logits: &mut [f32], generated: &[u32], penalty: f32) {
-    if penalty <= 1.0 { return; }
+    if penalty <= 1.0 {
+        return;
+    }
     let window = generated.len().min(64);
     let recent = &generated[generated.len() - window..];
     for &tok in recent {
         let idx = tok as usize;
         if idx < logits.len() {
-            if logits[idx] > 0.0 { logits[idx] /= penalty; }
-            else { logits[idx] *= penalty; }
+            if logits[idx] > 0.0 {
+                logits[idx] /= penalty;
+            } else {
+                logits[idx] *= penalty;
+            }
         }
     }
 }
@@ -975,7 +1065,9 @@ pub fn generate_gpu(
         }
     });
 
-    result.into_inner().unwrap_or(Err("No result from GPU thread".into()))
+    result
+        .into_inner()
+        .unwrap_or(Err("No result from GPU thread".into()))
 }
 
 fn generate_gpu_inner(
@@ -1018,7 +1110,7 @@ fn generate_gpu_inner(
     let config = &model.config;
     let mut cache = GpuHybridCache::<B>::new(config, &device);
     let mut generated_tokens: Vec<u32> = Vec::new();
-    let mut in_think_block = params.think;  // prompt already contains <think>\n
+    let mut in_think_block = params.think; // prompt already contains <think>\n
     let mut think_content = String::new();
     let mut think_tokens = 0u32;
     let mut rng = Rng::new();
@@ -1028,15 +1120,27 @@ fn generate_gpu_inner(
     let mut logits = forward_prefill_gpu(&model, &tokens, &mut cache);
     let prefill_time = t0.elapsed();
     let seq_len = tokens.len();
-    eprintln!("Prefill: {seq_len} tokens in {prefill_time:.1?} ({:.1} tok/s)",
-        seq_len as f64 / prefill_time.as_secs_f64());
+    eprintln!(
+        "Prefill: {seq_len} tokens in {prefill_time:.1?} ({:.1} tok/s)",
+        seq_len as f64 / prefill_time.as_secs_f64()
+    );
 
     // Sample first token
     if !in_think_block && params.temperature > 0.0 {
         apply_presence_penalty(&mut logits, &generated_tokens, params.presence_penalty);
     }
-    let mut next_token_id = sample_token_top_k(&logits, params.temperature, params.top_p, params.top_k, &mut rng);
-    eprintln!("First token: {} (id={})", tokenizer.decode(&[next_token_id]), next_token_id);
+    let mut next_token_id = sample_token_top_k(
+        &logits,
+        params.temperature,
+        params.top_p,
+        params.top_k,
+        &mut rng,
+    );
+    eprintln!(
+        "First token: {} (id={})",
+        tokenizer.decode(&[next_token_id]),
+        next_token_id
+    );
 
     let mut decode_tokens = 0u32;
     let decode_start = Instant::now();
@@ -1062,8 +1166,14 @@ fn generate_gpu_inner(
             }
         } else if next_token_id == crate::tokenizer::THINK_END {
             in_think_block = false;
-            eprintln!("\n[thinking done: {} tokens, {} chars]", think_tokens, think_content.len());
-            if params.show_think { eprintln!("</think>"); }
+            eprintln!(
+                "\n[thinking done: {} tokens, {} chars]",
+                think_tokens,
+                think_content.len()
+            );
+            if params.show_think {
+                eprintln!("</think>");
+            }
             think_content.clear();
             think_tokens = 0;
         } else {
@@ -1115,9 +1225,18 @@ fn generate_gpu_inner(
         // Think budget
         if in_think_block && think_tokens >= params.think_budget as u32 {
             next_token_id = crate::tokenizer::THINK_END;
-            eprintln!("\n[think budget reached ({} tokens), forcing </think>]", params.think_budget);
+            eprintln!(
+                "\n[think budget reached ({} tokens), forcing </think>]",
+                params.think_budget
+            );
         } else {
-            next_token_id = sample_token_top_k(&logits, params.temperature, params.top_p, params.top_k, &mut rng);
+            next_token_id = sample_token_top_k(
+                &logits,
+                params.temperature,
+                params.top_p,
+                params.top_k,
+                &mut rng,
+            );
         }
         decode_tokens += 1;
 
@@ -1130,16 +1249,21 @@ fn generate_gpu_inner(
     }
 
     if in_think_block {
-        eprintln!("\n[WARNING: thinking did not finish within {} tokens]", params.max_new_tokens);
+        eprintln!(
+            "\n[WARNING: thinking did not finish within {} tokens]",
+            params.max_new_tokens
+        );
     }
 
     println!();
 
     let decode_elapsed = decode_start.elapsed();
     if decode_tokens > 0 {
-        eprintln!("Decode: {} tokens in {decode_elapsed:.1?} ({:.2} tok/s)",
+        eprintln!(
+            "Decode: {} tokens in {decode_elapsed:.1?} ({:.2} tok/s)",
             decode_tokens,
-            decode_tokens as f64 / decode_elapsed.as_secs_f64());
+            decode_tokens as f64 / decode_elapsed.as_secs_f64()
+        );
     }
 
     Ok(())

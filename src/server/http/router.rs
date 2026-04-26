@@ -1,6 +1,6 @@
-use axum::{Router, middleware as axum_middleware, routing::get};
 use crate::server::http::handlers;
 use crate::server::http::middleware::request_id_middleware;
+use axum::{Router, middleware as axum_middleware, routing::get};
 
 pub fn build_router() -> Router {
     Router::new()
@@ -20,7 +20,12 @@ mod tests {
     async fn health_returns_200() {
         let app = build_router();
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -30,11 +35,18 @@ mod tests {
     async fn models_returns_qora_4b() {
         let app = build_router();
         let response = app
-            .oneshot(Request::builder().uri("/v1/models").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/models")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(body["data"][0]["id"], "qora-4b");
     }
@@ -53,7 +65,12 @@ mod tests {
     async fn response_carries_request_id_header() {
         let app = build_router();
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert!(response.headers().contains_key("x-request-id"));

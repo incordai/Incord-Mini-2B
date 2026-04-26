@@ -29,7 +29,9 @@ pub async fn request_id_middleware(mut req: Request, next: Next) -> Response {
     let mut response = next.run(req).await;
 
     if let Ok(value) = HeaderValue::from_str(&request_id) {
-        response.headers_mut().insert(REQUEST_ID_HEADER.clone(), value);
+        response
+            .headers_mut()
+            .insert(REQUEST_ID_HEADER.clone(), value);
     }
 
     tracing::info!(status = %response.status(), "request complete");

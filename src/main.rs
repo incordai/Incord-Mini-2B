@@ -26,7 +26,10 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "--prompt" => {
-                if i + 1 < args.len() { prompt = args[i + 1].clone(); i += 1; }
+                if i + 1 < args.len() {
+                    prompt = args[i + 1].clone();
+                    i += 1;
+                }
             }
             "--max-tokens" => {
                 if i + 1 < args.len() {
@@ -43,10 +46,16 @@ fn main() {
                 }
             }
             "--image" => {
-                if i + 1 < args.len() { image_path = Some(PathBuf::from(&args[i + 1])); i += 1; }
+                if i + 1 < args.len() {
+                    image_path = Some(PathBuf::from(&args[i + 1]));
+                    i += 1;
+                }
             }
             "--video" => {
-                if i + 1 < args.len() { video_path = Some(PathBuf::from(&args[i + 1])); i += 1; }
+                if i + 1 < args.len() {
+                    video_path = Some(PathBuf::from(&args[i + 1]));
+                    i += 1;
+                }
             }
             _ => {}
         }
@@ -57,20 +66,32 @@ fn main() {
     let sys = qor4b::system::SystemInfo::detect();
     let limits = sys.smart_limits();
     eprintln!("QORA-4B - Pure Rust Multimodal Inference Engine");
-    eprintln!("System: {} MB RAM ({} MB free), {} threads",
-        sys.total_ram_mb, sys.available_ram_mb, sys.cpu_threads);
+    eprintln!(
+        "System: {} MB RAM ({} MB free), {} threads",
+        sys.total_ram_mb, sys.available_ram_mb, sys.cpu_threads
+    );
 
     // Set defaults if user didn't specify
-    if !think_budget_explicit { think_budget = limits.default_think_budget; }
-    if !max_tokens_explicit { max_tokens = limits.default_max_tokens; }
+    if !think_budget_explicit {
+        think_budget = limits.default_think_budget;
+    }
+    if !max_tokens_explicit {
+        max_tokens = limits.default_max_tokens;
+    }
 
     // Hard cap: even explicit values get clamped on weak systems
     if think_budget > limits.max_think_budget {
-        eprintln!("System cap: think-budget {} → {}", think_budget, limits.max_think_budget);
+        eprintln!(
+            "System cap: think-budget {} → {}",
+            think_budget, limits.max_think_budget
+        );
         think_budget = limits.max_think_budget;
     }
     if max_tokens > limits.max_tokens {
-        eprintln!("System cap: max-tokens {} → {}", max_tokens, limits.max_tokens);
+        eprintln!(
+            "System cap: max-tokens {} → {}",
+            max_tokens, limits.max_tokens
+        );
         max_tokens = limits.max_tokens;
     }
 
@@ -87,8 +108,10 @@ fn main() {
             if max_tokens > limits.max_tokens {
                 max_tokens = limits.max_tokens;
             }
-            eprintln!("Auto-adjusted max-tokens to {} (think-budget {} + {} answer room)",
-                max_tokens, think_budget, min_answer);
+            eprintln!(
+                "Auto-adjusted max-tokens to {} (think-budget {} + {} answer room)",
+                max_tokens, think_budget, min_answer
+            );
         }
     }
 
@@ -105,21 +128,32 @@ fn main() {
     // Load model from same directory as the executable
     let exe_dir = std::env::current_exe()
         .expect("Cannot determine executable path")
-        .parent().unwrap().to_path_buf();
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let model_path = exe_dir.join("model.qor4b");
     eprintln!("Loading model from {}...", model_path.display());
     let t0 = Instant::now();
-    let weights = qor4b::save::load_model(&model_path)
-        .expect("Failed to load model");
+    let weights = qor4b::save::load_model(&model_path).expect("Failed to load model");
     let mem_mb = weights.memory_bytes() / (1024 * 1024);
-    eprintln!("Model loaded in {:.1?} ({} format, {mem_mb} MB)", t0.elapsed(), weights.format_name);
+    eprintln!(
+        "Model loaded in {:.1?} ({} format, {mem_mb} MB)",
+        t0.elapsed(),
+        weights.format_name
+    );
 
     // Load tokenizer from same directory as the executable
     let tokenizer_path = exe_dir.join("tokenizer.json");
     let tokenizer = qor4b::tokenizer::QoraTokenizer::from_file(&tokenizer_path)
         .expect("Failed to load tokenizer");
 
-    let temperature = if greedy { 0.0 } else if no_think { 0.7 } else { 1.0 };
+    let temperature = if greedy {
+        0.0
+    } else if no_think {
+        0.7
+    } else {
+        1.0
+    };
 
     let params = qor4b::generate::GenerateParams {
         max_new_tokens: max_tokens,
@@ -146,40 +180,59 @@ fn main() {
 
     if let Some(ref vid_path) = video_path {
         // Video + text mode
-        let vision = weights.vision.as_ref()
+        let vision = weights
+            .vision
+            .as_ref()
             .expect("Model has no vision weights");
 
         eprintln!("Loading video frames...");
-        let (pixels, num_frames, height, width) = qor4b::vision::load_video_frames(vid_path)
-            .expect("Failed to load video frames");
+        let (pixels, num_frames, height, width) =
+            qor4b::vision::load_video_frames(vid_path).expect("Failed to load video frames");
 
         eprintln!("Running vision encoder (video)...");
         let t_vis = Instant::now();
-        let (vision_embeds, num_vision_tokens) = vision.encode_video(&pixels, num_frames, height, width);
-        eprintln!("Vision encoder: {} tokens in {:.1?}", num_vision_tokens, t_vis.elapsed());
+        let (vision_embeds, num_vision_tokens) =
+            vision.encode_video(&pixels, num_frames, height, width);
+        eprintln!(
+            "Vision encoder: {} tokens in {:.1?}",
+            num_vision_tokens,
+            t_vis.elapsed()
+        );
 
         qor4b::generate::generate_with_video(
-            &weights, &tokenizer, &prompt,
-            &vision_embeds, num_vision_tokens,
+            &weights,
+            &tokenizer,
+            &prompt,
+            &vision_embeds,
+            num_vision_tokens,
             &params,
         );
     } else if let Some(ref img_path) = image_path {
         // Image + text mode
-        let vision = weights.vision.as_ref()
+        let vision = weights
+            .vision
+            .as_ref()
             .expect("Model has no vision weights");
 
         eprintln!("Loading image...");
-        let (pixels, height, width) = qor4b::vision::load_image(img_path)
-            .expect("Failed to load image");
+        let (pixels, height, width) =
+            qor4b::vision::load_image(img_path).expect("Failed to load image");
 
         eprintln!("Running vision encoder...");
         let t_vis = Instant::now();
         let (vision_embeds, num_vision_tokens) = vision.encode_image(&pixels, height, width);
-        eprintln!("Vision encoder: {} tokens in {:.1?}", num_vision_tokens, t_vis.elapsed());
+        eprintln!(
+            "Vision encoder: {} tokens in {:.1?}",
+            num_vision_tokens,
+            t_vis.elapsed()
+        );
 
         qor4b::generate::generate_with_image(
-            &weights, &tokenizer, &prompt,
-            &vision_embeds, num_vision_tokens,
+            &weights,
+            &tokenizer,
+            &prompt,
+            &vision_embeds,
+            num_vision_tokens,
             &params,
         );
     } else {

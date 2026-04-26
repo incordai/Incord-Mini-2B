@@ -1,5 +1,5 @@
-use std::net::SocketAddr;
 use qor4b::server::http::router::build_router;
+use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -14,7 +14,9 @@ impl TestServer {
         let addr = listener.local_addr().unwrap();
         let router = build_router();
         let handle = tokio::spawn(async move {
-            axum::serve(listener, router.into_make_service()).await.unwrap();
+            axum::serve(listener, router.into_make_service())
+                .await
+                .unwrap();
         });
         // Give the server a moment to be ready
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

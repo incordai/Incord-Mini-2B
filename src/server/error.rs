@@ -1,6 +1,6 @@
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde_json::json;
 use thiserror::Error;
 use uuid::Uuid;
@@ -30,13 +30,41 @@ impl IntoResponse for ServerError {
         let request_id = Uuid::new_v4();
         let (status, error_type, message) = match &self {
             Self::BadRequest(m) => (StatusCode::BAD_REQUEST, "invalid_request_error", m.clone()),
-            Self::Unauthorized => (StatusCode::UNAUTHORIZED, "authentication_error", self.to_string()),
-            Self::RateLimited { .. } => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", self.to_string()),
-            Self::QueueFull { .. } => (StatusCode::SERVICE_UNAVAILABLE, "server_error", self.to_string()),
-            Self::Timeout => (StatusCode::REQUEST_TIMEOUT, "timeout_error", self.to_string()),
-            Self::Inference(m) => (StatusCode::INTERNAL_SERVER_ERROR, "inference_error", m.clone()),
-            Self::Db(m) => (StatusCode::INTERNAL_SERVER_ERROR, "database_error", m.clone()),
-            Self::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", m.clone()),
+            Self::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "authentication_error",
+                self.to_string(),
+            ),
+            Self::RateLimited { .. } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                self.to_string(),
+            ),
+            Self::QueueFull { .. } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                self.to_string(),
+            ),
+            Self::Timeout => (
+                StatusCode::REQUEST_TIMEOUT,
+                "timeout_error",
+                self.to_string(),
+            ),
+            Self::Inference(m) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "inference_error",
+                m.clone(),
+            ),
+            Self::Db(m) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                m.clone(),
+            ),
+            Self::Internal(m) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                m.clone(),
+            ),
         };
 
         let body = Json(json!({
@@ -49,11 +77,11 @@ impl IntoResponse for ServerError {
 
         let mut response = (status, body).into_response();
 
-        if let Self::RateLimited { retry_after_secs } | Self::QueueFull { retry_after_secs } = &self {
-            response.headers_mut().insert(
-                "retry-after",
-                retry_after_secs.to_string().parse().unwrap(),
-            );
+        if let Self::RateLimited { retry_after_secs } | Self::QueueFull { retry_after_secs } = &self
+        {
+            response
+                .headers_mut()
+                .insert("retry-after", retry_after_secs.to_string().parse().unwrap());
         }
         response
     }

@@ -81,10 +81,17 @@ mod tests {
             model: "qora-4b".into(),
             choices: vec![Choice {
                 index: 0,
-                message: ResponseMessage { role: "assistant".into(), content: "hi".into() },
+                message: ResponseMessage {
+                    role: "assistant".into(),
+                    content: "hi".into(),
+                },
                 finish_reason: Some("stop".into()),
             }],
-            usage: Usage { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 },
+            usage: Usage {
+                prompt_tokens: 5,
+                completion_tokens: 1,
+                total_tokens: 6,
+            },
         };
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json["object"], "chat.completion");

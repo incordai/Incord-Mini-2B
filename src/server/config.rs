@@ -67,13 +67,15 @@ impl ServerConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn loads_minimal_valid_config() {
         let mut tmp = NamedTempFile::new().unwrap();
-        writeln!(tmp, r#"
+        writeln!(
+            tmp,
+            r#"
 [server]
 bind = "127.0.0.1:8080"
 
@@ -99,7 +101,9 @@ tpm = 60000
 prometheus_bind = "127.0.0.1:9090"
 log_level = "info"
 log_format = "json"
-"#).unwrap();
+"#
+        )
+        .unwrap();
         let cfg = ServerConfig::load_from_path(tmp.path()).unwrap();
         assert_eq!(cfg.server.bind, "127.0.0.1:8080");
         assert_eq!(cfg.scheduler.slot_count, 64);
@@ -109,10 +113,14 @@ log_format = "json"
     #[test]
     fn missing_required_field_errors() {
         let mut tmp = NamedTempFile::new().unwrap();
-        writeln!(tmp, r#"
+        writeln!(
+            tmp,
+            r#"
 [server]
 bind = "127.0.0.1:8080"
-"#).unwrap();
+"#
+        )
+        .unwrap();
         assert!(ServerConfig::load_from_path(tmp.path()).is_err());
     }
 }

@@ -65,7 +65,9 @@ pub enum MessageContent {
 }
 
 impl Default for MessageContent {
-    fn default() -> Self { Self::Text(String::new()) }
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

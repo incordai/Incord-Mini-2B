@@ -6,13 +6,13 @@ pub struct Qor4bConfig {
     pub vocab_size: usize,
     pub hidden_size: usize,
     pub num_layers: usize,
-    pub num_attn_heads: usize,      // full attention Q heads
-    pub num_kv_heads: usize,        // full attention KV heads
-    pub attn_head_dim: usize,       // full attention head dim
-    pub num_qk_heads: usize,        // DeltaNet QK heads
-    pub num_v_heads: usize,         // DeltaNet V heads
-    pub deltanet_head_dim: usize,   // DeltaNet head dim
-    pub conv_kernel_size: usize,    // DeltaNet conv1d kernel
+    pub num_attn_heads: usize,    // full attention Q heads
+    pub num_kv_heads: usize,      // full attention KV heads
+    pub attn_head_dim: usize,     // full attention head dim
+    pub num_qk_heads: usize,      // DeltaNet QK heads
+    pub num_v_heads: usize,       // DeltaNet V heads
+    pub deltanet_head_dim: usize, // DeltaNet head dim
+    pub conv_kernel_size: usize,  // DeltaNet conv1d kernel
     pub intermediate_size: usize,
     pub rope_theta: f64,
     pub partial_rotary_factor: f32, // fraction of head_dim that gets RoPE
