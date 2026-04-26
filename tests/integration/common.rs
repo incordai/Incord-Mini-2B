@@ -42,6 +42,31 @@ impl TestServer {
         let weights = Arc::new(qor4b::gemv::mock::tiny_weights());
         let tokenizer = build_test_tokenizer();
         let usage = UsageTracker::new(db.clone());
+
+        // Spawn 1 worker for tests. We use a dedicated OS thread with its own
+        // multi-thread Tokio runtime so that the worker's spawn_blocking + block_on
+        // does not interfere with the current_thread runtime used by #[tokio::test].
+        {
+            let worker = qor4b::server::scheduler::worker::Worker {
+                id: 0,
+                weights: weights.clone(),
+                tokenizer: tokenizer.clone(),
+                queue: queue.clone(),
+            };
+            std::thread::spawn(move || {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .enable_all()
+                    .build()
+                    .expect("worker runtime")
+                    .block_on(async move {
+                        // spawn() internally uses spawn_blocking which needs a
+                        // multi-thread runtime to avoid blocking the test runtime.
+                        let _ = worker.spawn().await;
+                    });
+            });
+        }
+
         let chat_state = Arc::new(ChatState { queue, weights, tokenizer, usage });
 
         let router = build_router(auth, admin, chat_state);

@@ -46,6 +46,22 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("loading tokenizer from {}", config.model.tokenizer.display()))?);
 
     let queue = qor4b::server::scheduler::queue::Queue::new(config.scheduler.max_queue);
+
+    // Spawn N worker threads. Conservative default (kernel work is internally rayon-parallelized,
+    // so too many workers contend for memory bandwidth). Cap at min(cpus, 8) for v1.
+    let num_workers = std::thread::available_parallelism()
+        .map(|p| p.get().min(8))
+        .unwrap_or(2);
+    for id in 0..num_workers {
+        qor4b::server::scheduler::worker::Worker {
+            id,
+            weights: weights.clone(),
+            tokenizer: tokenizer.clone(),
+            queue: queue.clone(),
+        }.spawn();
+    }
+    tracing::info!(num_workers, "spawned worker threads");
+
     let usage = qor4b::server::usage::tracker::UsageTracker::new(db.clone());
 
     let chat_state = Arc::new(qor4b::server::http::handlers::chat::ChatState {
