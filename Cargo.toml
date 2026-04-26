@@ -71,3 +71,7 @@ gpu-metal = ["cortex"]
 [[test]]
 name = "http_basic"
 path = "tests/integration/http_basic.rs"
+
+[[test]]
+name = "auth_flow"
+path = "tests/integration/auth_flow.rs"
