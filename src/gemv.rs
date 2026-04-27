@@ -321,7 +321,7 @@ pub fn gemm(x: &[f32], seq_len: usize, weight: &Weight) -> Vec<f32> {
 
 /// Fused gate+up GEMV: silu(gate(x)) * up(x) in one pass.
 #[inline]
-fn fused_gate_up_gemv(input: &[f32], gate_w: &Weight, up_w: &Weight) -> Vec<f32> {
+pub(crate) fn fused_gate_up_gemv(input: &[f32], gate_w: &Weight, up_w: &Weight) -> Vec<f32> {
     match (gate_w, up_w) {
         (Weight::Q4(gw), Weight::Q4(uw)) => fused_gate_up_q4(input, gw, uw),
         _ => {
@@ -910,15 +910,25 @@ fn lm_head_parallel(input: &[f32], embed: &Weight, vocab: usize, hidden: usize) 
 // DeltaNet single-step forward
 // ============================================================
 
-/// Process one token through a Gated DeltaNet layer.
-/// Returns residual-added output [hidden].
-fn forward_deltanet_decode(
-    x: &[f32],
+/// Run one step of the DeltaNet inner loop given pre-computed projections.
+/// Mirrors the per-token inner block of forward_deltanet_decode.
+///
+/// `qkv_t`: slice of in_proj_qkv output for this token [qkv_dim]
+/// `a_t`:   slice of in_proj_a output for this token [num_v_heads]
+/// `b_t`:   slice of in_proj_b output for this token [num_v_heads]
+/// `z_t`:   slice of in_proj_z output for this token [v_dim]
+///
+/// Returns the gated attention output `gated` of length [num_v_heads * head_dim],
+/// ready to be passed to out_proj.
+pub(crate) fn deltanet_step(
+    qkv_t: &[f32],
+    a_t: &[f32],
+    b_t: &[f32],
+    z_t: &[f32],
     lw: &DeltaNetLayerWeights,
     state: &mut DeltaNetState,
     config: &Qor4bConfig,
 ) -> Vec<f32> {
-    let hidden = config.hidden_size;
     let num_qk = config.num_qk_heads; // 16
     let num_v = config.num_v_heads; // 32
     let hd = config.deltanet_head_dim; // 128
@@ -931,16 +941,8 @@ fn forward_deltanet_decode(
     let v_per_qk = num_v / num_qk; // 2 — GVA ratio
     let scale = 1.0 / (hd as f32).sqrt(); // 1/sqrt(128)
 
-    // 1. Pre-attention RmsNorm
-    let x_norm = rms_norm(x, &lw.input_norm);
-
-    // 2. QKV projection
-    let qkv = gemv(&x_norm, &lw.in_proj_qkv); // [8192]
-
-    // 3. Causal Conv1d (kernel=4, depthwise across qkv_dim channels)
-    //    conv_buf stores last (kernel_size-1)=3 QKV values: [qkv_dim, 3]
-    //    Apply conv FIRST using old buffer + current qkv,
-    //    THEN update buffer.
+    // Conv1d (kernel=4, depthwise across qkv_dim channels)
+    // Apply conv FIRST using old buffer + current qkv, THEN update buffer.
     let conv_w = &lw.conv1d_weight;
     let mut qkv_conv = vec![0.0f32; qkv_dim];
     for ch in 0..qkv_dim {
@@ -948,7 +950,7 @@ fn forward_deltanet_decode(
         for t in 0..buf_len {
             sum += state.conv_buf[ch * buf_len + t] * conv_w[ch * ks + t];
         }
-        sum += qkv[ch] * conv_w[ch * ks + buf_len];
+        sum += qkv_t[ch] * conv_w[ch * ks + buf_len];
         qkv_conv[ch] = sum;
     }
 
@@ -959,17 +961,17 @@ fn forward_deltanet_decode(
             for t in 0..buf_len - 1 {
                 buf[ch * buf_len + t] = buf[ch * buf_len + t + 1];
             }
-            buf[ch * buf_len + buf_len - 1] = qkv[ch];
+            buf[ch * buf_len + buf_len - 1] = qkv_t[ch];
         }
     }
     state.conv_pos += 1;
 
-    // 4. SiLU on ALL channels (Q, K, V) — conv output includes activation
+    // SiLU on ALL channels (Q, K, V)
     for val in qkv_conv.iter_mut() {
         *val = silu(*val);
     }
 
-    // 5. Split QKV
+    // Split QKV
     let mut q = qkv_conv[..q_dim].to_vec(); // [2048]
     let mut k = qkv_conv[q_dim..q_dim + k_dim].to_vec(); // [2048]
     let v = &qkv_conv[q_dim + k_dim..]; // [4096]
@@ -978,50 +980,42 @@ fn forward_deltanet_decode(
     for h in 0..num_qk {
         l2_normalize(&mut q[h * hd..(h + 1) * hd]);
         l2_normalize(&mut k[h * hd..(h + 1) * hd]);
-        // Scale Q by 1/sqrt(head_k_dim)
         for j in 0..hd {
             q[h * hd + j] *= scale;
         }
     }
 
-    // 6. Compute alpha and beta per V head (32 values each)
-    let a_proj = gemv(&x_norm, &lw.in_proj_a); // [num_v=32]
-    let b_proj = gemv(&x_norm, &lw.in_proj_b); // [num_v=32]
-
+    // Compute alpha and beta per V head from pre-computed a_t, b_t
     let mut alpha = vec![0.0f32; num_v];
     let mut beta = vec![0.0f32; num_v];
     for vh in 0..num_v {
-        // alpha = exp(-exp(A_log[vh]) * softplus(a_proj[vh] + dt_bias[vh]))
         let a_exp = lw.a_log[vh].exp();
-        let sp = softplus(a_proj[vh] + lw.dt_bias[vh]);
+        let sp = softplus(a_t[vh] + lw.dt_bias[vh]);
         alpha[vh] = (-a_exp * sp).exp();
-        // beta = sigmoid(b_proj[vh])
-        beta[vh] = 1.0 / (1.0 + (-b_proj[vh]).exp());
+        beta[vh] = 1.0 / (1.0 + (-b_t[vh]).exp());
     }
 
-    // 7. GVA expansion: repeat Q and K from 16 to 32 heads
+    // GVA expansion: repeat Q and K from 16 to 32 heads
     let mut q_exp = vec![0.0f32; num_v * hd]; // [32, 128]
     let mut k_exp = vec![0.0f32; num_v * hd]; // [32, 128]
     for vh in 0..num_v {
-        let qk_h = vh / v_per_qk; // which QK head this V head maps to
+        let qk_h = vh / v_per_qk;
         q_exp[vh * hd..(vh + 1) * hd].copy_from_slice(&q[qk_h * hd..(qk_h + 1) * hd]);
         k_exp[vh * hd..(vh + 1) * hd].copy_from_slice(&k[qk_h * hd..(qk_h + 1) * hd]);
     }
 
-    // 8. State update per V head (delta rule + gating)
-    //    State S[vh] is [k_hd, v_hd] = [128, 128] per V head.
-    //    Stored as [v_hd, k_hd] in row-major (our convention).
-    let mut y = vec![0.0f32; v_dim]; // output [4096]
+    // State update per V head (delta rule + gating)
+    let mut y = vec![0.0f32; v_dim]; // [4096]
     let use_avx512 = crate::simd::has_avx512();
 
     for vh in 0..num_v {
         let al = alpha[vh];
         let be = beta[vh];
-        let q_h = &q_exp[vh * hd..(vh + 1) * hd]; // [128]
-        let k_h = &k_exp[vh * hd..(vh + 1) * hd]; // [128]
-        let v_h = &v[vh * hd..(vh + 1) * hd]; // [128]
+        let q_h = &q_exp[vh * hd..(vh + 1) * hd];
+        let k_h = &k_exp[vh * hd..(vh + 1) * hd];
+        let v_h = &v[vh * hd..(vh + 1) * hd];
         let s_base = vh * hd * hd;
-        let s = &mut state.s[s_base..s_base + hd * hd]; // [hd, hd]
+        let s = &mut state.s[s_base..s_base + hd * hd];
         let y_base = vh * hd;
 
         if use_avx512 {
@@ -1040,8 +1034,7 @@ fn forward_deltanet_decode(
             continue;
         }
 
-        // Scalar fallback
-        // Decay state FIRST: S *= alpha
+        // Scalar fallback: decay state
         for val in s.iter_mut() {
             *val *= al;
         }
@@ -1056,7 +1049,7 @@ fn forward_deltanet_decode(
             pred[r] = dot;
         }
 
-        // Delta update: S += beta * (v_h - pred) @ k_h^T → [hd, hd]
+        // Delta update: S += beta * (v_h - pred) @ k_h^T
         for r in 0..hd {
             let delta = be * (v_h[r] - pred[r]);
             for c in 0..hd {
@@ -1064,7 +1057,7 @@ fn forward_deltanet_decode(
             }
         }
 
-        // Output: y[vh*hd..(vh+1)*hd] = S @ q_h → [hd]
+        // Output: y[vh*hd..(vh+1)*hd] = S @ q_h
         for r in 0..hd {
             let mut dot = 0.0f32;
             for c in 0..hd {
@@ -1074,10 +1067,7 @@ fn forward_deltanet_decode(
         }
     }
 
-    // 9. Output gating: z = silu(in_proj_z @ x_norm), output = per_head_rms_norm(y) * z
-    let z = gemv(&x_norm, &lw.in_proj_z); // [v_dim=4096]
-
-    // Per-head RMS norm: norm_weight is [head_dim=128], applied to each of num_v=32 heads
+    // Output gating: per_head_rms_norm(y) * silu(z_t)
     let norm_gamma: Vec<f32> = lw.attn_norm_weight.iter().map(|v| v.to_f32()).collect();
     let mut y_normed = vec![0.0f32; v_dim];
     for h in 0..num_v {
@@ -1092,8 +1082,52 @@ fn forward_deltanet_decode(
 
     let mut gated = vec![0.0f32; v_dim];
     for j in 0..v_dim {
-        gated[j] = y_normed[j] * silu(z[j]);
+        gated[j] = y_normed[j] * silu(z_t[j]);
     }
+
+    gated
+}
+
+/// Batched fused gate+up: [N, hidden] -> [N, intermediate], applying SiLU(gate) * up per-row.
+pub(crate) fn fused_gate_up_gemm(
+    x: &[f32],
+    n: usize,
+    gate_w: &Weight,
+    up_w: &Weight,
+) -> Vec<f32> {
+    let intermediate = gate_w.n();
+    let hidden = gate_w.k();
+    let mut out = vec![0.0f32; n * intermediate];
+    out.par_chunks_mut(intermediate)
+        .zip(x.par_chunks(hidden))
+        .for_each(|(out_row, x_row)| {
+            let row = fused_gate_up_gemv(x_row, gate_w, up_w);
+            out_row.copy_from_slice(&row);
+        });
+    out
+}
+
+/// Process one token through a Gated DeltaNet layer.
+/// Returns residual-added output [hidden].
+pub(crate) fn forward_deltanet_decode(
+    x: &[f32],
+    lw: &DeltaNetLayerWeights,
+    state: &mut DeltaNetState,
+    config: &Qor4bConfig,
+) -> Vec<f32> {
+    let hidden = config.hidden_size;
+
+    // 1. Pre-attention RmsNorm
+    let x_norm = rms_norm(x, &lw.input_norm);
+
+    // 2. QKV projection
+    let qkv = gemv(&x_norm, &lw.in_proj_qkv); // [qkv_dim]
+
+    // 3-9. Inner DeltaNet step: conv1d + state update + z gating
+    let a_proj = gemv(&x_norm, &lw.in_proj_a); // [num_v]
+    let b_proj = gemv(&x_norm, &lw.in_proj_b); // [num_v]
+    let z_proj = gemv(&x_norm, &lw.in_proj_z); // [v_dim]
+    let gated = deltanet_step(&qkv, &a_proj, &b_proj, &z_proj, lw, state, config);
 
     // 10. Output projection
     let attn_out = gemv(&gated, &lw.out_proj);

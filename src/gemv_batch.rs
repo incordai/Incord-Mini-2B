@@ -112,6 +112,128 @@ mod tests {
 
 use crate::gemv::Weight;
 
+// ============================================================
+// Batched DeltaNet decode
+// ============================================================
+
+use crate::gemv::{DeltaNetLayerWeights, DeltaNetState, deltanet_step, fused_gate_up_gemm, gemm, rms_norm};
+
+/// Batched DeltaNet decode: process N slots' single-token inputs through one DeltaNet layer.
+/// Returns [N, hidden] residual outputs (input + attn_out + mlp_out).
+pub fn forward_deltanet_decode_batch(
+    x_batch: &[f32],
+    n: usize,
+    lw: &DeltaNetLayerWeights,
+    states: &mut [&mut DeltaNetState],
+    config: &crate::config::Qor4bConfig,
+) -> Vec<f32> {
+    debug_assert_eq!(x_batch.len(), n * config.hidden_size);
+    debug_assert_eq!(states.len(), n);
+
+    let hidden = config.hidden_size;
+    let num_v_heads = config.num_v_heads;
+    let head_dim = config.deltanet_head_dim;
+    let v_dim = num_v_heads * head_dim;
+    let qkv_dim = config.deltanet_qkv_dim();
+    let a_dim = num_v_heads; // in_proj_a output size
+    let b_dim = num_v_heads; // in_proj_b output size
+
+    // Step 1: per-slot RMSNorm
+    let mut x_norm = vec![0.0f32; n * hidden];
+    for i in 0..n {
+        let r = rms_norm(&x_batch[i * hidden..(i + 1) * hidden], &lw.input_norm);
+        x_norm[i * hidden..(i + 1) * hidden].copy_from_slice(&r);
+    }
+
+    // Step 2: batched projections (one GEMM each)
+    let qkv_all = gemm(&x_norm, n, &lw.in_proj_qkv); // [N, qkv_dim]
+    let a_all   = gemm(&x_norm, n, &lw.in_proj_a);   // [N, num_v_heads]
+    let b_all   = gemm(&x_norm, n, &lw.in_proj_b);   // [N, num_v_heads]
+    let z_all   = gemm(&x_norm, n, &lw.in_proj_z);   // [N, v_dim]
+
+    // Step 3: per-slot state update via deltanet_step (parallel across slots)
+    // Each slot's recurrent state is independent, so this is embarrassingly parallel.
+    let mut y_all = vec![0.0f32; n * v_dim];
+    // Use indexed parallel iteration: zip (index, out_chunk, state_mut)
+    {
+        use rayon::prelude::IndexedParallelIterator;
+        (0..n)
+            .into_par_iter()
+            .zip(y_all.par_chunks_mut(v_dim))
+            .zip(states.par_iter_mut())
+            .for_each(|((i, out_slice), state)| {
+                let qkv_t = &qkv_all[i * qkv_dim..(i + 1) * qkv_dim];
+                let a_t   = &a_all[i * a_dim..(i + 1) * a_dim];
+                let b_t   = &b_all[i * b_dim..(i + 1) * b_dim];
+                let z_t   = &z_all[i * v_dim..(i + 1) * v_dim];
+                let gated = deltanet_step(qkv_t, a_t, b_t, z_t, lw, state, config);
+                out_slice.copy_from_slice(&gated);
+            });
+    }
+
+    // Step 4: batched output projection
+    let proj = gemm(&y_all, n, &lw.out_proj); // [N, hidden]
+
+    // Step 5: per-slot post-attn RMSNorm
+    let mut x_post = vec![0.0f32; n * hidden];
+    for i in 0..n {
+        let r = rms_norm(&proj[i * hidden..(i + 1) * hidden], &lw.post_attn_norm);
+        x_post[i * hidden..(i + 1) * hidden].copy_from_slice(&r);
+    }
+
+    // Step 6: batched fused gate+up MLP
+    let mlp_inter = fused_gate_up_gemm(&x_post, n, &lw.gate_proj, &lw.up_proj);
+
+    // Step 7: batched down projection
+    let mlp_out = gemm(&mlp_inter, n, &lw.down_proj);
+
+    // Step 8: residual sum (input + attn_out + mlp_out)
+    let mut out = vec![0.0f32; n * hidden];
+    for i in 0..n * hidden {
+        out[i] = x_batch[i] + proj[i] + mlp_out[i];
+    }
+    out
+}
+
+#[cfg(test)]
+#[cfg(feature = "mock-weights")]
+mod deltanet_batch_tests {
+    use super::*;
+    use crate::config::LayerType;
+    use crate::gemv::mock::tiny_weights;
+    use crate::gemv::{DeltaNetState, HybridLayerWeights, embed_lookup, forward_deltanet_decode};
+
+    #[test]
+    fn deltanet_batch_n1_equals_single() {
+        let w = tiny_weights();
+        let layer_idx = w.config.layer_types.iter()
+            .position(|l| matches!(l, LayerType::DeltaNet))
+            .expect("tiny_config has DeltaNet layers");
+
+        let token_emb = embed_lookup(&w.embed, 1, w.hidden);
+
+        let lw = match &w.layers[layer_idx] {
+            HybridLayerWeights::DeltaNet(d) => d,
+            _ => unreachable!(),
+        };
+
+        // Single-slot reference
+        let mut state_single = DeltaNetState::new(&w.config);
+        let single_out = forward_deltanet_decode(&token_emb, lw, &mut state_single, &w.config);
+
+        // Batched N=1
+        let mut state_batched = DeltaNetState::new(&w.config);
+        let batched = forward_deltanet_decode_batch(
+            &token_emb, 1, lw, &mut [&mut state_batched], &w.config,
+        );
+
+        assert_eq!(single_out.len(), batched.len());
+        for (a, b) in single_out.iter().zip(batched.iter()) {
+            assert!((a - b).abs() < 5e-4, "deltanet diverged: {a} vs {b}");
+        }
+    }
+}
+
 /// Embed N tokens. Returns a [N, hidden] flattened vector (f32).
 pub fn batched_embed_lookup(
     embed: &Weight,
