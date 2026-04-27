@@ -56,21 +56,23 @@ async fn main() -> anyhow::Result<()> {
 
     let queue = qor4b::server::scheduler::queue::Queue::new(config.scheduler.max_queue);
 
-    // Spawn N worker threads. Conservative default (kernel work is internally rayon-parallelized,
-    // so too many workers contend for memory bandwidth). Cap at min(cpus, 8) for v1.
-    let num_workers = std::thread::available_parallelism()
-        .map(|p| p.get().min(8))
-        .unwrap_or(2);
-    for id in 0..num_workers {
-        qor4b::server::scheduler::worker::Worker {
-            id,
-            weights: weights.clone(),
-            tokenizer: tokenizer.clone(),
-            queue: queue.clone(),
-        }
-        .spawn();
-    }
-    tracing::info!(num_workers, "spawned worker threads");
+    // Spawn the slot pool
+    let pool = qor4b::server::scheduler::pool::SlotPool::new(config.scheduler.slot_count);
+
+    // Build the batcher and run it on a dedicated OS thread with its own multi_thread runtime
+    // (same pattern as M3 Task 6 — Worker had the same tokio deadlock issue, Batcher avoids
+    // the issue by NOT calling block_on inside spawn_blocking; it's a pure synchronous loop.)
+    let batcher = qor4b::server::scheduler::batcher::Batcher {
+        pool: pool.clone(),
+        queue: queue.clone(),
+        weights: weights.clone(),
+        tokenizer: tokenizer.clone(),
+    };
+    std::thread::Builder::new()
+        .name("qora-batcher".into())
+        .spawn(move || batcher.run())
+        .expect("failed to spawn batcher thread");
+    tracing::info!(slot_count = config.scheduler.slot_count, "batcher started");
 
     let usage = qor4b::server::usage::tracker::UsageTracker::new(db.clone());
 

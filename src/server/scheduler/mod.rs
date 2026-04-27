@@ -1,4 +1,7 @@
+pub mod batcher;
+pub mod pool;
 pub mod queue;
+pub mod slot;
 pub mod worker;
 
 #[derive(Debug, Clone)]
