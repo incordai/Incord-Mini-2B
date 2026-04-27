@@ -96,3 +96,8 @@ path = "tests/integration/gemv_batch_full_model.rs"
 name = "cancellation"
 path = "tests/integration/cancellation.rs"
 required-features = ["mock-weights"]
+
+[[test]]
+name = "slot_pool_concurrency"
+path = "tests/integration/slot_pool_concurrency.rs"
+required-features = ["mock-weights"]

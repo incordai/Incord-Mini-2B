@@ -43,7 +43,7 @@ impl TestServer {
         let tokenizer = build_test_tokenizer();
         let usage = UsageTracker::new(db.clone());
 
-        let pool = qor4b::server::scheduler::pool::SlotPool::new(8); // small slot pool for tests
+        let pool = qor4b::server::scheduler::pool::SlotPool::new(64); // 64-slot pool for concurrency acceptance tests
 
         let batcher = qor4b::server::scheduler::batcher::Batcher {
             pool: pool.clone(),
