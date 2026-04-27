@@ -21,6 +21,10 @@ impl Batcher {
         let config = self.weights.config.clone();
         let idle_sleep = std::time::Duration::from_millis(1);
         loop {
+            // Update slot / queue metrics at the top of every iteration.
+            crate::server::metrics::ACTIVE_SLOTS.set(self.pool.count_active() as f64);
+            crate::server::metrics::QUEUE_DEPTH.set(self.queue.len() as f64);
+
             // 1. Admit pending requests into free slots (non-blocking)
             self.admit_pending(&config);
 

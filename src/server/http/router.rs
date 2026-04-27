@@ -33,6 +33,7 @@ pub fn build_router(
     Router::new()
         .route("/health", get(handlers::health::health))
         .route("/v1/models", get(handlers::models::list_models))
+        .route("/metrics", get(handlers::metrics::metrics_handler))
         .merge(admin_routes)
         .merge(chat_routes)
         .layer(axum_mw::from_fn(request_id_middleware))

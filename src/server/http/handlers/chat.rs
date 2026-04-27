@@ -119,6 +119,10 @@ pub async fn chat_completions(
         sse_tx: tx,
         vision_embeds,
     };
+    crate::server::metrics::REQUESTS_TOTAL
+        .with_label_values(&["chat_completions", "received"])
+        .inc();
+
     state
         .queue
         .push(pending)
@@ -262,7 +266,8 @@ async fn non_stream_response(
         },
     };
 
-    let duration_ms = ((Utc::now().timestamp() - started).max(0)) as u32 * 1000;
+    let elapsed_secs = (Utc::now().timestamp() - started).max(0) as f64;
+    let duration_ms = (elapsed_secs * 1000.0) as u32;
     let _ = state.usage.record(UsageRecord {
         request_id: resp.id.clone(),
         user_id: key.user_id,
@@ -275,6 +280,11 @@ async fn non_stream_response(
         status: "success".into(),
     });
 
+    crate::server::metrics::TOKENS_EMITTED.inc_by(output_tokens as f64);
+    crate::server::metrics::REQUEST_DURATION
+        .with_label_values(&["chat_completions"])
+        .observe(elapsed_secs);
+
     Ok(Json(resp))
 }
 
@@ -286,12 +296,14 @@ async fn stream_response(
 ) -> impl IntoResponse {
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = Utc::now().timestamp() as u64;
+    let started = Utc::now().timestamp();
 
     let stream = stream::unfold(
-        (rx, id.clone(), model.clone(), created),
-        |(mut rx, id, model, created)| async move {
+        (rx, id.clone(), model.clone(), created, started),
+        |(mut rx, id, model, created, started)| async move {
             match rx.recv().await {
                 Some(SchedEvent::Token(_, text)) => {
+                    crate::server::metrics::TOKENS_EMITTED.inc();
                     let chunk = ChatCompletionChunk {
                         id: id.clone(),
                         object: "chat.completion.chunk",
@@ -308,9 +320,13 @@ async fn stream_response(
                     };
                     let ev = axum::response::sse::Event::default()
                         .data(serde_json::to_string(&chunk).unwrap());
-                    Some((ev, (rx, id, model, created)))
+                    Some((ev, (rx, id, model, created, started)))
                 }
                 Some(SchedEvent::Finish(r)) => {
+                    let elapsed = (Utc::now().timestamp() - started).max(0) as f64;
+                    crate::server::metrics::REQUEST_DURATION
+                        .with_label_values(&["chat_completions"])
+                        .observe(elapsed);
                     let chunk = ChatCompletionChunk {
                         id: id.clone(),
                         object: "chat.completion.chunk",
@@ -324,11 +340,11 @@ async fn stream_response(
                     };
                     let ev = axum::response::sse::Event::default()
                         .data(serde_json::to_string(&chunk).unwrap());
-                    Some((ev, (rx, id, model, created)))
+                    Some((ev, (rx, id, model, created, started)))
                 }
                 Some(SchedEvent::Error(e)) => {
                     let ev = axum::response::sse::Event::default().event("error").data(e);
-                    Some((ev, (rx, id, model, created)))
+                    Some((ev, (rx, id, model, created, started)))
                 }
                 None => None,
             }
