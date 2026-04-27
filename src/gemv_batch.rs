@@ -234,6 +234,128 @@ mod deltanet_batch_tests {
     }
 }
 
+// ============================================================
+// Batched FullAttn decode
+// ============================================================
+
+use crate::gemv::{FullAttnLayerWeights, KvCacheEntry, attn_step_into};
+
+/// Batched FullAttn decode: N slots' single-token inputs through one FullAttn layer.
+/// Returns [N, hidden] residual outputs.
+pub fn forward_fullattn_decode_batch(
+    x_batch: &[f32],            // [N, hidden]
+    n: usize,
+    lw: &FullAttnLayerWeights,
+    kvs: &mut [&mut KvCacheEntry],
+    rope_positions: &[usize],
+    rope_cos: &[f32],
+    rope_sin: &[f32],
+    config: &crate::config::Qor4bConfig,
+) -> Vec<f32> {
+    debug_assert_eq!(rope_positions.len(), n);
+    debug_assert_eq!(kvs.len(), n);
+
+    let hidden = config.hidden_size;
+    let head_dim = config.attn_head_dim;
+    let num_q = config.num_attn_heads;
+    let num_kv = config.num_kv_heads;
+    // Q projection includes interleaved gate: output dim is num_q * 2 * head_dim
+    let q_dim_with_gate = num_q * 2 * head_dim;
+    let kv_dim = num_kv * head_dim;
+    let attn_out_dim = num_q * head_dim;
+
+    // Step 1: per-slot RMSNorm
+    let mut x_norm = vec![0.0f32; n * hidden];
+    for i in 0..n {
+        let r = rms_norm(&x_batch[i * hidden..(i + 1) * hidden], &lw.input_norm);
+        x_norm[i * hidden..(i + 1) * hidden].copy_from_slice(&r);
+    }
+
+    // Step 2: batched Q/K/V projections (single GEMM each)
+    let q_all = gemm(&x_norm, n, &lw.q_proj); // [N, q_dim_with_gate]
+    let k_all = gemm(&x_norm, n, &lw.k_proj); // [N, kv_dim]
+    let v_all = gemm(&x_norm, n, &lw.v_proj); // [N, kv_dim]
+
+    // Step 3: per-slot attention via attn_step_into (parallelized across slots)
+    // Each slot's KV cache is independent, so this is embarrassingly parallel.
+    let mut attn_out = vec![0.0f32; n * attn_out_dim];
+    {
+        use rayon::prelude::IndexedParallelIterator;
+        (0..n)
+            .into_par_iter()
+            .zip(attn_out.par_chunks_mut(attn_out_dim))
+            .zip(kvs.par_iter_mut())
+            .for_each(|((i, out_row), kv)| {
+                let q = &q_all[i * q_dim_with_gate..(i + 1) * q_dim_with_gate];
+                let k = &k_all[i * kv_dim..(i + 1) * kv_dim];
+                let v = &v_all[i * kv_dim..(i + 1) * kv_dim];
+                let pos = rope_positions[i];
+                attn_step_into(q, k, v, *kv, pos, rope_cos, rope_sin, lw, config, out_row);
+            });
+    }
+
+    // Step 4: batched output projection
+    let proj = gemm(&attn_out, n, &lw.o_proj); // [N, hidden]
+
+    // Step 5: per-slot post-attn RMSNorm
+    let mut x_post = vec![0.0f32; n * hidden];
+    for i in 0..n {
+        let r = rms_norm(&proj[i * hidden..(i + 1) * hidden], &lw.post_attn_norm);
+        x_post[i * hidden..(i + 1) * hidden].copy_from_slice(&r);
+    }
+
+    // Step 6: batched fused gate+up MLP + down projection
+    let mlp_inter = fused_gate_up_gemm(&x_post, n, &lw.gate_proj, &lw.up_proj);
+    let mlp_out = gemm(&mlp_inter, n, &lw.down_proj);
+
+    // Step 7: residual (input + o_proj + mlp_out)
+    let mut out = vec![0.0f32; n * hidden];
+    for i in 0..n * hidden {
+        out[i] = x_batch[i] + proj[i] + mlp_out[i];
+    }
+    out
+}
+
+#[cfg(test)]
+#[cfg(feature = "mock-weights")]
+mod fullattn_batch_tests {
+    use super::*;
+    use crate::config::LayerType;
+    use crate::gemv::mock::tiny_weights;
+    use crate::gemv::{KvCacheEntry, HybridLayerWeights, embed_lookup, forward_attn_decode};
+
+    #[test]
+    fn fullattn_batch_n1_equals_single() {
+        let w = tiny_weights();
+        let layer_idx = w.config.layer_types.iter()
+            .position(|l| matches!(l, LayerType::FullAttn))
+            .expect("tiny_config has 1 FullAttn layer");
+
+        let token_emb = embed_lookup(&w.embed, 2, w.hidden);
+        let lw = match &w.layers[layer_idx] {
+            HybridLayerWeights::FullAttn(f) => f,
+            _ => unreachable!(),
+        };
+
+        // Single-slot reference
+        let mut kv_a = KvCacheEntry { k: Vec::new(), v: Vec::new(), seq_len: 0 };
+        let single = forward_attn_decode(&token_emb, lw, &mut kv_a, &w.config, &w.rope_cos, &w.rope_sin);
+
+        // Batched N=1 with fresh KV cache
+        let mut kv_b = KvCacheEntry { k: Vec::new(), v: Vec::new(), seq_len: 0 };
+        let batched = forward_fullattn_decode_batch(
+            &token_emb, 1, lw, &mut [&mut kv_b],
+            &[0], &w.rope_cos, &w.rope_sin, &w.config,
+        );
+
+        assert_eq!(single.len(), batched.len());
+        // Tolerance accounts for f16 KV (~1e-3 per multiply) and head_dim accumulation
+        for (a, b) in single.iter().zip(batched.iter()) {
+            assert!((a - b).abs() < 5e-3, "fullattn diverged: {a} vs {b}");
+        }
+    }
+}
+
 /// Embed N tokens. Returns a [N, hidden] flattened vector (f32).
 pub fn batched_embed_lookup(
     embed: &Weight,
