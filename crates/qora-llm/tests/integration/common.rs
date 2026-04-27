@@ -99,10 +99,19 @@ impl Drop for TestServer {
 
 /// Construct a tokenizer for tests. Looks for tokenizer.json at well-known paths.
 fn build_test_tokenizer() -> Arc<qor4b::tokenizer::QoraTokenizer> {
-    let candidates = ["model/tokenizer.json", "tests/fixtures/tokenizer.json"];
+    // CARGO_MANIFEST_DIR resolves to the crate root (crates/qora-llm/) at compile time.
+    // model/ lives two levels up at the workspace root; tests/fixtures/ is inside the crate.
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = std::path::Path::new(manifest_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or(std::path::Path::new("."));
+    let model_tok = workspace_root.join("model/tokenizer.json");
+    let fixture_tok = std::path::Path::new(manifest_dir).join("tests/fixtures/tokenizer.json");
+    let candidates: &[&std::path::Path] = &[model_tok.as_path(), fixture_tok.as_path()];
     for path in candidates {
-        if std::path::Path::new(path).exists()
-            && let Ok(t) = qor4b::tokenizer::QoraTokenizer::from_file(std::path::Path::new(path))
+        if path.exists()
+            && let Ok(t) = qor4b::tokenizer::QoraTokenizer::from_file(path)
         {
             return Arc::new(t);
         }
