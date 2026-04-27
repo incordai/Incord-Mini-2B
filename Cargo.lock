@@ -4976,8 +4976,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "qora-server-stub"
+name = "qora-server"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "half",
+ "qor4b",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "quick-error"
