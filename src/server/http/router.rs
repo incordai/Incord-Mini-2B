@@ -73,11 +73,13 @@ mod tests {
         let weights = Arc::new(crate::gemv::mock::tiny_weights());
         let tokenizer = build_test_tokenizer();
         let usage = UsageTracker::new(db.clone());
+        let vision_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let chat_state = Arc::new(ChatState {
             queue,
             weights,
             tokenizer,
             usage,
+            vision_semaphore,
         });
 
         (auth, admin, chat_state, dir)

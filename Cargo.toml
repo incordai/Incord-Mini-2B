@@ -56,6 +56,7 @@ hex = "0.4"
 # NEW M6 vision dependencies (pure Rust)
 base64 = "0.22"
 urlencoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 
 [dependencies.cortex]
 git = "https://github.com/qora-protocol/cortex"
@@ -63,7 +64,6 @@ features = ["ndarray"]
 optional = true
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 tempfile = "3"
 tokio-test = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }

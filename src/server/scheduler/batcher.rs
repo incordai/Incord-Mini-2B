@@ -1,5 +1,5 @@
 use crate::config::Qor4bConfig;
-use crate::gemv::{ModelWeights, prefill};
+use crate::gemv::{ModelWeights, prefill, prefill_with_vision};
 use crate::gemv_batch::forward_decode_batch;
 use crate::server::scheduler::pool::SlotPool;
 use crate::server::scheduler::queue::Queue;
@@ -87,7 +87,19 @@ impl Batcher {
 
             let prompt_tokens = slot.session.as_ref().unwrap().prompt_tokens.clone();
             let inference = slot.inference.as_mut().unwrap();
-            let mut logits = prefill(&self.weights, &prompt_tokens, &mut inference.cache);
+            let mut logits = if let Some((ref embeds, num_tokens)) = slot.vision_embeds {
+                prefill_with_vision(
+                    &self.weights,
+                    &prompt_tokens,
+                    embeds,
+                    num_tokens,
+                    &mut inference.cache,
+                )
+            } else {
+                prefill(&self.weights, &prompt_tokens, &mut inference.cache)
+            };
+            // Free vision embeddings: already absorbed into the KV/state cache.
+            slot.vision_embeds = None;
             inference.rope_pos = prompt_tokens.len();
 
             // Sample the first token

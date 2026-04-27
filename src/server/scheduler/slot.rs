@@ -18,6 +18,9 @@ pub struct Slot {
     pub inference: Option<SlotInferenceState>,
     pub sse_tx: Option<mpsc::Sender<Event>>,
     pub admitted_at: Option<std::time::Instant>,
+    /// Pre-encoded vision embeddings carried from PendingRequest.
+    /// Consumed (set to None) after prefill_with_vision absorbs them into the cache.
+    pub vision_embeds: Option<(Vec<f32>, usize)>,
 }
 
 impl Slot {
@@ -29,6 +32,7 @@ impl Slot {
             inference: None,
             sse_tx: None,
             admitted_at: None,
+            vision_embeds: None,
         }
     }
 
@@ -42,5 +46,6 @@ impl Slot {
         self.inference = None;
         self.sse_tx = None;
         self.admitted_at = None;
+        self.vision_embeds = None;
     }
 }

@@ -26,6 +26,7 @@ impl SlotPool {
                 slot.session = Some(req.session);
                 slot.inference = Some(SlotInferenceState::new(config));
                 slot.sse_tx = Some(req.sse_tx);
+                slot.vision_embeds = req.vision_embeds;
                 slot.phase = SlotPhase::Prefilling;
                 slot.admitted_at = Some(std::time::Instant::now());
                 return true;
@@ -73,6 +74,7 @@ mod tests {
                 started_at: 0,
             },
             sse_tx: tx,
+            vision_embeds: None,
         }
     }
 

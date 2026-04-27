@@ -31,6 +31,8 @@ pub struct ChatState {
     pub weights: Arc<ModelWeights>,
     pub tokenizer: Arc<QoraTokenizer>,
     pub usage: UsageTracker,
+    /// Semaphore limiting concurrent vision encodes (protects peak memory).
+    pub vision_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 pub async fn chat_completions(
@@ -45,11 +47,12 @@ pub async fn chat_completions(
         )));
     }
 
-    // Build the user message string. OpenAI sends a sequence of system/user/assistant messages;
+    // Build the user message string and collect any inline/remote image bytes.
+    // OpenAI sends a sequence of system/user/assistant messages;
     // QORA's tokenizer.format_chat takes a single user_message and builds the full prompt
     // (with system prompt + chat template) internally. For v1, concatenate all messages
     // into a single user message; system content becomes a prefix.
-    let user_message = render_user_message(&req.messages)?;
+    let (user_message, images) = render_user_message_with_images(&req.messages).await?;
     let think = req.think.unwrap_or(true);
     let max_tokens = req.max_tokens.unwrap_or(1024) as usize;
 
@@ -78,10 +81,43 @@ pub async fn chat_completions(
         started_at: Utc::now().timestamp(),
     };
 
+    // If there are images, encode the first one (v1: single-image per request).
+    let vision_embeds: Option<(Vec<f32>, usize)> = if !images.is_empty() {
+        let img_bytes = images.into_iter().next().unwrap();
+        let permit = state
+            .vision_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ServerError::Internal("vision semaphore closed".into()))?;
+        let weights_clone = state.weights.clone();
+        let result: Result<_, ServerError> = tokio::task::spawn_blocking(move || {
+            let _permit = permit; // hold permit for duration of encode
+            let vision = weights_clone
+                .vision
+                .as_ref()
+                .ok_or_else(|| ServerError::Internal("model has no vision weights".into()))?;
+            let img = image::load_from_memory(&img_bytes)
+                .map_err(|e| ServerError::BadRequest(format!("decode image: {e}")))?;
+            let rgb = img.to_rgb8();
+            let h = rgb.height() as usize;
+            let w = rgb.width() as usize;
+            let (pixels, ph, pw) = crate::vision::pixels_from_rgb_bytes(rgb.as_raw(), w, h);
+            let (embeds, num_tokens) = vision.encode_image(&pixels, ph, pw);
+            Ok::<_, ServerError>((embeds, num_tokens))
+        })
+        .await
+        .map_err(|e| ServerError::Internal(format!("vision task panicked: {e}")))?;
+        Some(result?)
+    } else {
+        None
+    };
+
     let (tx, rx) = mpsc::channel::<SchedEvent>(64);
     let pending = PendingRequest {
         session,
         sse_tx: tx,
+        vision_embeds,
     };
     state
         .queue
@@ -105,28 +141,68 @@ pub async fn chat_completions(
     }
 }
 
-fn render_user_message(messages: &[Message]) -> ServerResult<String> {
+/// Build the user message string and collect raw image bytes from any ImageUrl content parts.
+/// Returns (combined_text, image_bytes_vec).
+async fn render_user_message_with_images(
+    messages: &[Message],
+) -> ServerResult<(String, Vec<Vec<u8>>)> {
+    use crate::server::openai::vision::{VisionContent, parse_image_url};
+
     if messages.is_empty() {
         return Err(ServerError::BadRequest(
             "messages array must not be empty".into(),
         ));
     }
+
     let mut combined = String::new();
+    let mut images: Vec<Vec<u8>> = Vec::new();
+
     for m in messages {
-        let text = match &m.content {
-            MessageContent::Text(t) => t.clone(),
+        let mut text = String::new();
+        match &m.content {
+            MessageContent::Text(t) => text.push_str(t),
             MessageContent::Parts(parts) => {
-                let mut s = String::new();
                 for p in parts {
-                    if let ContentPart::Text { text } = p {
-                        s.push_str(text);
-                        s.push('\n');
+                    match p {
+                        ContentPart::Text { text: t } => {
+                            text.push_str(t);
+                            text.push('\n');
+                        }
+                        ContentPart::ImageUrl { image_url } => {
+                            let parsed = parse_image_url(&image_url.url).map_err(|e| {
+                                ServerError::BadRequest(e.to_string())
+                            })?;
+                            let bytes = match parsed {
+                                VisionContent::Inline { bytes, .. } => bytes,
+                                VisionContent::Remote { url } => {
+                                    let r = reqwest::get(&url).await.map_err(|e| {
+                                        ServerError::BadRequest(format!(
+                                            "fetching image: {e}"
+                                        ))
+                                    })?;
+                                    if !r.status().is_success() {
+                                        return Err(ServerError::BadRequest(format!(
+                                            "image fetch {} -> {}",
+                                            url,
+                                            r.status()
+                                        )));
+                                    }
+                                    r.bytes()
+                                        .await
+                                        .map_err(|e| {
+                                            ServerError::BadRequest(e.to_string())
+                                        })?
+                                        .to_vec()
+                                }
+                            };
+                            // Insert the vision placeholder token sequence into the text.
+                            text.push_str("<|vision_start|><|image_pad|><|vision_end|>");
+                            images.push(bytes);
+                        }
                     }
-                    // ImageUrl handled in M6 vision integration
                 }
-                s
             }
-        };
+        }
         // Prefix non-user messages with role marker so the model sees context.
         if m.role == "user" {
             combined.push_str(&text);
@@ -134,7 +210,8 @@ fn render_user_message(messages: &[Message]) -> ServerResult<String> {
             combined.push_str(&format!("[{}] {}\n", m.role, text));
         }
     }
-    Ok(combined)
+
+    Ok((combined, images))
 }
 
 async fn non_stream_response(
