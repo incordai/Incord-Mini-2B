@@ -43,29 +43,18 @@ impl TestServer {
         let tokenizer = build_test_tokenizer();
         let usage = UsageTracker::new(db.clone());
 
-        // Spawn 1 worker for tests. We use a dedicated OS thread with its own
-        // multi-thread Tokio runtime so that the worker's spawn_blocking + block_on
-        // does not interfere with the current_thread runtime used by #[tokio::test].
-        {
-            let worker = qor4b::server::scheduler::worker::Worker {
-                id: 0,
-                weights: weights.clone(),
-                tokenizer: tokenizer.clone(),
-                queue: queue.clone(),
-            };
-            std::thread::spawn(move || {
-                tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .enable_all()
-                    .build()
-                    .expect("worker runtime")
-                    .block_on(async move {
-                        // spawn() internally uses spawn_blocking which needs a
-                        // multi-thread runtime to avoid blocking the test runtime.
-                        let _ = worker.spawn().await;
-                    });
-            });
-        }
+        let pool = qor4b::server::scheduler::pool::SlotPool::new(8); // small slot pool for tests
+
+        let batcher = qor4b::server::scheduler::batcher::Batcher {
+            pool: pool.clone(),
+            queue: queue.clone(),
+            weights: weights.clone(),
+            tokenizer: tokenizer.clone(),
+        };
+        std::thread::Builder::new()
+            .name("test-batcher".into())
+            .spawn(move || batcher.run())
+            .expect("test batcher spawn");
 
         let chat_state = Arc::new(ChatState {
             queue,
