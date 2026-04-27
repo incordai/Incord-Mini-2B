@@ -15,6 +15,7 @@ use crate::api::openai::response::{
     ResponseMessage, Usage,
 };
 use crate::engine::chat::{ChatEvent, ChatMessage, ChatRequest, FinishReason};
+use crate::engine::tts::TtsRequest as EngineTtsRequest;
 use crate::engine::Task;
 use crate::error::ServerError;
 use crate::http::sse::into_sse_response;
@@ -35,7 +36,7 @@ pub async fn unified_inference(
     }
     match req.task {
         Task::Chat => handle_chat(state, req).await,
-        Task::Tts => Err(ServerError::Internal("tts engines not yet wired (M11)".into())),
+        Task::Tts => handle_tts(state, req).await,
         Task::Stt => Err(ServerError::Internal("stt engines not yet wired (M12)".into())),
         Task::Embedding => Err(ServerError::Internal("embedding engines not yet wired (M13)".into())),
         Task::Rerank => Err(ServerError::Internal("rerank engines not yet wired (M13)".into())),
@@ -90,6 +91,98 @@ pub async fn openai_chat_completions(
     }
     handle_chat(state, inference_req).await
 }
+
+// ---------------------------------------------------------------------------
+// TTS handler + OpenAI /v1/audio/speech alias
+// ---------------------------------------------------------------------------
+
+async fn handle_tts(
+    state: Arc<InferenceState>,
+    req: InferenceRequest,
+) -> Result<axum::response::Response, ServerError> {
+    let engine = state.registry.get_tts(&req.model)
+        .ok_or_else(|| ServerError::BadRequest(format!("model `{}` is not a tts model", req.model)))?;
+
+    // Extract input text from the generic `input` field.
+    let input_text = match req.input {
+        Some(serde_json::Value::String(s)) => s,
+        Some(other) => return Err(ServerError::BadRequest(
+            format!("tts input must be a string, got: {other}")
+        )),
+        None => return Err(ServerError::BadRequest("tts request missing 'input' field".into())),
+    };
+
+    let tts_req = EngineTtsRequest {
+        model: req.model.clone(),
+        input: input_text,
+        voice: req.voice,
+        format: req.format,
+        language: req.language,
+    };
+
+    let output = engine.synthesize(tts_req).await
+        .map_err(|e| ServerError::Inference(format!("tts synthesis: {e}")))?;
+
+    let content_type = match output.format.as_str() {
+        "wav"  => "audio/wav",
+        "mp3"  => "audio/mpeg",
+        _      => "application/octet-stream",
+    };
+
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, content_type)],
+        output.audio,
+    ).into_response())
+}
+
+/// OpenAI-compatible request body for `/v1/audio/speech`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct OpenAiSpeechRequest {
+    pub model: String,
+    pub input: String,
+    pub voice: Option<String>,
+    /// "wav" or "mp3" (only "wav" supported in v1)
+    pub response_format: Option<String>,
+    pub language: Option<String>,
+}
+
+/// OpenAI-compatible alias: POST /v1/audio/speech
+pub async fn openai_audio_speech(
+    State(state): State<Arc<InferenceState>>,
+    Json(req): Json<OpenAiSpeechRequest>,
+) -> Result<axum::response::Response, ServerError> {
+    let inference_req = InferenceRequest {
+        task: Task::Tts,
+        model: req.model,
+        messages: vec![],
+        input: Some(serde_json::Value::String(req.input)),
+        voice: req.voice,
+        format: req.response_format,
+        language: req.language,
+        audio: None,
+        audio_format: None,
+        query: None,
+        documents: vec![],
+        top_k: None,
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stream: false,
+        think: None,
+        think_budget: None,
+    };
+
+    if !state.registry.contains(&inference_req.model) {
+        return Err(ServerError::BadRequest(
+            format!("unknown model: {}", inference_req.model)
+        ));
+    }
+    handle_tts(state, inference_req).await
+}
+
+// ---------------------------------------------------------------------------
+// Chat handler
+// ---------------------------------------------------------------------------
 
 async fn handle_chat(
     state: Arc<InferenceState>,

@@ -4994,6 +4994,7 @@ dependencies = [
  "once_cell",
  "prometheus",
  "qor4b",
+ "qora-tts",
  "rand_core 0.6.4",
  "redb",
  "rustls",
@@ -5010,6 +5011,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "qora-tts"
+version = "0.1.0"
+dependencies = [
+ "half",
+ "safetensors 0.4.5",
+ "serde",
+ "serde_json",
+ "tokenizers",
 ]
 
 [[package]]
@@ -5719,6 +5731,16 @@ name = "safetensors"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d93279b86b3de76f820a8854dd06cbc33cfa57a417b19c47f6a25280112fb1df"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "safetensors"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44560c11236a6130a46ce36c836a62936dc81ebf8c36a37947423571be0e55b6"
 dependencies = [
  "serde",
  "serde_json",

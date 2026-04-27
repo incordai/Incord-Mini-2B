@@ -8,6 +8,7 @@ path = "src/lib.rs"
 
 [dependencies]
 qor4b = { path = "../qora-llm" }
+qora-tts = { path = "../../../QORA-TTS" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -59,4 +60,9 @@ required-features = ["mock-weights"]
 [[test]]
 name = "inference_dispatch"
 path = "tests/inference_dispatch.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "tts_smoke"
+path = "tests/tts_smoke.rs"
 required-features = ["mock-weights"]
