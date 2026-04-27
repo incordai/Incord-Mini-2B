@@ -1,9 +1,7 @@
-//! qora-server: HTTP API + scheduler + model engine traits.
-//!
-//! This crate provides the multi-model API surface. Each model type
-//! (LLM, TTS, STT, embedding, rerank) implements a trait below.
-//! The registry holds Arc<dyn ChatEngine> etc. and dispatches
-//! requests by task and model id.
+//! qora-server: HTTP API + scheduler + multi-model registry.
 
+pub mod config;
 pub mod engine;
 pub mod engines;
+pub mod loader;
+pub mod registry;

@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }
 half = { workspace = true }
+toml = "0.8"
 
 [dev-dependencies]
 qor4b = { path = "../qora-llm", features = ["mock-weights"] }
@@ -28,4 +29,9 @@ mock-weights = ["qor4b/mock-weights"]
 [[test]]
 name = "llm_engine_smoke"
 path = "tests/llm_engine_smoke.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "registry_smoke"
+path = "tests/registry_smoke.rs"
 required-features = ["mock-weights"]
