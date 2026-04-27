@@ -62,12 +62,18 @@ optional = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 tempfile = "3"
 tokio-test = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
 default = []
 gpu = ["cortex"]
 gpu-metal = ["cortex"]
 mock-weights = []
+
+[[bench]]
+name = "decode_throughput"
+harness = false
+required-features = ["mock-weights"]
 
 [[test]]
 name = "http_basic"
@@ -81,3 +87,7 @@ path = "tests/integration/auth_flow.rs"
 name = "chat_completions"
 path = "tests/integration/chat_completions.rs"
 required-features = ["mock-weights"]
+
+[[test]]
+name = "gemv_batch_full_model"
+path = "tests/integration/gemv_batch_full_model.rs"

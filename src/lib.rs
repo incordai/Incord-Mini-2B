@@ -1,5 +1,6 @@
 pub mod config;
 pub mod gemv;
+pub mod gemv_batch;
 pub mod generate;
 pub mod save;
 pub mod simd;
