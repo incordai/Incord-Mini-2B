@@ -91,3 +91,8 @@ required-features = ["mock-weights"]
 [[test]]
 name = "gemv_batch_full_model"
 path = "tests/integration/gemv_batch_full_model.rs"
+
+[[test]]
+name = "cancellation"
+path = "tests/integration/cancellation.rs"
+required-features = ["mock-weights"]
