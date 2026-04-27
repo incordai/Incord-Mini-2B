@@ -1,6 +1,6 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use qor4b::gemv::{forward_decode, mock::tiny_weights};
-use qor4b::gemv_batch::{forward_decode_batch, SlotInferenceState};
+use qor4b::gemv_batch::{SlotInferenceState, forward_decode_batch};
 
 fn bench_throughput(c: &mut Criterion) {
     let w = tiny_weights();
@@ -10,9 +10,8 @@ fn bench_throughput(c: &mut Criterion) {
         group.throughput(Throughput::Elements(*n as u64));
 
         group.bench_with_input(BenchmarkId::new("batched", n), n, |b, &n| {
-            let mut states: Vec<SlotInferenceState> = (0..n)
-                .map(|_| SlotInferenceState::new(&w.config))
-                .collect();
+            let mut states: Vec<SlotInferenceState> =
+                (0..n).map(|_| SlotInferenceState::new(&w.config)).collect();
             // Init with non-zero token to avoid trivial paths
             for s in states.iter_mut() {
                 s.last_token = 5;
@@ -24,9 +23,8 @@ fn bench_throughput(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("sequential", n), n, |b, &n| {
-            let mut states: Vec<SlotInferenceState> = (0..n)
-                .map(|_| SlotInferenceState::new(&w.config))
-                .collect();
+            let mut states: Vec<SlotInferenceState> =
+                (0..n).map(|_| SlotInferenceState::new(&w.config)).collect();
             for s in states.iter_mut() {
                 s.last_token = 5;
             }

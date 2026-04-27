@@ -36,9 +36,9 @@ impl SlotInferenceState {
     }
 }
 
-use crate::gemv::{CacheEntry, HybridLayerWeights, ModelWeights};
-#[cfg(test)]
+#[cfg(all(test, feature = "mock-weights"))]
 use crate::gemv::forward_decode;
+use crate::gemv::{CacheEntry, HybridLayerWeights, ModelWeights};
 use rayon::prelude::*;
 
 pub fn forward_decode_batch(
@@ -46,7 +46,9 @@ pub fn forward_decode_batch(
     slots: &mut [&mut SlotInferenceState],
 ) -> Vec<Vec<f32>> {
     let n = slots.len();
-    if n == 0 { return Vec::new(); }
+    if n == 0 {
+        return Vec::new();
+    }
 
     let config = &weights.config;
     let hidden = weights.hidden;
@@ -63,7 +65,8 @@ pub fn forward_decode_batch(
         match layer {
             HybridLayerWeights::DeltaNet(lw) => {
                 // Collect mut refs to each slot's DeltaNet state at this layer
-                let mut states: Vec<&mut crate::gemv::DeltaNetState> = slots.iter_mut()
+                let mut states: Vec<&mut crate::gemv::DeltaNetState> = slots
+                    .iter_mut()
                     .map(|s| match &mut s.cache.entries[layer_idx] {
                         CacheEntry::DeltaNet(d) => d,
                         _ => panic!("layer/cache type mismatch at layer {layer_idx}"),
@@ -72,25 +75,41 @@ pub fn forward_decode_batch(
                 x = forward_deltanet_decode_batch(&x, n, lw, &mut states, config);
             }
             HybridLayerWeights::FullAttn(lw) => {
-                let mut kvs: Vec<&mut KvCacheEntry> = slots.iter_mut()
+                let mut kvs: Vec<&mut KvCacheEntry> = slots
+                    .iter_mut()
                     .map(|s| match &mut s.cache.entries[layer_idx] {
                         CacheEntry::KvCache(k) => k,
                         _ => panic!("layer/cache type mismatch at layer {layer_idx}"),
                     })
                     .collect();
                 x = forward_fullattn_decode_batch(
-                    &x, n, lw, &mut kvs,
-                    &rope_positions, &weights.rope_cos, &weights.rope_sin, config,
+                    &x,
+                    n,
+                    lw,
+                    &mut kvs,
+                    &rope_positions,
+                    &weights.rope_cos,
+                    &weights.rope_sin,
+                    config,
                 );
             }
         }
     }
 
     // Bump rope positions for next decode
-    for s in slots.iter_mut() { s.rope_pos += 1; }
+    for s in slots.iter_mut() {
+        s.rope_pos += 1;
+    }
 
     // Final norm + lm_head
-    batched_lm_head(&x, n, &weights.final_norm, &weights.embed, weights.vocab, hidden)
+    batched_lm_head(
+        &x,
+        n,
+        &weights.final_norm,
+        &weights.embed,
+        weights.vocab,
+        hidden,
+    )
 }
 
 #[cfg(test)]
@@ -154,7 +173,9 @@ use crate::gemv::Weight;
 // Batched DeltaNet decode
 // ============================================================
 
-use crate::gemv::{DeltaNetLayerWeights, DeltaNetState, deltanet_step, fused_gate_up_gemm, gemm, rms_norm};
+use crate::gemv::{
+    DeltaNetLayerWeights, DeltaNetState, deltanet_step, fused_gate_up_gemm, gemm, rms_norm,
+};
 
 /// Batched DeltaNet decode: process N slots' single-token inputs through one DeltaNet layer.
 /// Returns [N, hidden] residual outputs (input + attn_out + mlp_out).
@@ -185,9 +206,9 @@ pub fn forward_deltanet_decode_batch(
 
     // Step 2: batched projections (one GEMM each)
     let qkv_all = gemm(&x_norm, n, &lw.in_proj_qkv); // [N, qkv_dim]
-    let a_all   = gemm(&x_norm, n, &lw.in_proj_a);   // [N, num_v_heads]
-    let b_all   = gemm(&x_norm, n, &lw.in_proj_b);   // [N, num_v_heads]
-    let z_all   = gemm(&x_norm, n, &lw.in_proj_z);   // [N, v_dim]
+    let a_all = gemm(&x_norm, n, &lw.in_proj_a); // [N, num_v_heads]
+    let b_all = gemm(&x_norm, n, &lw.in_proj_b); // [N, num_v_heads]
+    let z_all = gemm(&x_norm, n, &lw.in_proj_z); // [N, v_dim]
 
     // Step 3: per-slot state update via deltanet_step (parallel across slots)
     // Each slot's recurrent state is independent, so this is embarrassingly parallel.
@@ -201,9 +222,9 @@ pub fn forward_deltanet_decode_batch(
             .zip(states.par_iter_mut())
             .for_each(|((i, out_slice), state)| {
                 let qkv_t = &qkv_all[i * qkv_dim..(i + 1) * qkv_dim];
-                let a_t   = &a_all[i * a_dim..(i + 1) * a_dim];
-                let b_t   = &b_all[i * b_dim..(i + 1) * b_dim];
-                let z_t   = &z_all[i * v_dim..(i + 1) * v_dim];
+                let a_t = &a_all[i * a_dim..(i + 1) * a_dim];
+                let b_t = &b_all[i * b_dim..(i + 1) * b_dim];
+                let z_t = &z_all[i * v_dim..(i + 1) * v_dim];
                 let gated = deltanet_step(qkv_t, a_t, b_t, z_t, lw, state, config);
                 out_slice.copy_from_slice(&gated);
             });
@@ -255,7 +276,10 @@ mod deltanet_batch_tests {
     #[test]
     fn deltanet_batch_n1_equals_single() {
         let w = tiny_weights();
-        let layer_idx = w.config.layer_types.iter()
+        let layer_idx = w
+            .config
+            .layer_types
+            .iter()
             .position(|l| matches!(l, LayerType::DeltaNet))
             .expect("tiny_config has DeltaNet layers");
 
@@ -272,9 +296,8 @@ mod deltanet_batch_tests {
 
         // Batched N=1
         let mut state_batched = DeltaNetState::new(&w.config);
-        let batched = forward_deltanet_decode_batch(
-            &token_emb, 1, lw, &mut [&mut state_batched], &w.config,
-        );
+        let batched =
+            forward_deltanet_decode_batch(&token_emb, 1, lw, &mut [&mut state_batched], &w.config);
 
         assert_eq!(single_out.len(), batched.len());
         for (a, b) in single_out.iter().zip(batched.iter()) {
@@ -291,8 +314,9 @@ use crate::gemv::{FullAttnLayerWeights, KvCacheEntry, attn_step_into};
 
 /// Batched FullAttn decode: N slots' single-token inputs through one FullAttn layer.
 /// Returns [N, hidden] residual outputs.
+#[allow(clippy::too_many_arguments)]
 pub fn forward_fullattn_decode_batch(
-    x_batch: &[f32],            // [N, hidden]
+    x_batch: &[f32], // [N, hidden]
     n: usize,
     lw: &FullAttnLayerWeights,
     kvs: &mut [&mut KvCacheEntry],
@@ -339,7 +363,7 @@ pub fn forward_fullattn_decode_batch(
                 let k = &k_all[i * kv_dim..(i + 1) * kv_dim];
                 let v = &v_all[i * kv_dim..(i + 1) * kv_dim];
                 let pos = rope_positions[i];
-                attn_step_into(q, k, v, *kv, pos, rope_cos, rope_sin, lw, config, out_row);
+                attn_step_into(q, k, v, kv, pos, rope_cos, rope_sin, lw, config, out_row);
             });
     }
 
@@ -378,12 +402,15 @@ mod fullattn_batch_tests {
     use super::*;
     use crate::config::LayerType;
     use crate::gemv::mock::tiny_weights;
-    use crate::gemv::{KvCacheEntry, HybridLayerWeights, embed_lookup, forward_attn_decode};
+    use crate::gemv::{HybridLayerWeights, KvCacheEntry, embed_lookup, forward_attn_decode};
 
     #[test]
     fn fullattn_batch_n1_equals_single() {
         let w = tiny_weights();
-        let layer_idx = w.config.layer_types.iter()
+        let layer_idx = w
+            .config
+            .layer_types
+            .iter()
             .position(|l| matches!(l, LayerType::FullAttn))
             .expect("tiny_config has 1 FullAttn layer");
 
@@ -394,14 +421,35 @@ mod fullattn_batch_tests {
         };
 
         // Single-slot reference
-        let mut kv_a = KvCacheEntry { k: Vec::new(), v: Vec::new(), seq_len: 0 };
-        let single = forward_attn_decode(&token_emb, lw, &mut kv_a, &w.config, &w.rope_cos, &w.rope_sin);
+        let mut kv_a = KvCacheEntry {
+            k: Vec::new(),
+            v: Vec::new(),
+            seq_len: 0,
+        };
+        let single = forward_attn_decode(
+            &token_emb,
+            lw,
+            &mut kv_a,
+            &w.config,
+            &w.rope_cos,
+            &w.rope_sin,
+        );
 
         // Batched N=1 with fresh KV cache
-        let mut kv_b = KvCacheEntry { k: Vec::new(), v: Vec::new(), seq_len: 0 };
+        let mut kv_b = KvCacheEntry {
+            k: Vec::new(),
+            v: Vec::new(),
+            seq_len: 0,
+        };
         let batched = forward_fullattn_decode_batch(
-            &token_emb, 1, lw, &mut [&mut kv_b],
-            &[0], &w.rope_cos, &w.rope_sin, &w.config,
+            &token_emb,
+            1,
+            lw,
+            &mut [&mut kv_b],
+            &[0],
+            &w.rope_cos,
+            &w.rope_sin,
+            &w.config,
         );
 
         assert_eq!(single.len(), batched.len());
@@ -418,7 +466,7 @@ mod fullattn_batch_tests {
 
 /// Final RMSNorm + lm_head, batched across N slots. Returns N logits vectors.
 pub fn batched_lm_head(
-    x_batch: &[f32],   // [N, hidden]
+    x_batch: &[f32], // [N, hidden]
     n: usize,
     final_norm: &[half::f16],
     embed: &Weight,
@@ -451,10 +499,13 @@ pub fn batched_lm_head(
 
     use rayon::prelude::*;
     let mut logits: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
-    logits.par_iter_mut().enumerate().for_each(|(i, slot_logits)| {
-        let row = &x_norm[i * hidden..(i + 1) * hidden];
-        *slot_logits = crate::gemv::lm_head_parallel(row, embed, vocab, hidden);
-    });
+    logits
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, slot_logits)| {
+            let row = &x_norm[i * hidden..(i + 1) * hidden];
+            *slot_logits = crate::gemv::lm_head_parallel(row, embed, vocab, hidden);
+        });
     logits
 }
 
@@ -469,35 +520,37 @@ mod lm_head_batch_tests {
         let w = tiny_weights();
         let n = 3;
         let mut x = vec![0.0f32; n * w.hidden];
-        for i in 0..n * w.hidden {
-            x[i] = 0.01 * i as f32;
+        for (i, val) in x.iter_mut().enumerate().take(n * w.hidden) {
+            *val = 0.01 * i as f32;
         }
 
         // Single-slot reference
-        let single: Vec<Vec<f32>> = (0..n).map(|i| {
-            let row = &x[i * w.hidden..(i + 1) * w.hidden];
-            let normed = crate::gemv::rms_norm(row, &w.final_norm);
-            crate::gemv::lm_head_parallel(&normed, &w.embed, w.vocab, w.hidden)
-        }).collect();
+        let single: Vec<Vec<f32>> = (0..n)
+            .map(|i| {
+                let row = &x[i * w.hidden..(i + 1) * w.hidden];
+                let normed = crate::gemv::rms_norm(row, &w.final_norm);
+                crate::gemv::lm_head_parallel(&normed, &w.embed, w.vocab, w.hidden)
+            })
+            .collect();
 
         let batched = batched_lm_head(&x, n, &w.final_norm, &w.embed, w.vocab, w.hidden);
 
         for i in 0..n {
             assert_eq!(single[i].len(), batched[i].len());
             for j in 0..w.vocab {
-                assert!((single[i][j] - batched[i][j]).abs() < 1e-3,
-                    "slot {i} vocab {j}: {} vs {}", single[i][j], batched[i][j]);
+                assert!(
+                    (single[i][j] - batched[i][j]).abs() < 1e-3,
+                    "slot {i} vocab {j}: {} vs {}",
+                    single[i][j],
+                    batched[i][j]
+                );
             }
         }
     }
 }
 
 /// Embed N tokens. Returns a [N, hidden] flattened vector (f32).
-pub fn batched_embed_lookup(
-    embed: &Weight,
-    token_ids: &[u32],
-    hidden: usize,
-) -> Vec<f32> {
+pub fn batched_embed_lookup(embed: &Weight, token_ids: &[u32], hidden: usize) -> Vec<f32> {
     let n = token_ids.len();
     let mut out = vec![0.0f32; n * hidden];
 
@@ -526,7 +579,11 @@ mod embed_tests {
         for (i, &tid) in tokens.iter().enumerate() {
             let single = crate::gemv::embed_lookup(&w.embed, tid as usize, w.hidden);
             let slice = &batched[i * w.hidden..(i + 1) * w.hidden];
-            assert_eq!(slice, single.as_slice(), "embed mismatch at slot {i} token {tid}");
+            assert_eq!(
+                slice,
+                single.as_slice(),
+                "embed mismatch at slot {i} token {tid}"
+            );
         }
     }
 

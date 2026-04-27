@@ -1089,12 +1089,7 @@ pub(crate) fn deltanet_step(
 }
 
 /// Batched fused gate+up: [N, hidden] -> [N, intermediate], applying SiLU(gate) * up per-row.
-pub(crate) fn fused_gate_up_gemm(
-    x: &[f32],
-    n: usize,
-    gate_w: &Weight,
-    up_w: &Weight,
-) -> Vec<f32> {
+pub(crate) fn fused_gate_up_gemm(x: &[f32], n: usize, gate_w: &Weight, up_w: &Weight) -> Vec<f32> {
     let intermediate = gate_w.n();
     let hidden = gate_w.k();
     let mut out = vec![0.0f32; n * intermediate];
@@ -1169,17 +1164,18 @@ fn dot_f16_f32(k: &[f16], q: &[f32]) -> f32 {
 /// Applies QK norm + RoPE at `rope_pos`, appends k/v to the cache (f16-quantizing),
 /// computes GQA attention, applies output gating, and writes the gated attention
 /// output into `out_row` (length `num_attn_heads * attn_head_dim`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn attn_step_into(
-    q_gate_full: &[f32],    // [num_attn_heads * 2 * attn_head_dim] — Q + gate interleaved per head
-    k_in: &[f32],           // [num_kv_heads * attn_head_dim]
-    v_in: &[f32],           // [num_kv_heads * attn_head_dim]
+    q_gate_full: &[f32], // [num_attn_heads * 2 * attn_head_dim] — Q + gate interleaved per head
+    k_in: &[f32],        // [num_kv_heads * attn_head_dim]
+    v_in: &[f32],        // [num_kv_heads * attn_head_dim]
     kv: &mut KvCacheEntry,
     rope_pos: usize,
     rope_cos: &[f32],
     rope_sin: &[f32],
     lw: &FullAttnLayerWeights,
     config: &Qor4bConfig,
-    out_row: &mut [f32],    // [num_attn_heads * attn_head_dim]
+    out_row: &mut [f32], // [num_attn_heads * attn_head_dim]
 ) {
     let num_heads = config.num_attn_heads;
     let num_kv_heads = config.num_kv_heads;
