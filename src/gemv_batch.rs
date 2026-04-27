@@ -212,11 +212,19 @@ pub fn forward_deltanet_decode_batch(
     // Step 4: batched output projection
     let proj = gemm(&y_all, n, &lw.out_proj); // [N, hidden]
 
-    // Step 5: per-slot post-attn RMSNorm
+    // Step 5: first residual: x + attn_out, then post-attn RMSNorm (mirrors single path).
+    // Single path: out = x + attn_out; x_norm2 = rms_norm(&out, post_attn_norm)
     let mut x_post = vec![0.0f32; n * hidden];
     for i in 0..n {
-        let r = rms_norm(&proj[i * hidden..(i + 1) * hidden], &lw.post_attn_norm);
-        x_post[i * hidden..(i + 1) * hidden].copy_from_slice(&r);
+        let residual_start = i * hidden;
+        let residual_end = residual_start + hidden;
+        // Compute x + attn_out for this slot
+        let mut residual = vec![0.0f32; hidden];
+        for j in 0..hidden {
+            residual[j] = x_batch[residual_start + j] + proj[residual_start + j];
+        }
+        let r = rms_norm(&residual, &lw.post_attn_norm);
+        x_post[residual_start..residual_end].copy_from_slice(&r);
     }
 
     // Step 6: batched fused gate+up MLP
@@ -225,7 +233,10 @@ pub fn forward_deltanet_decode_batch(
     // Step 7: batched down projection
     let mlp_out = gemm(&mlp_inter, n, &lw.down_proj);
 
-    // Step 8: residual sum (input + attn_out + mlp_out)
+    // Step 8: final residual: (x + attn_out) + mlp_out
+    // The first residual (x + proj) is already captured per-slot above; we
+    // reconstruct it here so the final output matches the single-slot path:
+    //   out = x + attn_out + mlp_out
     let mut out = vec![0.0f32; n * hidden];
     for i in 0..n * hidden {
         out[i] = x_batch[i] + proj[i] + mlp_out[i];
@@ -335,18 +346,25 @@ pub fn forward_fullattn_decode_batch(
     // Step 4: batched output projection
     let proj = gemm(&attn_out, n, &lw.o_proj); // [N, hidden]
 
-    // Step 5: per-slot post-attn RMSNorm
+    // Step 5: first residual: x + o_proj, then post-attn RMSNorm (mirrors single path).
+    // Single path: out = x + o_out; x_norm2 = rms_norm(&out, post_attn_norm)
     let mut x_post = vec![0.0f32; n * hidden];
     for i in 0..n {
-        let r = rms_norm(&proj[i * hidden..(i + 1) * hidden], &lw.post_attn_norm);
-        x_post[i * hidden..(i + 1) * hidden].copy_from_slice(&r);
+        let residual_start = i * hidden;
+        // Compute x + o_proj for this slot
+        let mut residual = vec![0.0f32; hidden];
+        for j in 0..hidden {
+            residual[j] = x_batch[residual_start + j] + proj[residual_start + j];
+        }
+        let r = rms_norm(&residual, &lw.post_attn_norm);
+        x_post[residual_start..residual_start + hidden].copy_from_slice(&r);
     }
 
     // Step 6: batched fused gate+up MLP + down projection
     let mlp_inter = fused_gate_up_gemm(&x_post, n, &lw.gate_proj, &lw.up_proj);
     let mlp_out = gemm(&mlp_inter, n, &lw.down_proj);
 
-    // Step 7: residual (input + o_proj + mlp_out)
+    // Step 7: final residual: (x + o_proj) + mlp_out = x + o_proj + mlp_out
     let mut out = vec![0.0f32; n * hidden];
     for i in 0..n * hidden {
         out[i] = x_batch[i] + proj[i] + mlp_out[i];
