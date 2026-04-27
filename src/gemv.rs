@@ -831,7 +831,7 @@ fn softmax_raw(scores: &mut [f32]) {
 }
 
 /// Parallel lm_head.
-fn lm_head_parallel(input: &[f32], embed: &Weight, vocab: usize, hidden: usize) -> Vec<f32> {
+pub fn lm_head_parallel(input: &[f32], embed: &Weight, vocab: usize, hidden: usize) -> Vec<f32> {
     match embed {
         Weight::F16(w) => {
             let mut output = vec![0.0f32; vocab];

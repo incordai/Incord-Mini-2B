@@ -356,6 +356,86 @@ mod fullattn_batch_tests {
     }
 }
 
+// ============================================================
+// Batched lm_head + final norm
+// ============================================================
+
+/// Final RMSNorm + lm_head, batched across N slots. Returns N logits vectors.
+pub fn batched_lm_head(
+    x_batch: &[f32],   // [N, hidden]
+    n: usize,
+    final_norm: &[half::f16],
+    embed: &Weight,
+    vocab: usize,
+    hidden: usize,
+) -> Vec<Vec<f32>> {
+    debug_assert_eq!(x_batch.len(), n * hidden);
+
+    // Per-slot RMSNorm (cheap; not worth batching)
+    let mut x_norm = vec![0.0f32; n * hidden];
+    for i in 0..n {
+        let r = crate::gemv::rms_norm(&x_batch[i * hidden..(i + 1) * hidden], final_norm);
+        x_norm[i * hidden..(i + 1) * hidden].copy_from_slice(&r);
+    }
+
+    // Batched lm_head: N stacked hidden states × tied embedding -> [N, vocab].
+    // The embed weight is stored as [vocab, hidden] (rows are vocab entries).
+    // For lm_head, we need to compute hidden · embed[token]^T for each token; this is the
+    // same operation as gemm where we use embed as the projection.
+    //
+    // The existing lm_head_parallel does this for one row. We have a few choices:
+    // 1. Call gemm on the [N, hidden] matrix with embed as the weight if dimensions align.
+    // 2. Loop over N rows calling lm_head_parallel for each, parallelized via rayon.
+    //
+    // Option 2 is safer because lm_head_parallel may have specific memory access patterns
+    // (e.g., chunked writes to a parallel-accessible vector) that gemm doesn't replicate.
+    //
+    // We use option 2 here. The gain over single calls is parallelism across slots — gemm
+    // already parallelizes over output rows so we don't lose much by going slot-by-slot.
+
+    use rayon::prelude::*;
+    let mut logits: Vec<Vec<f32>> = (0..n).map(|_| Vec::new()).collect();
+    logits.par_iter_mut().enumerate().for_each(|(i, slot_logits)| {
+        let row = &x_norm[i * hidden..(i + 1) * hidden];
+        *slot_logits = crate::gemv::lm_head_parallel(row, embed, vocab, hidden);
+    });
+    logits
+}
+
+#[cfg(test)]
+#[cfg(feature = "mock-weights")]
+mod lm_head_batch_tests {
+    use super::*;
+    use crate::gemv::mock::tiny_weights;
+
+    #[test]
+    fn batched_lm_head_matches_single() {
+        let w = tiny_weights();
+        let n = 3;
+        let mut x = vec![0.0f32; n * w.hidden];
+        for i in 0..n * w.hidden {
+            x[i] = 0.01 * i as f32;
+        }
+
+        // Single-slot reference
+        let single: Vec<Vec<f32>> = (0..n).map(|i| {
+            let row = &x[i * w.hidden..(i + 1) * w.hidden];
+            let normed = crate::gemv::rms_norm(row, &w.final_norm);
+            crate::gemv::lm_head_parallel(&normed, &w.embed, w.vocab, w.hidden)
+        }).collect();
+
+        let batched = batched_lm_head(&x, n, &w.final_norm, &w.embed, w.vocab, w.hidden);
+
+        for i in 0..n {
+            assert_eq!(single[i].len(), batched[i].len());
+            for j in 0..w.vocab {
+                assert!((single[i][j] - batched[i][j]).abs() < 1e-3,
+                    "slot {i} vocab {j}: {} vs {}", single[i][j], batched[i][j]);
+            }
+        }
+    }
+}
+
 /// Embed N tokens. Returns a [N, hidden] flattened vector (f32).
 pub fn batched_embed_lookup(
     embed: &Weight,
