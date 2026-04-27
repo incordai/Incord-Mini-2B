@@ -36,23 +36,61 @@ impl SlotInferenceState {
     }
 }
 
-use crate::gemv::{forward_decode, ModelWeights};
+use crate::gemv::{CacheEntry, HybridLayerWeights, ModelWeights};
+#[cfg(test)]
+use crate::gemv::forward_decode;
 use rayon::prelude::*;
 
 pub fn forward_decode_batch(
     weights: &ModelWeights,
     slots: &mut [&mut SlotInferenceState],
 ) -> Vec<Vec<f32>> {
-    // Phase 0: parallel-independent. Bitwise identical to per-slot calls.
-    // Future phases batch the inner kernels; for now this establishes the contract.
-    slots
-        .par_iter_mut()
-        .map(|s| {
-            let logits = forward_decode(weights, s.last_token as usize, &mut s.cache);
-            s.rope_pos += 1;
-            logits
-        })
-        .collect()
+    let n = slots.len();
+    if n == 0 { return Vec::new(); }
+
+    let config = &weights.config;
+    let hidden = weights.hidden;
+
+    // Gather per-slot inputs
+    let tokens: Vec<u32> = slots.iter().map(|s| s.last_token).collect();
+    let rope_positions: Vec<usize> = slots.iter().map(|s| s.rope_pos).collect();
+
+    // Embed
+    let mut x = batched_embed_lookup(&weights.embed, &tokens, hidden);
+
+    // Per-layer
+    for (layer_idx, layer) in weights.layers.iter().enumerate() {
+        match layer {
+            HybridLayerWeights::DeltaNet(lw) => {
+                // Collect mut refs to each slot's DeltaNet state at this layer
+                let mut states: Vec<&mut crate::gemv::DeltaNetState> = slots.iter_mut()
+                    .map(|s| match &mut s.cache.entries[layer_idx] {
+                        CacheEntry::DeltaNet(d) => d,
+                        _ => panic!("layer/cache type mismatch at layer {layer_idx}"),
+                    })
+                    .collect();
+                x = forward_deltanet_decode_batch(&x, n, lw, &mut states, config);
+            }
+            HybridLayerWeights::FullAttn(lw) => {
+                let mut kvs: Vec<&mut KvCacheEntry> = slots.iter_mut()
+                    .map(|s| match &mut s.cache.entries[layer_idx] {
+                        CacheEntry::KvCache(k) => k,
+                        _ => panic!("layer/cache type mismatch at layer {layer_idx}"),
+                    })
+                    .collect();
+                x = forward_fullattn_decode_batch(
+                    &x, n, lw, &mut kvs,
+                    &rope_positions, &weights.rope_cos, &weights.rope_sin, config,
+                );
+            }
+        }
+    }
+
+    // Bump rope positions for next decode
+    for s in slots.iter_mut() { s.rope_pos += 1; }
+
+    // Final norm + lm_head
+    batched_lm_head(&x, n, &weights.final_norm, &weights.embed, weights.vocab, hidden)
 }
 
 #[cfg(test)]
