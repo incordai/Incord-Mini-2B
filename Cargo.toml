@@ -53,6 +53,10 @@ sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 
+# NEW M6 vision dependencies (pure Rust)
+base64 = "0.22"
+urlencoding = "2"
+
 [dependencies.cortex]
 git = "https://github.com/qora-protocol/cortex"
 features = ["ndarray"]
