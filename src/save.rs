@@ -7,12 +7,12 @@
 //!   Global: embedding + final norm + RoPE tables
 //!   Vision: (optional) patch_embed, pos_embed, 24 blocks, merger
 
+use half::f16;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
-use half::f16;
 
-use crate::config::{Qor4bConfig, LayerType};
+use crate::config::{LayerType, Qor4bConfig};
 use crate::gemv::*;
 
 const MAGIC: &[u8; 4] = b"QOR4";
@@ -22,11 +22,21 @@ const VERSION: u32 = 2; // v2: vision weights stored as f16 (was f32 in v1)
 // I/O helpers
 // ============================================================
 
-fn write_u8(w: &mut impl Write, val: u8) -> io::Result<()> { w.write_all(&[val]) }
-fn write_u32(w: &mut impl Write, val: u32) -> io::Result<()> { w.write_all(&val.to_le_bytes()) }
-fn write_u64(w: &mut impl Write, val: u64) -> io::Result<()> { w.write_all(&val.to_le_bytes()) }
-fn write_f32(w: &mut impl Write, val: f32) -> io::Result<()> { w.write_all(&val.to_le_bytes()) }
-fn write_f64(w: &mut impl Write, val: f64) -> io::Result<()> { w.write_all(&val.to_le_bytes()) }
+fn write_u8(w: &mut impl Write, val: u8) -> io::Result<()> {
+    w.write_all(&[val])
+}
+fn write_u32(w: &mut impl Write, val: u32) -> io::Result<()> {
+    w.write_all(&val.to_le_bytes())
+}
+fn write_u64(w: &mut impl Write, val: u64) -> io::Result<()> {
+    w.write_all(&val.to_le_bytes())
+}
+fn write_f32(w: &mut impl Write, val: f32) -> io::Result<()> {
+    w.write_all(&val.to_le_bytes())
+}
+fn write_f64(w: &mut impl Write, val: f64) -> io::Result<()> {
+    w.write_all(&val.to_le_bytes())
+}
 
 fn write_f16_vec(w: &mut impl Write, data: &[f16]) -> io::Result<()> {
     let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2) };
@@ -46,19 +56,29 @@ fn write_bytes(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
 }
 
 fn read_u8(r: &mut impl Read) -> io::Result<u8> {
-    let mut b = [0u8; 1]; r.read_exact(&mut b)?; Ok(b[0])
+    let mut b = [0u8; 1];
+    r.read_exact(&mut b)?;
+    Ok(b[0])
 }
 fn read_u32(r: &mut impl Read) -> io::Result<u32> {
-    let mut b = [0u8; 4]; r.read_exact(&mut b)?; Ok(u32::from_le_bytes(b))
+    let mut b = [0u8; 4];
+    r.read_exact(&mut b)?;
+    Ok(u32::from_le_bytes(b))
 }
 fn read_u64(r: &mut impl Read) -> io::Result<u64> {
-    let mut b = [0u8; 8]; r.read_exact(&mut b)?; Ok(u64::from_le_bytes(b))
+    let mut b = [0u8; 8];
+    r.read_exact(&mut b)?;
+    Ok(u64::from_le_bytes(b))
 }
 fn read_f32(r: &mut impl Read) -> io::Result<f32> {
-    let mut b = [0u8; 4]; r.read_exact(&mut b)?; Ok(f32::from_le_bytes(b))
+    let mut b = [0u8; 4];
+    r.read_exact(&mut b)?;
+    Ok(f32::from_le_bytes(b))
 }
 fn read_f64(r: &mut impl Read) -> io::Result<f64> {
-    let mut b = [0u8; 8]; r.read_exact(&mut b)?; Ok(f64::from_le_bytes(b))
+    let mut b = [0u8; 8];
+    r.read_exact(&mut b)?;
+    Ok(f64::from_le_bytes(b))
 }
 
 fn read_f16_vec(r: &mut impl Read) -> io::Result<Vec<f16>> {
@@ -101,11 +121,17 @@ fn read_bytes_vec(r: &mut impl Read) -> io::Result<Vec<u8>> {
 fn write_weight(w: &mut impl Write, weight: &Weight) -> io::Result<()> {
     write_u64(w, weight.k() as u64)?;
     write_u64(w, weight.n() as u64)?;
-    let fmt = match weight { Weight::F16(_) => 0u8, Weight::Q4(_) => 1u8 };
+    let fmt = match weight {
+        Weight::F16(_) => 0u8,
+        Weight::Q4(_) => 1u8,
+    };
     write_u8(w, fmt)?;
     match weight {
         Weight::F16(fw) => write_f16_vec(w, &fw.data)?,
-        Weight::Q4(qw) => { write_bytes(w, &qw.packed)?; write_f16_vec(w, &qw.scales)?; }
+        Weight::Q4(qw) => {
+            write_bytes(w, &qw.packed)?;
+            write_f16_vec(w, &qw.scales)?;
+        }
     }
     Ok(())
 }
@@ -122,9 +148,17 @@ fn read_weight(r: &mut impl Read, _format_id: u8) -> io::Result<Weight> {
         1 => {
             let packed = read_bytes_vec(r)?;
             let scales = read_f16_vec(r)?;
-            Ok(Weight::Q4(Q4Weight { packed, scales, k, n }))
+            Ok(Weight::Q4(Q4Weight {
+                packed,
+                scales,
+                k,
+                n,
+            }))
         }
-        _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unknown weight format {per_weight_fmt}")))
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Unknown weight format {per_weight_fmt}"),
+        )),
     }
 }
 
@@ -199,7 +233,9 @@ pub fn save_model(weights: &ModelWeights, path: &Path) -> io::Result<()> {
                 write_f16_vec(&mut w, &lw.post_attn_norm)?;
             }
         }
-        if i % 6 == 0 { eprintln!("  Saved layer {i}/{}...", config.num_layers); }
+        if i % 6 == 0 {
+            eprintln!("  Saved layer {i}/{}...", config.num_layers);
+        }
     }
 
     // Global
@@ -251,11 +287,17 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
     let mut magic = [0u8; 4];
     r.read_exact(&mut magic)?;
     if &magic != MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid magic (expected QOR4)"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid magic (expected QOR4)",
+        ));
     }
     let version = read_u32(&mut r)?;
     if version != 1 && version != VERSION {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Unsupported version {version} (expected 1 or {VERSION})")));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Unsupported version {version} (expected 1 or {VERSION})"),
+        ));
     }
     let format_id = read_u8(&mut r)?;
 
@@ -282,26 +324,48 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
     let mut layer_types = Vec::with_capacity(num_layers);
     for _ in 0..num_layers {
         let lt = read_u8(&mut r)?;
-        layer_types.push(if lt == 0 { LayerType::DeltaNet } else { LayerType::FullAttn });
+        layer_types.push(if lt == 0 {
+            LayerType::DeltaNet
+        } else {
+            LayerType::FullAttn
+        });
     }
 
     let config = Qor4bConfig {
-        vocab_size, hidden_size, num_layers, num_attn_heads, num_kv_heads,
-        attn_head_dim, num_qk_heads, num_v_heads, deltanet_head_dim,
-        conv_kernel_size, intermediate_size, rope_theta, partial_rotary_factor,
-        rms_norm_eps, eos_token_id, tie_word_embeddings,
+        vocab_size,
+        hidden_size,
+        num_layers,
+        num_attn_heads,
+        num_kv_heads,
+        attn_head_dim,
+        num_qk_heads,
+        num_v_heads,
+        deltanet_head_dim,
+        conv_kernel_size,
+        intermediate_size,
+        rope_theta,
+        partial_rotary_factor,
+        rms_norm_eps,
+        eos_token_id,
+        tie_word_embeddings,
         layer_types: layer_types.clone(),
         has_vision,
         // Vision defaults (read from binary later if has_vision)
-        vision_hidden: 1024, vision_layers: 24, vision_heads: 16,
-        vision_ffn: 4096, patch_size: 16, spatial_merge_size: 2,
+        vision_hidden: 1024,
+        vision_layers: 24,
+        vision_heads: 16,
+        vision_ffn: 4096,
+        patch_size: 16,
+        spatial_merge_size: 2,
         num_position_embeddings: 2304,
     };
 
     // Per-layer weights
     let mut layers = Vec::with_capacity(num_layers);
     for (i, lt) in layer_types.iter().enumerate() {
-        if i % 6 == 0 { eprintln!("  Loading layer {i}/{num_layers}..."); }
+        if i % 6 == 0 {
+            eprintln!("  Loading layer {i}/{num_layers}...");
+        }
         match lt {
             LayerType::DeltaNet => {
                 layers.push(HybridLayerWeights::DeltaNet(DeltaNetLayerWeights {
@@ -351,7 +415,11 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
         use crate::vision::*;
         // Helper closure: read vision vec based on file version
         let read_vis = |r: &mut BufReader<File>| -> io::Result<Vec<f32>> {
-            if version >= 2 { read_f16_as_f32(r) } else { read_f32_vec(r) }
+            if version >= 2 {
+                read_f16_as_f32(r)
+            } else {
+                read_f32_vec(r)
+            }
         };
         let patch_proj_weight = read_vis(&mut r)?;
         let patch_proj_bias = read_vis(&mut r)?;
@@ -381,16 +449,36 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
             fc2_weight: read_vis(&mut r)?,
             fc2_bias: read_vis(&mut r)?,
         };
-        Some(VisionEncoder { patch_proj_weight, patch_proj_bias, pos_embed, blocks, merger })
+        Some(VisionEncoder {
+            patch_proj_weight,
+            patch_proj_bias,
+            pos_embed,
+            blocks,
+            merger,
+        })
     } else {
         None
     };
 
-    let format_name = match format_id { 0 => "F16", 1 => "Q4", _ => "unknown" };
-    eprintln!("  Loaded {format_name} model: {num_layers} layers, vocab={vocab_size}, hidden={hidden_size}");
+    let format_name = match format_id {
+        0 => "F16",
+        1 => "Q4",
+        _ => "unknown",
+    };
+    eprintln!(
+        "  Loaded {format_name} model: {num_layers} layers, vocab={vocab_size}, hidden={hidden_size}"
+    );
 
     Ok(ModelWeights {
-        layers, embed, vocab: vocab_size, hidden: hidden_size,
-        final_norm, rope_cos, rope_sin, config, format_name, vision,
+        layers,
+        embed,
+        vocab: vocab_size,
+        hidden: hidden_size,
+        final_norm,
+        rope_cos,
+        rope_sin,
+        config,
+        format_name,
+        vision,
     })
 }

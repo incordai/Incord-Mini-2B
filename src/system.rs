@@ -104,7 +104,12 @@ fn detect_ram() -> (u64, u64) {
 #[cfg(target_os = "windows")]
 fn detect_ram_windows() -> Option<(u64, u64)> {
     let output = std::process::Command::new("wmic")
-        .args(["OS", "get", "TotalVisibleMemorySize,FreePhysicalMemory", "/format:csv"])
+        .args([
+            "OS",
+            "get",
+            "TotalVisibleMemorySize,FreePhysicalMemory",
+            "/format:csv",
+        ])
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
@@ -162,9 +167,7 @@ fn detect_ram_macos() -> Option<(u64, u64)> {
     let total_mb = total_bytes / (1024 * 1024);
 
     // Available RAM: vm_stat gives pages, multiply by page size
-    let vm_output = std::process::Command::new("vm_stat")
-        .output()
-        .ok()?;
+    let vm_output = std::process::Command::new("vm_stat").output().ok()?;
     let vm_text = String::from_utf8_lossy(&vm_output.stdout);
 
     let page_size: u64 = {

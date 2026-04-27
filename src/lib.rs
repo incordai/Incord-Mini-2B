@@ -1,13 +1,16 @@
 pub mod config;
-pub mod tokenizer;
-pub mod generate;
 pub mod gemv;
-pub mod simd;
+pub mod gemv_batch;
+pub mod generate;
 pub mod save;
-pub mod vision;
+pub mod simd;
 pub mod system;
+pub mod tokenizer;
+pub mod vision;
 
 #[cfg(any(feature = "gpu", feature = "gpu-metal"))]
-pub mod gpu_loader;
-#[cfg(any(feature = "gpu", feature = "gpu-metal"))]
 pub mod gpu_inference;
+#[cfg(any(feature = "gpu", feature = "gpu-metal"))]
+pub mod gpu_loader;
+
+pub mod server;

@@ -20,8 +20,8 @@ pub struct VisionEncoder {
 }
 
 pub struct VisionBlock {
-    pub norm1_weight: Vec<f32>,  // [1024]
-    pub norm1_bias: Vec<f32>,    // [1024]
+    pub norm1_weight: Vec<f32>, // [1024]
+    pub norm1_bias: Vec<f32>,   // [1024]
     pub qkv_weight: Vec<f32>,   // [3072, 1024] (fused Q+K+V, PyTorch layout)
     pub qkv_bias: Vec<f32>,     // [3072]
     pub proj_weight: Vec<f32>,  // [1024, 1024]
@@ -35,28 +35,40 @@ pub struct VisionBlock {
 }
 
 pub struct Merger {
-    pub norm_weight: Vec<f32>,  // [1024] (per-patch norm BEFORE concat)
-    pub norm_bias: Vec<f32>,    // [1024]
-    pub fc1_weight: Vec<f32>,   // [4096, 4096] (PyTorch layout)
-    pub fc1_bias: Vec<f32>,     // [4096]
-    pub fc2_weight: Vec<f32>,   // [2560, 4096] (PyTorch layout)
-    pub fc2_bias: Vec<f32>,     // [2560]
+    pub norm_weight: Vec<f32>, // [1024] (per-patch norm BEFORE concat)
+    pub norm_bias: Vec<f32>,   // [1024]
+    pub fc1_weight: Vec<f32>,  // [4096, 4096] (PyTorch layout)
+    pub fc1_bias: Vec<f32>,    // [4096]
+    pub fc2_weight: Vec<f32>,  // [2560, 4096] (PyTorch layout)
+    pub fc2_bias: Vec<f32>,    // [2560]
 }
 
 impl VisionEncoder {
     pub fn memory_bytes(&self) -> usize {
-        let mut total = (self.patch_proj_weight.len() + self.patch_proj_bias.len() + self.pos_embed.len()) * 4;
+        let mut total =
+            (self.patch_proj_weight.len() + self.patch_proj_bias.len() + self.pos_embed.len()) * 4;
         for b in &self.blocks {
-            total += (b.norm1_weight.len() + b.norm1_bias.len()
-                + b.qkv_weight.len() + b.qkv_bias.len()
-                + b.proj_weight.len() + b.proj_bias.len()
-                + b.norm2_weight.len() + b.norm2_bias.len()
-                + b.fc1_weight.len() + b.fc1_bias.len()
-                + b.fc2_weight.len() + b.fc2_bias.len()) * 4;
+            total += (b.norm1_weight.len()
+                + b.norm1_bias.len()
+                + b.qkv_weight.len()
+                + b.qkv_bias.len()
+                + b.proj_weight.len()
+                + b.proj_bias.len()
+                + b.norm2_weight.len()
+                + b.norm2_bias.len()
+                + b.fc1_weight.len()
+                + b.fc1_bias.len()
+                + b.fc2_weight.len()
+                + b.fc2_bias.len())
+                * 4;
         }
-        total += (self.merger.norm_weight.len() + self.merger.norm_bias.len()
-            + self.merger.fc1_weight.len() + self.merger.fc1_bias.len()
-            + self.merger.fc2_weight.len() + self.merger.fc2_bias.len()) * 4;
+        total += (self.merger.norm_weight.len()
+            + self.merger.norm_bias.len()
+            + self.merger.fc1_weight.len()
+            + self.merger.fc1_bias.len()
+            + self.merger.fc2_weight.len()
+            + self.merger.fc2_bias.len())
+            * 4;
         total
     }
 }
@@ -99,15 +111,26 @@ pub fn load_image(path: &std::path::Path) -> Result<(Vec<f32>, usize, usize), St
         let factor = (max_patches as f32 / patches as f32).sqrt();
         new_w = (((new_w as f32 * factor) as usize) / align) * align;
         new_h = (((new_h as f32 * factor) as usize) / align) * align;
-        if new_w < align { new_w = align; }
-        if new_h < align { new_h = align; }
+        if new_w < align {
+            new_w = align;
+        }
+        if new_h < align {
+            new_h = align;
+        }
     }
 
-    eprintln!("  Resized: {}x{} ({} patches)", new_w, new_h, (new_h / 16) * (new_w / 16));
+    eprintln!(
+        "  Resized: {}x{} ({} patches)",
+        new_w,
+        new_h,
+        (new_h / 16) * (new_w / 16)
+    );
 
     // Resize using the image crate
     let resized = image::imageops::resize(
-        &img, new_w as u32, new_h as u32,
+        &img,
+        new_w as u32,
+        new_h as u32,
         image::imageops::FilterType::Lanczos3,
     );
 
@@ -117,13 +140,76 @@ pub fn load_image(path: &std::path::Path) -> Result<(Vec<f32>, usize, usize), St
         for x in 0..new_w {
             let p = resized.get_pixel(x as u32, y as u32);
             let idx = (y * new_w + x) * 3;
-            pixels[idx + 0] = p[0] as f32 / 255.0;
+            pixels[idx] = p[0] as f32 / 255.0;
             pixels[idx + 1] = p[1] as f32 / 255.0;
             pixels[idx + 2] = p[2] as f32 / 255.0;
         }
     }
 
     Ok((pixels, new_h, new_w))
+}
+
+/// Convert raw RGB u8 bytes (packed as [r,g,b, r,g,b, ...]) from a decoded image into
+/// the f32 [0,1] pixel format expected by `VisionEncoder::encode_image`.
+/// Applies the same resize-to-fit logic as `load_image` so the dimensions satisfy the
+/// encoder's patch-grid constraints (multiple of 32, ≤ 768px/side, ≤ 2304 patches).
+/// Returns (pixels_rgb_f32_01, height, width).
+pub fn pixels_from_rgb_bytes(raw: &[u8], width: usize, height: usize) -> (Vec<f32>, usize, usize) {
+    // Build an RgbImage from the raw bytes so we can use image's resize logic.
+    let img: image::RgbImage = image::RgbImage::from_raw(width as u32, height as u32, raw.to_vec())
+        .expect("pixels_from_rgb_bytes: invalid raw buffer size");
+
+    let max_side = 768usize;
+    let align = 32usize;
+
+    let scale = if width.max(height) > max_side {
+        max_side as f32 / width.max(height) as f32
+    } else {
+        1.0
+    };
+
+    let mut new_w = ((width as f32 * scale) as usize).max(align);
+    let mut new_h = ((height as f32 * scale) as usize).max(align);
+    new_w = ((new_w + align / 2) / align) * align;
+    new_h = ((new_h + align / 2) / align) * align;
+
+    let max_patches = 2304;
+    let patches = (new_h / 16) * (new_w / 16);
+    if patches > max_patches {
+        let factor = (max_patches as f32 / patches as f32).sqrt();
+        new_w = (((new_w as f32 * factor) as usize) / align) * align;
+        new_h = (((new_h as f32 * factor) as usize) / align) * align;
+        if new_w < align {
+            new_w = align;
+        }
+        if new_h < align {
+            new_h = align;
+        }
+    }
+
+    let resized = if new_w == width && new_h == height {
+        img
+    } else {
+        image::imageops::resize(
+            &img,
+            new_w as u32,
+            new_h as u32,
+            image::imageops::FilterType::Lanczos3,
+        )
+    };
+
+    let mut pixels = vec![0.0f32; new_h * new_w * 3];
+    for y in 0..new_h {
+        for x in 0..new_w {
+            let p = resized.get_pixel(x as u32, y as u32);
+            let idx = (y * new_w + x) * 3;
+            pixels[idx] = p[0] as f32 / 255.0;
+            pixels[idx + 1] = p[1] as f32 / 255.0;
+            pixels[idx + 2] = p[2] as f32 / 255.0;
+        }
+    }
+
+    (pixels, new_h, new_w)
 }
 
 /// Load video frames from a directory of images, resize them to uniform dimensions,
@@ -136,10 +222,13 @@ pub fn load_video_frames(dir: &std::path::Path) -> Result<(Vec<f32>, usize, usiz
         .filter_map(|e| e.ok())
         .filter(|e| {
             let name = e.file_name().to_string_lossy().to_lowercase();
-            name.ends_with(".png") || name.ends_with(".jpg") || name.ends_with(".jpeg") || name.ends_with(".bmp")
+            name.ends_with(".png")
+                || name.ends_with(".jpg")
+                || name.ends_with(".jpeg")
+                || name.ends_with(".bmp")
         })
         .collect();
-    entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    entries.sort_by_key(|a| a.file_name());
 
     if entries.is_empty() {
         return Err("No image files found in video frames directory".into());
@@ -150,8 +239,12 @@ pub fn load_video_frames(dir: &std::path::Path) -> Result<(Vec<f32>, usize, usiz
     // Load all frames as RGB8
     let mut frames: Vec<image::RgbImage> = Vec::new();
     for entry in &entries {
-        let img = image::open(entry.path())
-            .map_err(|e| format!("Failed to load frame {}: {e}", entry.file_name().to_string_lossy()))?;
+        let img = image::open(entry.path()).map_err(|e| {
+            format!(
+                "Failed to load frame {}: {e}",
+                entry.file_name().to_string_lossy()
+            )
+        })?;
         frames.push(img.to_rgb8());
     }
 
@@ -180,18 +273,30 @@ pub fn load_video_frames(dir: &std::path::Path) -> Result<(Vec<f32>, usize, usiz
         let factor = (max_patches_per_frame as f32 / patches as f32).sqrt();
         new_w = (((new_w as f32 * factor) as usize) / align) * align;
         new_h = (((new_h as f32 * factor) as usize) / align) * align;
-        if new_w < align { new_w = align; }
-        if new_h < align { new_h = align; }
+        if new_w < align {
+            new_w = align;
+        }
+        if new_h < align {
+            new_h = align;
+        }
     }
 
     let num_frames = frames.len();
-    eprintln!("  Resized: {}x{} ({} patches/frame, {} frames)", new_w, new_h, (new_h / 16) * (new_w / 16), num_frames);
+    eprintln!(
+        "  Resized: {}x{} ({} patches/frame, {} frames)",
+        new_w,
+        new_h,
+        (new_h / 16) * (new_w / 16),
+        num_frames
+    );
 
     // Resize and convert all frames to f32 [0, 1]
     let mut pixels = vec![0.0f32; num_frames * new_h * new_w * 3];
     for (fi, frame) in frames.iter().enumerate() {
         let resized = image::imageops::resize(
-            frame, new_w as u32, new_h as u32,
+            frame,
+            new_w as u32,
+            new_h as u32,
             image::imageops::FilterType::Lanczos3,
         );
         let frame_offset = fi * new_h * new_w * 3;
@@ -199,7 +304,7 @@ pub fn load_video_frames(dir: &std::path::Path) -> Result<(Vec<f32>, usize, usiz
             for x in 0..new_w {
                 let p = resized.get_pixel(x as u32, y as u32);
                 let idx = frame_offset + (y * new_w + x) * 3;
-                pixels[idx + 0] = p[0] as f32 / 255.0;
+                pixels[idx] = p[0] as f32 / 255.0;
                 pixels[idx + 1] = p[1] as f32 / 255.0;
                 pixels[idx + 2] = p[2] as f32 / 255.0;
             }
@@ -239,7 +344,10 @@ impl VisionEncoder {
         let patches_w = width / patch_size;
         let num_patches = patches_h * patches_w;
         let temporal_size = 2;
-        eprintln!("  Patches: {}x{} = {} total", patches_w, patches_h, num_patches);
+        eprintln!(
+            "  Patches: {}x{} = {} total",
+            patches_w, patches_h, num_patches
+        );
 
         let mut patch_embeds = vec![0.0f32; num_patches * hidden];
         for py in 0..patches_h {
@@ -256,7 +364,10 @@ impl VisionEncoder {
                                 // Weight layout: [oc, c, t, ky, kx] → sum over t=0,1
                                 let mut w_sum = 0.0f32;
                                 for t in 0..temporal_size {
-                                    let w_idx = ((((oc * 3 + c) * temporal_size + t) * patch_size) + ky) * patch_size + kx;
+                                    let w_idx = ((((oc * 3 + c) * temporal_size + t) * patch_size)
+                                        + ky)
+                                        * patch_size
+                                        + kx;
                                     w_sum += self.patch_proj_weight[w_idx];
                                 }
                                 sum += pixel * w_sum;
@@ -274,17 +385,27 @@ impl VisionEncoder {
         // Grid is 48×48 (num_grid_per_side = sqrt(2304) = 48).
         let grid_side = 48usize; // num_grid_per_side
         let h_idxs: Vec<f32> = (0..patches_h)
-            .map(|i| if patches_h <= 1 { 0.0 } else { i as f32 * (grid_side - 1) as f32 / (patches_h - 1) as f32 })
+            .map(|i| {
+                if patches_h <= 1 {
+                    0.0
+                } else {
+                    i as f32 * (grid_side - 1) as f32 / (patches_h - 1) as f32
+                }
+            })
             .collect();
         let w_idxs: Vec<f32> = (0..patches_w)
-            .map(|i| if patches_w <= 1 { 0.0 } else { i as f32 * (grid_side - 1) as f32 / (patches_w - 1) as f32 })
+            .map(|i| {
+                if patches_w <= 1 {
+                    0.0
+                } else {
+                    i as f32 * (grid_side - 1) as f32 / (patches_w - 1) as f32
+                }
+            })
             .collect();
 
-        for py in 0..patches_h {
-            for px in 0..patches_w {
+        for (py, &h_idx) in h_idxs.iter().enumerate().take(patches_h) {
+            for (px, &w_idx) in w_idxs.iter().enumerate().take(patches_w) {
                 let pi = py * patches_w + px;
-                let h_idx = h_idxs[py];
-                let w_idx = w_idxs[px];
                 let h_floor = h_idx as usize;
                 let w_floor = w_idx as usize;
                 let h_ceil = (h_floor + 1).min(grid_side - 1);
@@ -356,12 +477,20 @@ impl VisionEncoder {
                 layer_norm(
                     &patch_embeds[t * hidden..(t + 1) * hidden],
                     &mut x_norm[t * hidden..(t + 1) * hidden],
-                    &block.norm1_weight, &block.norm1_bias,
+                    &block.norm1_weight,
+                    &block.norm1_bias,
                 );
             }
 
             // QKV projection (fused): [3072, 1024] in PyTorch layout → output [num_patches, 3072]
-            let qkv = matmul_bias_t(&x_norm, num_patches, hidden, &block.qkv_weight, &block.qkv_bias, 3 * hidden);
+            let qkv = matmul_bias_t(
+                &x_norm,
+                num_patches,
+                hidden,
+                &block.qkv_weight,
+                &block.qkv_bias,
+                3 * hidden,
+            );
 
             // Per-token split: for token t, Q=qkv[t*3H..t*3H+H], K=..+H..+2H, V=..+2H..+3H
             let mut q_all = vec![0.0f32; num_patches * hidden];
@@ -370,8 +499,10 @@ impl VisionEncoder {
             for t in 0..num_patches {
                 let base = t * 3 * hidden;
                 q_all[t * hidden..(t + 1) * hidden].copy_from_slice(&qkv[base..base + hidden]);
-                k_all[t * hidden..(t + 1) * hidden].copy_from_slice(&qkv[base + hidden..base + 2 * hidden]);
-                v_all[t * hidden..(t + 1) * hidden].copy_from_slice(&qkv[base + 2 * hidden..base + 3 * hidden]);
+                k_all[t * hidden..(t + 1) * hidden]
+                    .copy_from_slice(&qkv[base + hidden..base + 2 * hidden]);
+                v_all[t * hidden..(t + 1) * hidden]
+                    .copy_from_slice(&qkv[base + 2 * hidden..base + 3 * hidden]);
             }
 
             // Apply vision RoPE to Q and K (same cos/sin for all heads)
@@ -395,17 +526,18 @@ impl VisionEncoder {
                     let q_off = t1 * hidden + h * head_dim;
                     let q = &q_all[q_off..q_off + head_dim];
                     let mut scores = vec![0.0f32; num_patches];
-                    for t2 in 0..num_patches {
+                    for (t2, score) in scores.iter_mut().enumerate().take(num_patches) {
                         let k_off = t2 * hidden + h * head_dim;
                         let mut dot = 0.0f32;
-                        for d in 0..head_dim { dot += q[d] * k_all[k_off + d]; }
-                        scores[t2] = dot * scale;
+                        for d in 0..head_dim {
+                            dot += q[d] * k_all[k_off + d];
+                        }
+                        *score = dot * scale;
                     }
                     softmax(&mut scores);
                     let out_off = t1 * hidden + h * head_dim;
-                    for t2 in 0..num_patches {
+                    for (t2, &sc) in scores.iter().enumerate().take(num_patches) {
                         let v_off = t2 * hidden + h * head_dim;
-                        let sc = scores[t2];
                         for d in 0..head_dim {
                             attn_output[out_off + d] += sc * v_all[v_off + d];
                         }
@@ -414,8 +546,17 @@ impl VisionEncoder {
             }
 
             // Output projection + residual
-            let proj_out = matmul_bias_t(&attn_output, num_patches, hidden, &block.proj_weight, &block.proj_bias, hidden);
-            for j in 0..num_patches * hidden { patch_embeds[j] += proj_out[j]; }
+            let proj_out = matmul_bias_t(
+                &attn_output,
+                num_patches,
+                hidden,
+                &block.proj_weight,
+                &block.proj_bias,
+                hidden,
+            );
+            for j in 0..num_patches * hidden {
+                patch_embeds[j] += proj_out[j];
+            }
 
             // FFN: LayerNorm + gelu_pytorch_tanh MLP (NOT GEGLU!)
             let mut x_norm2 = vec![0.0f32; num_patches * hidden];
@@ -423,13 +564,21 @@ impl VisionEncoder {
                 layer_norm(
                     &patch_embeds[t * hidden..(t + 1) * hidden],
                     &mut x_norm2[t * hidden..(t + 1) * hidden],
-                    &block.norm2_weight, &block.norm2_bias,
+                    &block.norm2_weight,
+                    &block.norm2_bias,
                 );
             }
 
             // MLP: fc1(1024→4096) → gelu_tanh → fc2(4096→1024)
             let fc1_out_dim = block.fc1_bias.len(); // [4096]
-            let fc1_out = matmul_bias_t(&x_norm2, num_patches, hidden, &block.fc1_weight, &block.fc1_bias, fc1_out_dim);
+            let fc1_out = matmul_bias_t(
+                &x_norm2,
+                num_patches,
+                hidden,
+                &block.fc1_weight,
+                &block.fc1_bias,
+                fc1_out_dim,
+            );
 
             // Apply gelu_pytorch_tanh (plain, not gated)
             let mut fc1_act = vec![0.0f32; num_patches * fc1_out_dim];
@@ -437,8 +586,17 @@ impl VisionEncoder {
                 fc1_act[j] = gelu_tanh(fc1_out[j]);
             }
 
-            let fc2_out = matmul_bias_t(&fc1_act, num_patches, fc1_out_dim, &block.fc2_weight, &block.fc2_bias, hidden);
-            for j in 0..num_patches * hidden { patch_embeds[j] += fc2_out[j]; }
+            let fc2_out = matmul_bias_t(
+                &fc1_act,
+                num_patches,
+                fc1_out_dim,
+                &block.fc2_weight,
+                &block.fc2_bias,
+                hidden,
+            );
+            for j in 0..num_patches * hidden {
+                patch_embeds[j] += fc2_out[j];
+            }
 
             if blk_idx % 6 == 0 {
                 eprintln!("  ViT block {}/{}...", blk_idx + 1, self.blocks.len());
@@ -453,7 +611,8 @@ impl VisionEncoder {
             layer_norm(
                 &patch_embeds[t * hidden..(t + 1) * hidden],
                 &mut normed_patches[t * hidden..(t + 1) * hidden],
-                &self.merger.norm_weight, &self.merger.norm_bias,
+                &self.merger.norm_weight,
+                &self.merger.norm_bias,
             );
         }
 
@@ -463,7 +622,10 @@ impl VisionEncoder {
         let merged_w = patches_w / merge;
         let num_merged = merged_h * merged_w;
         let merged_input_dim = merge * merge * hidden; // 4 * 1024 = 4096
-        eprintln!("  Merged: {}x{} = {} tokens ({}→2560 dim)", merged_w, merged_h, num_merged, merged_input_dim);
+        eprintln!(
+            "  Merged: {}x{} = {} tokens ({}→2560 dim)",
+            merged_w, merged_h, num_merged, merged_input_dim
+        );
 
         let mut merged = vec![0.0f32; num_merged * merged_input_dim];
         for my in 0..merged_h {
@@ -476,7 +638,8 @@ impl VisionEncoder {
                         let px = mx * merge + dx;
                         let pi = py * patches_w + px;
                         let src = &normed_patches[pi * hidden..(pi + 1) * hidden];
-                        merged[mi * merged_input_dim + offset..mi * merged_input_dim + offset + hidden]
+                        merged[mi * merged_input_dim + offset
+                            ..mi * merged_input_dim + offset + hidden]
                             .copy_from_slice(src);
                         offset += hidden;
                     }
@@ -486,15 +649,27 @@ impl VisionEncoder {
 
         // Step 3: Merger MLP — fc1(4096→4096) + GELU + fc2(4096→2560)
         let merger_hidden = self.merger.fc1_bias.len(); // 4096
-        let fc1 = matmul_bias_t(&merged, num_merged, merged_input_dim,
-            &self.merger.fc1_weight, &self.merger.fc1_bias, merger_hidden);
+        let fc1 = matmul_bias_t(
+            &merged,
+            num_merged,
+            merged_input_dim,
+            &self.merger.fc1_weight,
+            &self.merger.fc1_bias,
+            merger_hidden,
+        );
         let mut fc1_act = vec![0.0f32; num_merged * merger_hidden];
         for j in 0..num_merged * merger_hidden {
             fc1_act[j] = gelu_plain(fc1[j]); // Merger uses plain GELU (not tanh approx)
         }
         let out_dim = self.merger.fc2_bias.len(); // 2560
-        let output = matmul_bias_t(&fc1_act, num_merged, merger_hidden,
-            &self.merger.fc2_weight, &self.merger.fc2_bias, out_dim);
+        let output = matmul_bias_t(
+            &fc1_act,
+            num_merged,
+            merger_hidden,
+            &self.merger.fc2_weight,
+            &self.merger.fc2_bias,
+            out_dim,
+        );
         eprintln!("  Merger done: {} tokens × {} dim", num_merged, out_dim);
 
         (output, num_merged)
@@ -504,7 +679,13 @@ impl VisionEncoder {
     /// Input: pixels [num_frames, height, width, 3] as f32 in [0, 1].
     /// Conv3d processes frame PAIRS: N frames → ceil(N/2) temporal patches.
     /// Output: flattened [num_merged_tokens * 2560] embeddings ready for LLM.
-    pub fn encode_video(&self, pixels: &[f32], num_frames: usize, height: usize, width: usize) -> (Vec<f32>, usize) {
+    pub fn encode_video(
+        &self,
+        pixels: &[f32],
+        num_frames: usize,
+        height: usize,
+        width: usize,
+    ) -> (Vec<f32>, usize) {
         let patch_size = 16;
         let hidden = 1024;
         let num_heads = 16;
@@ -513,7 +694,11 @@ impl VisionEncoder {
         let frame_pixels = height * width * 3;
 
         // Pad to even number of frames by duplicating the last frame
-        let actual_frames = if num_frames % 2 != 0 { num_frames + 1 } else { num_frames };
+        let actual_frames = if !num_frames.is_multiple_of(2) {
+            num_frames + 1
+        } else {
+            num_frames
+        };
         let temporal_steps = actual_frames / 2; // T = number of temporal patches
 
         // Normalize all frames: (pixel - 0.5) / 0.5 = pixel * 2 - 1
@@ -521,7 +706,8 @@ impl VisionEncoder {
         for f in 0..num_frames {
             for i in 0..frame_pixels {
                 let c = i % 3;
-                normalized[f * frame_pixels + i] = (pixels[f * frame_pixels + i] - MEAN[c]) / STD[c];
+                normalized[f * frame_pixels + i] =
+                    (pixels[f * frame_pixels + i] - MEAN[c]) / STD[c];
             }
         }
         // If padded, copy last frame
@@ -537,13 +723,15 @@ impl VisionEncoder {
         let patches_w = width / patch_size;
         let patches_per_frame = patches_h * patches_w;
         let total_patches = temporal_steps * patches_per_frame;
-        eprintln!("  Video: {} frames → {} temporal steps, {}x{} = {} patches/step, {} total patches",
-            num_frames, temporal_steps, patches_w, patches_h, patches_per_frame, total_patches);
+        eprintln!(
+            "  Video: {} frames → {} temporal steps, {}x{} = {} patches/step, {} total patches",
+            num_frames, temporal_steps, patches_w, patches_h, patches_per_frame, total_patches
+        );
 
         // Conv3d patch embedding over frame PAIRS
         let mut patch_embeds = vec![0.0f32; total_patches * hidden];
         for t in 0..temporal_steps {
-            let f0 = t * 2;     // first frame in pair
+            let f0 = t * 2; // first frame in pair
             let f1 = t * 2 + 1; // second frame in pair
             for py in 0..patches_h {
                 for px in 0..patches_w {
@@ -559,10 +747,16 @@ impl VisionEncoder {
                                     let pixel_f0 = normalized[f0 * frame_pixels + pixel_idx];
                                     let pixel_f1 = normalized[f1 * frame_pixels + pixel_idx];
                                     // Weight layout: [oc, c, t, ky, kx]
-                                    let w_idx_t0 = ((((oc * 3 + c) * temporal_size + 0) * patch_size) + ky) * patch_size + kx;
-                                    let w_idx_t1 = ((((oc * 3 + c) * temporal_size + 1) * patch_size) + ky) * patch_size + kx;
+                                    let w_idx_t0 = ((((oc * 3 + c) * temporal_size) * patch_size)
+                                        + ky)
+                                        * patch_size
+                                        + kx;
+                                    let w_idx_t1 =
+                                        ((((oc * 3 + c) * temporal_size + 1) * patch_size) + ky)
+                                            * patch_size
+                                            + kx;
                                     sum += pixel_f0 * self.patch_proj_weight[w_idx_t0]
-                                         + pixel_f1 * self.patch_proj_weight[w_idx_t1];
+                                        + pixel_f1 * self.patch_proj_weight[w_idx_t1];
                                 }
                             }
                         }
@@ -578,18 +772,28 @@ impl VisionEncoder {
         // Same spatial embeddings, repeated for each temporal step.
         let grid_side = 48usize;
         let h_idxs: Vec<f32> = (0..patches_h)
-            .map(|i| if patches_h <= 1 { 0.0 } else { i as f32 * (grid_side - 1) as f32 / (patches_h - 1) as f32 })
+            .map(|i| {
+                if patches_h <= 1 {
+                    0.0
+                } else {
+                    i as f32 * (grid_side - 1) as f32 / (patches_h - 1) as f32
+                }
+            })
             .collect();
         let w_idxs: Vec<f32> = (0..patches_w)
-            .map(|i| if patches_w <= 1 { 0.0 } else { i as f32 * (grid_side - 1) as f32 / (patches_w - 1) as f32 })
+            .map(|i| {
+                if patches_w <= 1 {
+                    0.0
+                } else {
+                    i as f32 * (grid_side - 1) as f32 / (patches_w - 1) as f32
+                }
+            })
             .collect();
 
         for t in 0..temporal_steps {
-            for py in 0..patches_h {
-                for px in 0..patches_w {
+            for (py, &h_idx) in h_idxs.iter().enumerate().take(patches_h) {
+                for (px, &w_idx) in w_idxs.iter().enumerate().take(patches_w) {
                     let pi = t * patches_per_frame + py * patches_w + px;
-                    let h_idx = h_idxs[py];
-                    let w_idx = w_idxs[px];
                     let h_floor = h_idx as usize;
                     let w_floor = w_idx as usize;
                     let h_ceil = (h_floor + 1).min(grid_side - 1);
@@ -659,11 +863,19 @@ impl VisionEncoder {
                 layer_norm(
                     &patch_embeds[t * hidden..(t + 1) * hidden],
                     &mut x_norm[t * hidden..(t + 1) * hidden],
-                    &block.norm1_weight, &block.norm1_bias,
+                    &block.norm1_weight,
+                    &block.norm1_bias,
                 );
             }
 
-            let qkv = matmul_bias_t(&x_norm, total_patches, hidden, &block.qkv_weight, &block.qkv_bias, 3 * hidden);
+            let qkv = matmul_bias_t(
+                &x_norm,
+                total_patches,
+                hidden,
+                &block.qkv_weight,
+                &block.qkv_bias,
+                3 * hidden,
+            );
 
             let mut q_all = vec![0.0f32; total_patches * hidden];
             let mut k_all = vec![0.0f32; total_patches * hidden];
@@ -671,8 +883,10 @@ impl VisionEncoder {
             for t in 0..total_patches {
                 let base = t * 3 * hidden;
                 q_all[t * hidden..(t + 1) * hidden].copy_from_slice(&qkv[base..base + hidden]);
-                k_all[t * hidden..(t + 1) * hidden].copy_from_slice(&qkv[base + hidden..base + 2 * hidden]);
-                v_all[t * hidden..(t + 1) * hidden].copy_from_slice(&qkv[base + 2 * hidden..base + 3 * hidden]);
+                k_all[t * hidden..(t + 1) * hidden]
+                    .copy_from_slice(&qkv[base + hidden..base + 2 * hidden]);
+                v_all[t * hidden..(t + 1) * hidden]
+                    .copy_from_slice(&qkv[base + 2 * hidden..base + 3 * hidden]);
             }
 
             // Apply vision RoPE
@@ -696,17 +910,18 @@ impl VisionEncoder {
                     let q_off = t1 * hidden + h * head_dim;
                     let q = &q_all[q_off..q_off + head_dim];
                     let mut scores = vec![0.0f32; total_patches];
-                    for t2 in 0..total_patches {
+                    for (t2, score) in scores.iter_mut().enumerate().take(total_patches) {
                         let k_off = t2 * hidden + h * head_dim;
                         let mut dot = 0.0f32;
-                        for d in 0..head_dim { dot += q[d] * k_all[k_off + d]; }
-                        scores[t2] = dot * scale;
+                        for d in 0..head_dim {
+                            dot += q[d] * k_all[k_off + d];
+                        }
+                        *score = dot * scale;
                     }
                     softmax(&mut scores);
                     let out_off = t1 * hidden + h * head_dim;
-                    for t2 in 0..total_patches {
+                    for (t2, &sc) in scores.iter().enumerate().take(total_patches) {
                         let v_off = t2 * hidden + h * head_dim;
-                        let sc = scores[t2];
                         for d in 0..head_dim {
                             attn_output[out_off + d] += sc * v_all[v_off + d];
                         }
@@ -714,8 +929,17 @@ impl VisionEncoder {
                 }
             }
 
-            let proj_out = matmul_bias_t(&attn_output, total_patches, hidden, &block.proj_weight, &block.proj_bias, hidden);
-            for j in 0..total_patches * hidden { patch_embeds[j] += proj_out[j]; }
+            let proj_out = matmul_bias_t(
+                &attn_output,
+                total_patches,
+                hidden,
+                &block.proj_weight,
+                &block.proj_bias,
+                hidden,
+            );
+            for j in 0..total_patches * hidden {
+                patch_embeds[j] += proj_out[j];
+            }
 
             // FFN
             let mut x_norm2 = vec![0.0f32; total_patches * hidden];
@@ -723,21 +947,43 @@ impl VisionEncoder {
                 layer_norm(
                     &patch_embeds[t * hidden..(t + 1) * hidden],
                     &mut x_norm2[t * hidden..(t + 1) * hidden],
-                    &block.norm2_weight, &block.norm2_bias,
+                    &block.norm2_weight,
+                    &block.norm2_bias,
                 );
             }
 
             let fc1_out_dim = block.fc1_bias.len();
-            let fc1_out = matmul_bias_t(&x_norm2, total_patches, hidden, &block.fc1_weight, &block.fc1_bias, fc1_out_dim);
+            let fc1_out = matmul_bias_t(
+                &x_norm2,
+                total_patches,
+                hidden,
+                &block.fc1_weight,
+                &block.fc1_bias,
+                fc1_out_dim,
+            );
             let mut fc1_act = vec![0.0f32; total_patches * fc1_out_dim];
             for j in 0..total_patches * fc1_out_dim {
                 fc1_act[j] = gelu_tanh(fc1_out[j]);
             }
-            let fc2_out = matmul_bias_t(&fc1_act, total_patches, fc1_out_dim, &block.fc2_weight, &block.fc2_bias, hidden);
-            for j in 0..total_patches * hidden { patch_embeds[j] += fc2_out[j]; }
+            let fc2_out = matmul_bias_t(
+                &fc1_act,
+                total_patches,
+                fc1_out_dim,
+                &block.fc2_weight,
+                &block.fc2_bias,
+                hidden,
+            );
+            for j in 0..total_patches * hidden {
+                patch_embeds[j] += fc2_out[j];
+            }
 
             if blk_idx % 6 == 0 {
-                eprintln!("  ViT block {}/{} ({} patches)...", blk_idx + 1, self.blocks.len(), total_patches);
+                eprintln!(
+                    "  ViT block {}/{} ({} patches)...",
+                    blk_idx + 1,
+                    self.blocks.len(),
+                    total_patches
+                );
             }
         }
         eprintln!("  All ViT blocks done");
@@ -749,8 +995,10 @@ impl VisionEncoder {
         let merged_per_step = merged_h * merged_w;
         let num_merged = temporal_steps * merged_per_step;
         let merged_input_dim = merge * merge * hidden; // 4 * 1024 = 4096
-        eprintln!("  Merged: {} temporal steps × {}x{} = {} tokens ({}→2560 dim)",
-            temporal_steps, merged_w, merged_h, num_merged, merged_input_dim);
+        eprintln!(
+            "  Merged: {} temporal steps × {}x{} = {} tokens ({}→2560 dim)",
+            temporal_steps, merged_w, merged_h, num_merged, merged_input_dim
+        );
 
         // Apply per-patch LayerNorm BEFORE concatenation
         let mut normed_patches = vec![0.0f32; total_patches * hidden];
@@ -758,7 +1006,8 @@ impl VisionEncoder {
             layer_norm(
                 &patch_embeds[t * hidden..(t + 1) * hidden],
                 &mut normed_patches[t * hidden..(t + 1) * hidden],
-                &self.merger.norm_weight, &self.merger.norm_bias,
+                &self.merger.norm_weight,
+                &self.merger.norm_bias,
             );
         }
 
@@ -777,7 +1026,8 @@ impl VisionEncoder {
                             let px = mx * merge + dx;
                             let pi = patch_base + py * patches_w + px;
                             let src = &normed_patches[pi * hidden..(pi + 1) * hidden];
-                            merged[mi * merged_input_dim + offset..mi * merged_input_dim + offset + hidden]
+                            merged[mi * merged_input_dim + offset
+                                ..mi * merged_input_dim + offset + hidden]
                                 .copy_from_slice(src);
                             offset += hidden;
                         }
@@ -788,15 +1038,27 @@ impl VisionEncoder {
 
         // Merger MLP: fc1(4096→4096) + GELU + fc2(4096→2560)
         let merger_hidden = self.merger.fc1_bias.len();
-        let fc1 = matmul_bias_t(&merged, num_merged, merged_input_dim,
-            &self.merger.fc1_weight, &self.merger.fc1_bias, merger_hidden);
+        let fc1 = matmul_bias_t(
+            &merged,
+            num_merged,
+            merged_input_dim,
+            &self.merger.fc1_weight,
+            &self.merger.fc1_bias,
+            merger_hidden,
+        );
         let mut fc1_act = vec![0.0f32; num_merged * merger_hidden];
         for j in 0..num_merged * merger_hidden {
             fc1_act[j] = gelu_plain(fc1[j]);
         }
         let out_dim = self.merger.fc2_bias.len(); // 2560
-        let output = matmul_bias_t(&fc1_act, num_merged, merger_hidden,
-            &self.merger.fc2_weight, &self.merger.fc2_bias, out_dim);
+        let output = matmul_bias_t(
+            &fc1_act,
+            num_merged,
+            merger_hidden,
+            &self.merger.fc2_weight,
+            &self.merger.fc2_bias,
+            out_dim,
+        );
         eprintln!("  Merger done: {} tokens × {} dim", num_merged, out_dim);
 
         (output, num_merged)
@@ -820,14 +1082,19 @@ fn layer_norm(input: &[f32], output: &mut [f32], weight: &[f32], bias: &[f32]) {
 fn softmax(scores: &mut [f32]) {
     let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0f32;
-    for s in scores.iter_mut() { *s = (*s - max).exp(); sum += *s; }
+    for s in scores.iter_mut() {
+        *s = (*s - max).exp();
+        sum += *s;
+    }
     let inv = 1.0 / sum;
-    for s in scores.iter_mut() { *s *= inv; }
+    for s in scores.iter_mut() {
+        *s *= inv;
+    }
 }
 
 /// GELU with tanh approximation (gelu_pytorch_tanh) — used in ViT blocks.
 fn gelu_tanh(x: f32) -> f32 {
-    0.5 * x * (1.0 + ((0.7978845608 * (x + 0.044715 * x * x * x)) as f64).tanh() as f32)
+    0.5 * x * (1.0 + ((0.797_884_6 * (x + 0.044715 * x * x * x)) as f64).tanh() as f32)
 }
 
 /// Plain GELU (erf-based) — used in merger MLP.
@@ -838,11 +1105,11 @@ fn gelu_plain(x: f32) -> f32 {
 /// Approximate erf for f32.
 fn erf(x: f32) -> f32 {
     // Abramowitz & Stegun approximation
-    let a1 = 0.254829592f32;
-    let a2 = -0.284496736f32;
-    let a3 = 1.421413741f32;
-    let a4 = -1.453152027f32;
-    let a5 = 1.061405429f32;
+    let a1 = 0.254_829_6_f32;
+    let a2 = -0.284_496_74_f32;
+    let a3 = 1.421_413_7_f32;
+    let a4 = -1.453_152_1_f32;
+    let a5 = 1.061_405_4_f32;
     let p = 0.3275911f32;
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let x = x.abs();
@@ -875,7 +1142,14 @@ fn apply_rope_vision(x: &mut [f32], cos: &[f32], sin: &[f32], half: usize) {
 /// Weight is stored in PyTorch layout [out_dim, in_dim] (row-major).
 /// x: [seq_len, in_dim], weight: [out_dim, in_dim], bias: [out_dim]
 /// output: [seq_len, out_dim]
-fn matmul_bias_t(x: &[f32], seq_len: usize, in_dim: usize, weight: &[f32], bias: &[f32], out_dim: usize) -> Vec<f32> {
+fn matmul_bias_t(
+    x: &[f32],
+    seq_len: usize,
+    in_dim: usize,
+    weight: &[f32],
+    bias: &[f32],
+    out_dim: usize,
+) -> Vec<f32> {
     let mut output = vec![0.0f32; seq_len * out_dim];
     for t in 0..seq_len {
         let x_row = &x[t * in_dim..(t + 1) * in_dim];

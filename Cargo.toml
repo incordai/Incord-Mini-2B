@@ -11,7 +11,16 @@ path = "src/main.rs"
 name = "convert"
 path = "src/convert.rs"
 
+[[bin]]
+name = "qora-server"
+path = "src/bin/qora_server.rs"
+
+[[bin]]
+name = "load_test"
+path = "tests/load/load_test.rs"
+
 [dependencies]
+# Existing (keep as-is)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
@@ -20,12 +29,98 @@ rayon = "1"
 memmap2 = "0.9"
 image = "0.25"
 
+# NEW server dependencies
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "limit", "timeout"] }
+rustls = "0.23"
+rustls-pemfile = "2"
+async-trait = "0.1"
+futures = "0.3"
+bytes = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+toml = "0.8"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# NEW M2 auth/db dependencies (pure Rust — no C bindings)
+redb = "2"
+bincode = { version = "2", features = ["serde"] }
+argon2 = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+rand_core = { version = "0.6", features = ["std"] }
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+
+# NEW M6 vision dependencies (pure Rust)
+base64 = "0.22"
+urlencoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+
+# NEW M6 metrics (pure Rust)
+prometheus = "0.13"
+once_cell = "1"
+parking_lot = "0.12"
+
 [dependencies.cortex]
 git = "https://github.com/qora-protocol/cortex"
 features = ["ndarray"]
 optional = true
 
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+
 [features]
 default = []
 gpu = ["cortex"]
 gpu-metal = ["cortex"]
+mock-weights = []
+
+[[bench]]
+name = "decode_throughput"
+harness = false
+required-features = ["mock-weights"]
+
+[[test]]
+name = "http_basic"
+path = "tests/integration/http_basic.rs"
+
+[[test]]
+name = "auth_flow"
+path = "tests/integration/auth_flow.rs"
+
+[[test]]
+name = "chat_completions"
+path = "tests/integration/chat_completions.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "gemv_batch_full_model"
+path = "tests/integration/gemv_batch_full_model.rs"
+
+[[test]]
+name = "cancellation"
+path = "tests/integration/cancellation.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "slot_pool_concurrency"
+path = "tests/integration/slot_pool_concurrency.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "vision"
+path = "tests/integration/vision.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "metrics"
+path = "tests/integration/metrics.rs"
+required-features = ["mock-weights"]

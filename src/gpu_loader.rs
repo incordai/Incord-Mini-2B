@@ -5,14 +5,16 @@
 //! GPU dequantization during matmul.
 
 use cortex::prelude::*;
-use cortex::tensor::{DType, TensorData};
 use cortex::tensor::quantization::{
     BlockSize, QuantLevel, QuantMode, QuantParam, QuantScheme, QuantStore, QuantValue,
 };
+use cortex::tensor::{DType, TensorData};
 use half::f16;
 
 use crate::config::Qor4bConfig;
-use crate::gemv::{ModelWeights, HybridLayerWeights, DeltaNetLayerWeights, FullAttnLayerWeights, Weight};
+use crate::gemv::{
+    DeltaNetLayerWeights, FullAttnLayerWeights, HybridLayerWeights, ModelWeights, Weight,
+};
 
 // ============================================================
 // GPU model structures
@@ -40,9 +42,9 @@ pub struct GpuDeltaNetLayer<B: Backend> {
     pub in_proj_b: Tensor<B, 2>,
     pub in_proj_z: Tensor<B, 2>,
     pub out_proj: Tensor<B, 2>,
-    pub conv1d_weight: Tensor<B, 2>,  // [qkv_dim, kernel_size]
-    pub a_log: Tensor<B, 1>,          // [num_v_heads]
-    pub dt_bias: Tensor<B, 1>,        // [num_v_heads]
+    pub conv1d_weight: Tensor<B, 2>,    // [qkv_dim, kernel_size]
+    pub a_log: Tensor<B, 1>,            // [num_v_heads]
+    pub dt_bias: Tensor<B, 1>,          // [num_v_heads]
     pub attn_norm_weight: Tensor<B, 1>, // [head_dim] — plain gamma (NOT 1+gamma)
     pub gate_proj: Tensor<B, 2>,
     pub up_proj: Tensor<B, 2>,
@@ -92,9 +94,7 @@ fn q4_weight_to_gpu<B: Backend>(
 ) -> Tensor<B, 2> {
     let burn_packed = convert_q4_packed(packed);
     let scales_f32: Vec<f32> = scales.iter().map(|s| s.to_f32()).collect();
-    let scale_bytes: Vec<u8> = scales_f32.iter()
-        .flat_map(|s| s.to_le_bytes())
-        .collect();
+    let scale_bytes: Vec<u8> = scales_f32.iter().flat_map(|s| s.to_le_bytes()).collect();
 
     let mut combined = Vec::with_capacity(burn_packed.len() + scale_bytes.len());
     combined.extend_from_slice(&burn_packed);
@@ -131,7 +131,12 @@ fn f32_vec_to_gpu_1d<B: Backend>(data: &[f32], device: &B::Device) -> Tensor<B, 
     Tensor::from_data(TensorData::new(data.to_vec(), [data.len()]), device)
 }
 
-fn f32_vec_to_gpu_2d<B: Backend>(data: &[f32], rows: usize, cols: usize, device: &B::Device) -> Tensor<B, 2> {
+fn f32_vec_to_gpu_2d<B: Backend>(
+    data: &[f32],
+    rows: usize,
+    cols: usize,
+    device: &B::Device,
+) -> Tensor<B, 2> {
     Tensor::from_data(TensorData::new(data.to_vec(), [rows, cols]), device)
 }
 
@@ -139,13 +144,13 @@ fn f32_vec_to_gpu_2d<B: Backend>(data: &[f32], rows: usize, cols: usize, device:
 // Model loading
 // ============================================================
 
-pub fn load_model_gpu<B: Backend>(
-    weights: &ModelWeights,
-    device: &B::Device,
-) -> GpuModel<B> {
+pub fn load_model_gpu<B: Backend>(weights: &ModelWeights, device: &B::Device) -> GpuModel<B> {
     let config = &weights.config;
 
-    eprintln!("Loading {} layers to GPU ({})...", config.num_layers, weights.format_name);
+    eprintln!(
+        "Loading {} layers to GPU ({})...",
+        config.num_layers, weights.format_name
+    );
 
     let mut layers = Vec::with_capacity(config.num_layers);
     for (i, lw) in weights.layers.iter().enumerate() {
@@ -154,14 +159,21 @@ pub fn load_model_gpu<B: Backend>(
         }
         match lw {
             HybridLayerWeights::DeltaNet(d) => {
-                layers.push(GpuHybridLayer::DeltaNet(load_deltanet_layer::<B>(d, config, device)));
+                layers.push(GpuHybridLayer::DeltaNet(load_deltanet_layer::<B>(
+                    d, config, device,
+                )));
             }
             HybridLayerWeights::FullAttn(f) => {
-                layers.push(GpuHybridLayer::FullAttn(load_fullattn_layer::<B>(f, device)));
+                layers.push(GpuHybridLayer::FullAttn(load_fullattn_layer::<B>(
+                    f, device,
+                )));
             }
         }
     }
-    eprintln!("  GPU layer {}/{}... done", config.num_layers, config.num_layers);
+    eprintln!(
+        "  GPU layer {}/{}... done",
+        config.num_layers, config.num_layers
+    );
 
     // Embedding: keep on CPU (vocab=248K is too large for VRAM)
     let embed_f32 = match &weights.embed {
