@@ -1,5 +1,5 @@
 use crate::config::Qor4bConfig;
-use crate::gemv::{prefill, ModelWeights};
+use crate::gemv::{ModelWeights, prefill};
 use crate::gemv_batch::forward_decode_batch;
 use crate::server::scheduler::pool::SlotPool;
 use crate::server::scheduler::queue::Queue;
@@ -92,13 +92,19 @@ impl Batcher {
 
             // Sample the first token
             let session = slot.session.as_mut().unwrap();
-            let token = session.sampler.sample(&mut logits, &session.generated_tokens);
+            let token = session
+                .sampler
+                .sample(&mut logits, &session.generated_tokens);
             session.generated_tokens.push(token);
             inference.last_token = token;
 
             // Decode token text + send
             let text = self.tokenizer.decode(&[token]);
-            let send = slot.sse_tx.as_ref().unwrap().try_send(Event::Token(token, text));
+            let send = slot
+                .sse_tx
+                .as_ref()
+                .unwrap()
+                .try_send(Event::Token(token, text));
             if send.is_err() {
                 slot.phase = SlotPhase::Done;
                 continue;
@@ -165,7 +171,12 @@ impl Batcher {
 
             let mut taken: Vec<crate::gemv_batch::SlotInferenceState> = sorted
                 .iter()
-                .map(|&i| slots[i].inference.take().expect("active slot has inference"))
+                .map(|&i| {
+                    slots[i]
+                        .inference
+                        .take()
+                        .expect("active slot has inference")
+                })
                 .collect();
             let mut state_refs: Vec<&mut crate::gemv_batch::SlotInferenceState> =
                 taken.iter_mut().collect();
@@ -198,7 +209,11 @@ impl Batcher {
             inference.last_token = token;
 
             let text = self.tokenizer.decode(&[token]);
-            let send = slot.sse_tx.as_ref().unwrap().try_send(Event::Token(token, text));
+            let send = slot
+                .sse_tx
+                .as_ref()
+                .unwrap()
+                .try_send(Event::Token(token, text));
             if send.is_err() {
                 let _ = slot
                     .sse_tx

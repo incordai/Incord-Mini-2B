@@ -9,7 +9,9 @@ async fn create_user_key(server: &common::TestServer) -> String {
         .post(server.url("/v1/admin/keys"))
         .bearer_auth(&server.admin_token)
         .json(&json!({"user_id":"u","name":"t","rpm_limit":1000,"tpm_limit":10_000_000}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     let body: serde_json::Value = resp.json().await.unwrap();
     body["raw_key"].as_str().unwrap().to_string()
 }
@@ -30,7 +32,9 @@ async fn client_drop_frees_slot() {
                 "stream":true,
                 "max_tokens":1000
             }))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
 
         // Verify the request was accepted (200) and started streaming
         assert_eq!(resp.status(), 200);
@@ -59,9 +63,14 @@ async fn client_drop_frees_slot() {
                 "temperature":0.0
             }))
             .timeout(std::time::Duration::from_secs(30))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200, "request {i} failed");
         let body: serde_json::Value = resp.json().await.unwrap();
-        assert!(body["choices"][0]["message"]["content"].is_string(), "no content in resp {i}");
+        assert!(
+            body["choices"][0]["message"]["content"].is_string(),
+            "no content in resp {i}"
+        );
     }
 }

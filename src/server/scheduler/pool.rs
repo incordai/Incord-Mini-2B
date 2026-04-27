@@ -35,7 +35,12 @@ impl SlotPool {
     }
 
     pub fn count_active(&self) -> usize {
-        self.slots.lock().unwrap().iter().filter(|s| !s.is_free()).count()
+        self.slots
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|s| !s.is_free())
+            .count()
     }
 }
 

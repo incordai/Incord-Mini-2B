@@ -10,7 +10,9 @@ async fn create_key(server: &common::TestServer) -> String {
         .post(server.url("/v1/admin/keys"))
         .bearer_auth(&server.admin_token)
         .json(&json!({"user_id":"u","name":"t","rpm_limit":10_000,"tpm_limit":100_000_000}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     let body: serde_json::Value = resp.json().await.unwrap();
     body["raw_key"].as_str().unwrap().to_string()
 }
@@ -29,7 +31,8 @@ async fn sixty_four_concurrent_requests_all_complete() {
         let key = key.clone();
         let url = url.clone();
         async move {
-            let resp = client.post(&url)
+            let resp = client
+                .post(&url)
                 .bearer_auth(&key)
                 .json(&json!({
                     "model":"qora-4b",
@@ -38,7 +41,9 @@ async fn sixty_four_concurrent_requests_all_complete() {
                     "temperature":0.0
                 }))
                 .timeout(std::time::Duration::from_secs(60))
-                .send().await.expect("send failed");
+                .send()
+                .await
+                .expect("send failed");
             assert_eq!(resp.status(), 200, "req {i} status {}", resp.status());
             let body: serde_json::Value = resp.json().await.expect("json failed");
             assert!(
@@ -70,32 +75,37 @@ async fn sequential_requests_after_burst_work() {
     let client = reqwest::Client::new();
     let url = server.url("/v1/chat/completions");
 
-    let burst: Vec<u32> = stream::iter(
-        (0..32u32).map(|i| {
-            let c = client.clone();
-            let k = key.clone();
-            let u = url.clone();
-            async move {
-                let resp = c.post(&u)
-                    .bearer_auth(&k)
-                    .json(&json!({
-                        "model":"qora-4b",
-                        "messages":[{"role":"user","content":format!("hi {i}")}],
-                        "max_tokens":2,
-                        "temperature":0.0
-                    }))
-                    .timeout(std::time::Duration::from_secs(60))
-                    .send().await.unwrap();
-                assert_eq!(resp.status(), 200);
-                i
-            }
-        })
-    ).buffer_unordered(32).collect().await;
+    let burst: Vec<u32> = stream::iter((0..32u32).map(|i| {
+        let c = client.clone();
+        let k = key.clone();
+        let u = url.clone();
+        async move {
+            let resp = c
+                .post(&u)
+                .bearer_auth(&k)
+                .json(&json!({
+                    "model":"qora-4b",
+                    "messages":[{"role":"user","content":format!("hi {i}")}],
+                    "max_tokens":2,
+                    "temperature":0.0
+                }))
+                .timeout(std::time::Duration::from_secs(60))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 200);
+            i
+        }
+    }))
+    .buffer_unordered(32)
+    .collect()
+    .await;
     assert_eq!(burst.len(), 32);
 
     // Then 5 sequential requests — should still work.
     for i in 0..5 {
-        let resp = client.post(&url)
+        let resp = client
+            .post(&url)
             .bearer_auth(&key)
             .json(&json!({
                 "model":"qora-4b",
@@ -104,7 +114,9 @@ async fn sequential_requests_after_burst_work() {
                 "temperature":0.0
             }))
             .timeout(std::time::Duration::from_secs(30))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200, "sequential req {i} failed");
     }
 }

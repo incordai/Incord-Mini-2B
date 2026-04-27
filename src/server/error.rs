@@ -97,7 +97,9 @@ mod tests {
 
     #[tokio::test]
     async fn queue_full_returns_503_with_retry_after() {
-        let err = ServerError::QueueFull { retry_after_secs: 7 };
+        let err = ServerError::QueueFull {
+            retry_after_secs: 7,
+        };
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(resp.headers().get("retry-after").unwrap(), "7");
@@ -105,7 +107,9 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limited_returns_429_with_retry_after() {
-        let err = ServerError::RateLimited { retry_after_secs: 30 };
+        let err = ServerError::RateLimited {
+            retry_after_secs: 30,
+        };
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(resp.headers().get("retry-after").unwrap(), "30");
