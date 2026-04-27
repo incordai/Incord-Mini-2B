@@ -154,15 +154,10 @@ pub fn load_image(path: &std::path::Path) -> Result<(Vec<f32>, usize, usize), St
 /// Applies the same resize-to-fit logic as `load_image` so the dimensions satisfy the
 /// encoder's patch-grid constraints (multiple of 32, ≤ 768px/side, ≤ 2304 patches).
 /// Returns (pixels_rgb_f32_01, height, width).
-pub fn pixels_from_rgb_bytes(
-    raw: &[u8],
-    width: usize,
-    height: usize,
-) -> (Vec<f32>, usize, usize) {
+pub fn pixels_from_rgb_bytes(raw: &[u8], width: usize, height: usize) -> (Vec<f32>, usize, usize) {
     // Build an RgbImage from the raw bytes so we can use image's resize logic.
-    let img: image::RgbImage =
-        image::RgbImage::from_raw(width as u32, height as u32, raw.to_vec())
-            .expect("pixels_from_rgb_bytes: invalid raw buffer size");
+    let img: image::RgbImage = image::RgbImage::from_raw(width as u32, height as u32, raw.to_vec())
+        .expect("pixels_from_rgb_bytes: invalid raw buffer size");
 
     let max_side = 768usize;
     let align = 32usize;

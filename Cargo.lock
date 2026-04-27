@@ -4950,6 +4950,7 @@ dependencies = [
  "image",
  "memmap2",
  "once_cell",
+ "parking_lot",
  "prometheus",
  "rand_core 0.6.4",
  "rayon",

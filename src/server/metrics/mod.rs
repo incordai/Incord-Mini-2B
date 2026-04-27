@@ -2,8 +2,8 @@
 
 use once_cell::sync::Lazy;
 use prometheus::{
-    register_counter, register_counter_vec, register_gauge, register_histogram_vec,
-    Counter, CounterVec, Encoder, Gauge, HistogramVec, TextEncoder,
+    Counter, CounterVec, Encoder, Gauge, HistogramVec, TextEncoder, register_counter,
+    register_counter_vec, register_gauge, register_histogram_vec,
 };
 
 pub static REQUESTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
@@ -29,21 +29,14 @@ pub static REQUEST_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
-pub static ACTIVE_SLOTS: Lazy<Gauge> = Lazy::new(|| {
-    register_gauge!("qora_active_slots", "Currently active slots").unwrap()
-});
+pub static ACTIVE_SLOTS: Lazy<Gauge> =
+    Lazy::new(|| register_gauge!("qora_active_slots", "Currently active slots").unwrap());
 
-pub static QUEUE_DEPTH: Lazy<Gauge> = Lazy::new(|| {
-    register_gauge!("qora_queue_depth", "Pending requests in queue").unwrap()
-});
+pub static QUEUE_DEPTH: Lazy<Gauge> =
+    Lazy::new(|| register_gauge!("qora_queue_depth", "Pending requests in queue").unwrap());
 
 pub static ERRORS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
-    register_counter_vec!(
-        "qora_errors_total",
-        "Total errors by type",
-        &["error_type"]
-    )
-    .unwrap()
+    register_counter_vec!("qora_errors_total", "Total errors by type", &["error_type"]).unwrap()
 });
 
 pub fn render_metrics() -> String {

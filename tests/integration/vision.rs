@@ -9,13 +9,16 @@ async fn create_user_key(server: &common::TestServer) -> String {
         .post(server.url("/v1/admin/keys"))
         .bearer_auth(&server.admin_token)
         .json(&json!({"user_id":"u","name":"t","rpm_limit":1000,"tpm_limit":1_000_000}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     let body: serde_json::Value = resp.json().await.unwrap();
     body["raw_key"].as_str().unwrap().to_string()
 }
 
 /// Tiny 1x1 PNG (red pixel) encoded as base64 — minimal valid image bytes.
-const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const TINY_PNG_B64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 #[tokio::test]
 async fn vision_request_without_vision_weights_returns_500() {
@@ -41,7 +44,9 @@ async fn vision_request_without_vision_weights_returns_500() {
             "max_tokens":2
         }))
         .timeout(std::time::Duration::from_secs(30))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     // Mock has no vision encoder — should get 500 (Internal: "model has no vision weights")
     // OR 400 if the error mapping is structured differently. Both are acceptable for v1.
@@ -53,7 +58,10 @@ async fn vision_request_without_vision_weights_returns_500() {
 
     // Verify we get a JSON error, not a hang or panic
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body.get("error").is_some(), "expected error object in body: {body}");
+    assert!(
+        body.get("error").is_some(),
+        "expected error object in body: {body}"
+    );
 }
 
 #[tokio::test]
@@ -76,11 +84,19 @@ async fn vision_request_with_invalid_data_url_returns_400() {
             "max_tokens":2
         }))
         .timeout(std::time::Duration::from_secs(10))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     assert_eq!(resp.status(), 400, "expected 400 for invalid base64");
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["error"]["type"].as_str().unwrap().contains("invalid_request") || body["error"]["type"].as_str().unwrap().contains("error"));
+    assert!(
+        body["error"]["type"]
+            .as_str()
+            .unwrap()
+            .contains("invalid_request")
+            || body["error"]["type"].as_str().unwrap().contains("error")
+    );
 }
 
 #[tokio::test]
@@ -102,7 +118,13 @@ async fn vision_request_with_unsupported_scheme_returns_400() {
             "max_tokens":2
         }))
         .timeout(std::time::Duration::from_secs(10))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
-    assert_eq!(resp.status(), 400, "expected 400 for unsupported URL scheme");
+    assert_eq!(
+        resp.status(),
+        400,
+        "expected 400 for unsupported URL scheme"
+    );
 }

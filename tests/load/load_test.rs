@@ -6,8 +6,8 @@
 //!     --key qora_xxx \
 //!     --concurrency 100 --duration 60 --max-tokens 200
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -51,7 +51,9 @@ async fn main() {
                 i += 2;
             }
             "--help" | "-h" => {
-                eprintln!("load_test --url <base> --key <qora_xxx> [--concurrency N] [--duration S] [--max-tokens N] [--prompt TEXT]");
+                eprintln!(
+                    "load_test --url <base> --key <qora_xxx> [--concurrency N] [--duration S] [--max-tokens N] [--prompt TEXT]"
+                );
                 std::process::exit(0);
             }
             _ => {

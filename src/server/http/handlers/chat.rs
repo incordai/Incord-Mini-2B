@@ -173,16 +173,13 @@ async fn render_user_message_with_images(
                             text.push('\n');
                         }
                         ContentPart::ImageUrl { image_url } => {
-                            let parsed = parse_image_url(&image_url.url).map_err(|e| {
-                                ServerError::BadRequest(e.to_string())
-                            })?;
+                            let parsed = parse_image_url(&image_url.url)
+                                .map_err(|e| ServerError::BadRequest(e.to_string()))?;
                             let bytes = match parsed {
                                 VisionContent::Inline { bytes, .. } => bytes,
                                 VisionContent::Remote { url } => {
                                     let r = reqwest::get(&url).await.map_err(|e| {
-                                        ServerError::BadRequest(format!(
-                                            "fetching image: {e}"
-                                        ))
+                                        ServerError::BadRequest(format!("fetching image: {e}"))
                                     })?;
                                     if !r.status().is_success() {
                                         return Err(ServerError::BadRequest(format!(
@@ -193,9 +190,7 @@ async fn render_user_message_with_images(
                                     }
                                     r.bytes()
                                         .await
-                                        .map_err(|e| {
-                                            ServerError::BadRequest(e.to_string())
-                                        })?
+                                        .map_err(|e| ServerError::BadRequest(e.to_string()))?
                                         .to_vec()
                                 }
                             };

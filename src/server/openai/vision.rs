@@ -1,6 +1,6 @@
 //! Parse OpenAI's image_url field — supports data: URLs (inline base64) and http(s):// URLs.
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 
 #[derive(Debug, Clone)]
 pub enum VisionContent {
@@ -13,9 +13,14 @@ pub enum VisionContent {
 pub fn parse_image_url(url: &str) -> anyhow::Result<VisionContent> {
     if let Some(rest) = url.strip_prefix("data:") {
         // data:[<mime>][;base64],<data>
-        let (header, data) = rest.split_once(',')
+        let (header, data) = rest
+            .split_once(',')
             .ok_or_else(|| anyhow::anyhow!("invalid data url: missing comma"))?;
-        let mime = header.split(';').next().unwrap_or("application/octet-stream").to_string();
+        let mime = header
+            .split(';')
+            .next()
+            .unwrap_or("application/octet-stream")
+            .to_string();
         let bytes = if header.contains("base64") {
             B64.decode(data)?
         } else {
@@ -25,9 +30,14 @@ pub fn parse_image_url(url: &str) -> anyhow::Result<VisionContent> {
         return Ok(VisionContent::Inline { mime, bytes });
     }
     if url.starts_with("http://") || url.starts_with("https://") {
-        return Ok(VisionContent::Remote { url: url.to_string() });
+        return Ok(VisionContent::Remote {
+            url: url.to_string(),
+        });
     }
-    Err(anyhow::anyhow!("unsupported image_url scheme: {}", &url[..url.len().min(40)]))
+    Err(anyhow::anyhow!(
+        "unsupported image_url scheme: {}",
+        &url[..url.len().min(40)]
+    ))
 }
 
 #[cfg(test)]
