@@ -6,6 +6,9 @@ use tokio::sync::Notify;
 pub struct PendingRequest {
     pub session: Session,
     pub sse_tx: tokio::sync::mpsc::Sender<crate::server::scheduler::Event>,
+    /// Optional pre-encoded vision embeddings. When present, prefill uses
+    /// prefill_with_vision instead of prefill. Layout: [num_vision_tokens, hidden].
+    pub vision_embeds: Option<(Vec<f32>, usize)>, // (embeds, num_vision_tokens)
 }
 
 pub struct Queue {

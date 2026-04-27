@@ -149,6 +149,69 @@ pub fn load_image(path: &std::path::Path) -> Result<(Vec<f32>, usize, usize), St
     Ok((pixels, new_h, new_w))
 }
 
+/// Convert raw RGB u8 bytes (packed as [r,g,b, r,g,b, ...]) from a decoded image into
+/// the f32 [0,1] pixel format expected by `VisionEncoder::encode_image`.
+/// Applies the same resize-to-fit logic as `load_image` so the dimensions satisfy the
+/// encoder's patch-grid constraints (multiple of 32, ≤ 768px/side, ≤ 2304 patches).
+/// Returns (pixels_rgb_f32_01, height, width).
+pub fn pixels_from_rgb_bytes(raw: &[u8], width: usize, height: usize) -> (Vec<f32>, usize, usize) {
+    // Build an RgbImage from the raw bytes so we can use image's resize logic.
+    let img: image::RgbImage = image::RgbImage::from_raw(width as u32, height as u32, raw.to_vec())
+        .expect("pixels_from_rgb_bytes: invalid raw buffer size");
+
+    let max_side = 768usize;
+    let align = 32usize;
+
+    let scale = if width.max(height) > max_side {
+        max_side as f32 / width.max(height) as f32
+    } else {
+        1.0
+    };
+
+    let mut new_w = ((width as f32 * scale) as usize).max(align);
+    let mut new_h = ((height as f32 * scale) as usize).max(align);
+    new_w = ((new_w + align / 2) / align) * align;
+    new_h = ((new_h + align / 2) / align) * align;
+
+    let max_patches = 2304;
+    let patches = (new_h / 16) * (new_w / 16);
+    if patches > max_patches {
+        let factor = (max_patches as f32 / patches as f32).sqrt();
+        new_w = (((new_w as f32 * factor) as usize) / align) * align;
+        new_h = (((new_h as f32 * factor) as usize) / align) * align;
+        if new_w < align {
+            new_w = align;
+        }
+        if new_h < align {
+            new_h = align;
+        }
+    }
+
+    let resized = if new_w == width && new_h == height {
+        img
+    } else {
+        image::imageops::resize(
+            &img,
+            new_w as u32,
+            new_h as u32,
+            image::imageops::FilterType::Lanczos3,
+        )
+    };
+
+    let mut pixels = vec![0.0f32; new_h * new_w * 3];
+    for y in 0..new_h {
+        for x in 0..new_w {
+            let p = resized.get_pixel(x as u32, y as u32);
+            let idx = (y * new_w + x) * 3;
+            pixels[idx] = p[0] as f32 / 255.0;
+            pixels[idx + 1] = p[1] as f32 / 255.0;
+            pixels[idx + 2] = p[2] as f32 / 255.0;
+        }
+    }
+
+    (pixels, new_h, new_w)
+}
+
 /// Load video frames from a directory of images, resize them to uniform dimensions,
 /// and return normalized pixel data.
 /// Returns (pixels_flat, num_frames, height, width) where pixels_flat is [num_frames * H * W * 3].

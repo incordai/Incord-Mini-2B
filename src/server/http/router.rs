@@ -33,6 +33,7 @@ pub fn build_router(
     Router::new()
         .route("/health", get(handlers::health::health))
         .route("/v1/models", get(handlers::models::list_models))
+        .route("/metrics", get(handlers::metrics::metrics_handler))
         .merge(admin_routes)
         .merge(chat_routes)
         .layer(axum_mw::from_fn(request_id_middleware))
@@ -73,11 +74,13 @@ mod tests {
         let weights = Arc::new(crate::gemv::mock::tiny_weights());
         let tokenizer = build_test_tokenizer();
         let usage = UsageTracker::new(db.clone());
+        let vision_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
         let chat_state = Arc::new(ChatState {
             queue,
             weights,
             tokenizer,
             usage,
+            vision_semaphore,
         });
 
         (auth, admin, chat_state, dir)

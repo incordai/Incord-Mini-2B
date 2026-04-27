@@ -67,6 +67,10 @@ impl IntoResponse for ServerError {
             ),
         };
 
+        crate::server::metrics::ERRORS_TOTAL
+            .with_label_values(&[error_type])
+            .inc();
+
         let body = Json(json!({
             "error": {
                 "message": message,

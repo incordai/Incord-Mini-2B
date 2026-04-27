@@ -56,11 +56,14 @@ impl TestServer {
             .spawn(move || batcher.run())
             .expect("test batcher spawn");
 
+        let vision_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+
         let chat_state = Arc::new(ChatState {
             queue,
             weights,
             tokenizer,
             usage,
+            vision_semaphore,
         });
 
         let router = build_router(auth, admin, chat_state);

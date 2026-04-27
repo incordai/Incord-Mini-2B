@@ -76,11 +76,15 @@ async fn main() -> anyhow::Result<()> {
 
     let usage = qor4b::server::usage::tracker::UsageTracker::new(db.clone());
 
+    // One permit: serialise concurrent vision encodes to cap peak memory usage.
+    let vision_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+
     let chat_state = Arc::new(qor4b::server::http::handlers::chat::ChatState {
         queue,
         weights,
         tokenizer,
         usage,
+        vision_semaphore,
     });
 
     let router = build_router(auth, admin_state, chat_state);
