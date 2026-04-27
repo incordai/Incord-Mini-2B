@@ -105,3 +105,8 @@ required-features = ["mock-weights"]
 name = "slot_pool_concurrency"
 path = "tests/integration/slot_pool_concurrency.rs"
 required-features = ["mock-weights"]
+
+[[test]]
+name = "vision"
+path = "tests/integration/vision.rs"
+required-features = ["mock-weights"]
