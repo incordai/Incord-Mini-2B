@@ -15,6 +15,10 @@ path = "src/convert.rs"
 name = "qora-server"
 path = "src/bin/qora_server.rs"
 
+[[bin]]
+name = "load_test"
+path = "tests/load/load_test.rs"
+
 [dependencies]
 # Existing (keep as-is)
 serde = { version = "1", features = ["derive"] }
@@ -61,6 +65,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 # NEW M6 metrics (pure Rust)
 prometheus = "0.13"
 once_cell = "1"
+parking_lot = "0.12"
 
 [dependencies.cortex]
 git = "https://github.com/qora-protocol/cortex"
