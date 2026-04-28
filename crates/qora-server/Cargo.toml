@@ -90,3 +90,8 @@ required-features = ["mock-weights"]
 name = "conversations"
 path = "tests/conversations.rs"
 required-features = ["mock-weights"]
+
+[[test]]
+name = "admin_endpoints"
+path = "tests/admin_endpoints.rs"
+required-features = ["mock-weights"]

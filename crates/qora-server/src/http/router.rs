@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::auth::admin::{AdminState, admin_guard};
 use crate::auth::middleware::{AuthState, auth_middleware};
+use crate::http::handlers::admin::AdminFullState;
 use crate::http::handlers::inference::InferenceState;
 use crate::http::handlers::{admin, conversations, health, inference, metrics, models};
 use crate::http::middleware::request_id_middleware;
@@ -15,11 +16,36 @@ pub fn build_router(
     auth: Arc<AuthState>,
     admin_state: Arc<AdminState>,
 ) -> Router {
-    // Admin routes — protected by admin_guard (separate token from user keys)
-    let admin_routes = Router::new()
+    // Build combined state for handlers that need both auth DB and inference/registry/history.
+    let admin_full = Arc::new(AdminFullState {
+        auth: auth.clone(),
+        inference: inference_state.clone(),
+    });
+
+    // Admin routes that only need AuthState (key create/revoke/list).
+    let admin_auth_routes = Router::new()
         .route("/v1/admin/keys", post(admin::create_key_handler))
+        .route("/v1/admin/keys", get(admin::list_keys_handler))
         .route("/v1/admin/keys/{id}", delete(admin::revoke_key_handler))
-        .with_state(auth.clone())
+        .with_state(auth.clone());
+
+    // Admin routes that need AdminFullState (full DB + registry access).
+    let admin_full_routes = Router::new()
+        .route("/v1/admin/users", get(admin::list_users_handler))
+        .route("/v1/admin/usage", get(admin::list_usage_handler))
+        .route("/v1/admin/usage/export.csv", get(admin::export_usage_csv_handler))
+        .route("/v1/admin/stats", get(admin::stats_handler))
+        .route("/v1/admin/conversations", get(admin::list_all_conversations_handler))
+        .route(
+            "/v1/admin/conversations/{id}",
+            get(admin::get_conversation_admin_handler),
+        )
+        .with_state(admin_full);
+
+    // Merge both admin sub-routers and apply the admin_guard layer to both.
+    let admin_routes = Router::new()
+        .merge(admin_auth_routes)
+        .merge(admin_full_routes)
         .layer(axum_mw::from_fn_with_state(
             admin_state.clone(),
             admin_guard,

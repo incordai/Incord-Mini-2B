@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use redb::Database;
+use redb::{Database, ReadableTable};
 
 use crate::db::{CONVERSATIONS, MESSAGES, USER_CONVERSATIONS};
 use crate::history::store::message_key;
@@ -30,6 +30,91 @@ pub fn get_conversation(
         return Ok(None);
     }
     Ok(Some(conv))
+}
+
+/// Admin override: get a conversation by id WITHOUT enforcing user_id.
+/// ONLY use this from admin handlers — it bypasses privacy checks.
+/// Clearly named to prevent accidental use in user-facing code.
+pub fn get_conversation_admin(
+    db: &Arc<Database>,
+    conv_id: &str,
+) -> anyhow::Result<Option<Conversation>> {
+    let read = db.begin_read()?;
+    let convs = read.open_table(CONVERSATIONS)?;
+    let bytes = match convs.get(conv_id)? {
+        Some(v) => v.value().to_vec(),
+        None => return Ok(None),
+    };
+    let (conv, _): (Conversation, usize) =
+        bincode::serde::decode_from_slice(&bytes, BINCODE_CFG)?;
+    Ok(Some(conv))
+}
+
+/// Admin override: get messages for a conversation WITHOUT user_id check.
+/// ONLY use this from admin handlers.
+pub fn get_messages_admin(
+    db: &Arc<Database>,
+    conv_id: &str,
+) -> anyhow::Result<Vec<StoredMessage>> {
+    let conv = get_conversation_admin(db, conv_id)?
+        .ok_or_else(|| anyhow::anyhow!("conversation not found"))?;
+
+    let read = db.begin_read()?;
+    let msgs = read.open_table(MESSAGES)?;
+    let mut out = Vec::with_capacity(conv.message_count as usize);
+    for i in 0..conv.message_count {
+        let key = message_key(conv_id, i);
+        if let Some(v) = msgs.get(key.as_slice())? {
+            let (m, _): (StoredMessage, usize) =
+                bincode::serde::decode_from_slice(v.value(), BINCODE_CFG)?;
+            out.push(m);
+        }
+    }
+    Ok(out)
+}
+
+/// Admin override: list all conversations across ALL users, with optional user_id filter.
+/// ONLY use this from admin handlers.
+pub fn list_all_conversations_admin(
+    db: &Arc<Database>,
+    user_id_filter: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Vec<Conversation>> {
+    let read = db.begin_read()?;
+    let convs = read.open_table(CONVERSATIONS)?;
+    let mut out = Vec::new();
+    for entry in convs.iter()? {
+        let entry = entry?;
+        let v = entry.1;
+        let (conv, _): (Conversation, usize) =
+            bincode::serde::decode_from_slice(v.value(), BINCODE_CFG)?;
+        if user_id_filter.is_some_and(|uid| conv.user_id != uid) {
+            continue;
+        }
+        out.push(conv);
+        if out.len() >= limit {
+            break;
+        }
+    }
+    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(out)
+}
+
+/// Count conversations per user_id using the USER_CONVERSATIONS multimap.
+pub fn count_conversations_for_user(
+    db: &Arc<Database>,
+    user_id: &str,
+) -> anyhow::Result<u32> {
+    let read = db.begin_read()?;
+    let idx = read.open_multimap_table(USER_CONVERSATIONS)?;
+    let mut n = 0u32;
+    if let Ok(values) = idx.get(user_id) {
+        for v in values {
+            let _ = v?;
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// Get all messages in a conversation, in idx order.
