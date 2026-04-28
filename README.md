@@ -1,307 +1,365 @@
+# QORA — Multi-Model Multi-Modality AI Platform
 
+Pure-Rust API server fronting an entire QORA model family. **One binary** serves text + vision (LLM), text-to-speech, speech-to-text, embeddings, and reranking — all with an OpenAI-compatible API plus a unified `/v1/inference` endpoint.
 
-# QORA-4B
+No Python. No CUDA. No external ML runtime. Single binary + model weight files = portable, sellable AI infrastructure.
 
-Pure Rust multimodal inference engine based on [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B). No Python, no CUDA, no external ML frameworks. Single executable + model weights = portable AI that runs on any machine.
+---
 
-**GPU accelerated** — auto-detects Vulkan (Windows/Linux) or Metal (macOS) GPU and runs inference on it. Falls back to CPU if no GPU available. **Smart system awareness** — detects RAM and CPU at startup and adjusts generation limits automatically.
+## Capabilities
 
-## License
+| Capability | Engine | Model formats supported |
+|---|---|---|
+| Chat / completion (text + vision) | `LlmEngine` | `.qor4b` family — works for QOR2B, QOR3B, QOR4B, QOR9B, QOR27B and any future size |
+| Text-to-speech (voice cloning, 25 voices, 10 languages) | `QoraTtsEngine` | `.qora-tts` |
+| Speech-to-text (Whisper-based, multi-language) | `QoraSttEngine` | `.qora-stt-small` |
+| Sentence embedding (2048-dim, multilingual) | `QorEmbeddingEngine` | qor-rag embedding model |
+| Reranking | `QorRerankEngine` | qor-rag reranker model |
 
-This project is licensed under [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0). The base model [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) is released by the Qwen team under Apache 2.0.
+**Model size is config-driven, never hardcoded.** Swap from 4B to 9B to 27B by changing one TOML entry — no code change, no recompile.
 
-## What It Does
+---
 
-QORA-4B is a 4-billion parameter language model with built-in vision. It can:
-
-- **Text generation** — answer questions, write code, reason through problems
-- **Image understanding** — describe photos, answer questions about images
-- **Video understanding** — analyze frame sequences, describe motion and temporal changes
-- **Thinking mode** — extended chain-of-thought reasoning with configurable budget
-
-## Architecture
-
-QORA-4B uses a hybrid architecture combining two attention mechanisms:
-
-| Component | Details |
-|-----------|---------|
-| **Parameters** | 4B total |
-| **Hidden dim** | 2560 |
-| **Layers** | 32 (24 DeltaNet + 8 Full Attention) |
-| **Layer pattern** | 3x DeltaNet + 1x Full Attention, repeated 8 times |
-| **Vocabulary** | 248,320 tokens |
-| **Context** | 262K tokens natively |
-
-### DeltaNet Layers (24 of 32)
-- Gated linear attention with delta rule state updates
-- 16 QK heads + 32 V heads, head_dim=128
-- Causal Conv1d (kernel=4) + SiLU activation
-- O(1) memory per token (recurrent state, no KV cache needed)
-
-### Full Attention Layers (8 of 32)
-- Grouped Query Attention (16Q / 4KV heads), head_dim=256
-- QK-norm + partial RoPE (64/256 dims rotated), theta=10M
-- Output gating (sigmoid gate on attention output)
-- Standard KV cache
-
-### Vision Encoder
-- 24-layer ViT, hidden=1024, 16 heads
-- Conv3d patch embedding [1024, 3, 2, 16, 16] (temporal_patch_size=2)
-- Learned positional embedding with bilinear interpolation from 48x48 grid
-- 2D spatial RoPE (dim=32, theta=10000)
-- 2x2 spatial merger: LayerNorm → concat → MLP(4096 → 2560)
-- **Images**: single frame duplicated along temporal axis
-- **Video**: actual Conv3d over consecutive frame pairs (N frames → N/2 temporal patches)
-
-## GPU Support
-
-QORA-4B automatically detects and uses your GPU via the Burn framework's wgpu backend:
-
-- **Windows/Linux**: Vulkan
-- **macOS**: Metal (Apple Silicon and Intel)
+## Repository structure
 
 ```
-Attempting GPU inference...
-GPU initialized successfully
-VRAM probe: 256MB OK
-Weights loaded to GPU in 5.9s
-Prefill: 97 tokens in 21.8s (4.5 tok/s)
-Decode: 96 tokens in 29.3s (3.27 tok/s)
+D:\Burn-AI\QOR4B\                   ← workspace root
+├── Cargo.toml                       ← workspace manifest
+├── crates\
+│   ├── qora-llm\                    ← LLM inference engine (workspace member)
+│   │   ├── src\                     ← gemv kernels, attention, vision, tokenizer
+│   │   ├── tests\                   ← unit + integration tests
+│   │   ├── benches\                 ← criterion micro-benchmarks
+│   │   └── README.md                ← LLM-specific docs (formerly the root README)
+│   └── qora-server\                 ← HTTP API server (workspace member)
+│       ├── src\
+│       │   ├── api\                 ← unified InferenceRequest, OpenAI types
+│       │   ├── auth\                ← redb-backed API keys, Argon2 + HMAC, rate limit
+│       │   ├── config.rs            ← TOML config schema
+│       │   ├── db\                  ← redb open/init + table definitions
+│       │   ├── engine\              ← ModelEngine trait + 5 task traits
+│       │   ├── engines\             ← concrete: llm, tts, stt, rag
+│       │   ├── error.rs             ← unified ServerError → IntoResponse
+│       │   ├── history\             ← chat history with auto-embed + rerank
+│       │   ├── http\                ← axum router, handlers, middleware
+│       │   ├── loader.rs            ← builds Registry from TOML config
+│       │   ├── metrics.rs           ← Prometheus instrumentation
+│       │   ├── registry.rs          ← runtime model lookup table
+│       │   ├── usage\               ← per-request usage tracking
+│       │   └── bin\qora_server.rs   ← the executable entry point
+│       └── tests\                   ← integration tests
+├── model\                           ← weight files (configured paths in TOML)
+│   ├── model.qor4b                  ← LLM weights (~3 GB for 4B, larger for 9B/27B)
+│   └── tokenizer.json
+├── config\
+│   ├── qora-server.toml.example     ← canonical config template
+│   └── qora-server.service          ← systemd unit
+├── docs\
+│   ├── api.md                       ← endpoint reference (auth, schemas, errors)
+│   ├── deployment.md                ← operator guide (TLS, backup, ops)
+│   ├── production-load-test.md      ← EPYC validation runbook
+│   └── superpowers\                 ← design specs + implementation plans
+└── scripts\
+    ├── install.sh                   ← idempotent install for Ubuntu 24.04+
+    └── soak_24h.sh                  ← memory-drift soak test
 ```
 
-| Mode | Decode Speed | Prefill Speed |
-|------|-------------|---------------|
-| **GPU** | ~3.3 tok/s | ~4.5 tok/s |
-| **CPU** | ~1.3 tok/s | ~1.9 tok/s |
+### External Rust crates (path-deps from qora-server)
 
-GPU gives a **~2.5x speedup** over CPU. Use `--cpu` to force CPU-only inference.
+The TTS / STT / RAG engine code lives outside this repo and is pulled in as Cargo path-deps — no source code is duplicated:
 
-**VRAM requirements**: ~2 GB for Q4 weights + cache. Fits in 4+ GB GPUs. Embedding and lm_head stay on CPU (vocab=248K is too large for VRAM).
+| External crate | Source location | Used by |
+|---|---|---|
+| `qora-tts` | `D:\Burn-AI\QORA-TTS\` | `qora-server::engines::tts::QoraTtsEngine` |
+| `qora-stt-small` | `D:\Burn-AI\QORA-STT-Small\` | `qora-server::engines::stt::QoraSttEngine` |
+| `qor-rag` | `C:\Projects\AI\qor-main\qor-rs\crates\qor-rag\` | `qora-server::engines::rag::Qor*Engine` |
+| `qora-simd` | `C:\Projects\AI\qor-main\qor-rs\crates\qora-simd\` | transitive dep of qor-rag |
 
-**GPU prefill optimization**: DeltaNet layers use a hybrid approach — batch all matrix projections on GPU, then run the lightweight sequential state update on CPU. This avoids per-token GPU round-trips and achieves near-optimal throughput.
+These crates are **already compiled into `qora-server.exe` at build time** — at runtime, the server is a single binary. The .exe binaries that ship with each external crate (`qora-tts.exe`, `qora-stt-small.exe`) are **standalone CLI tools** and are NOT used by the server.
 
-## Smart System Awareness
-
-QORA-4B detects your system at startup and automatically adjusts generation limits:
+### Frontend projects (separate from this repo)
 
 ```
-QORA-4B - Pure Rust Multimodal Inference Engine
-System: 16101 MB RAM (8271 MB free), 12 threads
+C:\Projects\Chat\fruntend\
+├── chat.jsx              ← single-file user UI (Claude Artifacts deployable)
+├── admin.jsx             ← single-file admin console
+├── chat\                 ← Vite project for local dev (port 5174)
+└── admin\                ← Vite project for local dev (port 5173)
 ```
 
-| Available RAM | Think Budget | Max Tokens | Behavior |
-|---------------|-------------|------------|----------|
-| < 4 GB | 128 (cap 256) | 256 (cap 512) | Minimal generation, warning displayed |
-| 4-8 GB | 256 (cap 1024) | 512 (cap 1024) | Constrained, warning displayed |
-| 8-12 GB | 1024 (cap 2048) | 1024 (cap 2048) | Normal operation |
-| >= 12 GB | 2048 (cap 8192) | 2048 (cap 8192) | Full capability |
+Each frontend project is independent: `cd <dir> && npm install && npm run dev`. They both talk to the qora-server HTTP API.
 
-Hard caps apply even to explicit user values. Supports **Windows** (wmic), **Linux** (/proc/meminfo), and **macOS** (sysctl/vm_stat).
+---
 
-## Weight Formats
+## How everything fits together
 
-| Format | Size | Quality | Speed (GPU) | Speed (CPU) |
-|--------|------|---------|-------------|-------------|
-| **Q4** (default) | ~3.5 GB | Good | ~3.3 tok/s | ~1.3 tok/s |
-| **F16** | ~7.5 GB | Best | — | ~0.5 tok/s |
-
-Q4 uses 4-bit symmetric quantization with group_size=32 and LUT-optimized dequantization. Multi-threaded GEMV/GEMM via rayon for large matrices.
-
-### AVX-512 SIMD Acceleration
-
-On CPUs with AVX-512 support (Intel 11th gen+, AMD Zen 4+), QORA-4B automatically uses hand-written AVX-512 SIMD kernels for a **~2.5x CPU speedup**:
-
-| Kernel | Technique | Speedup |
-|--------|-----------|---------|
-| **Q4 GEMV** | `permutexvar_ps` 16-entry LUT lookup, nibble extract via `cvtepu8_epi32` | ~2.5x |
-| **F16 GEMV** | `cvtph_ps` f16→f32 + `fmadd_ps` FMA accumulation | ~2.5x |
-| **DeltaNet state** | Vectorized decay/retrieve/delta/output over 128-dim heads | ~3x |
-| **Fused gate+up** | Parallel gate & up SIMD LUT decode in MLP | ~2.5x |
-
-Detection is automatic at runtime — falls back to scalar code on non-AVX-512 CPUs with zero overhead.
-
-## Platform Support
-
-| Platform | Binary | GPU Backend | Status |
-|----------|--------|-------------|--------|
-| **Windows x86_64** | `qor4b.exe` | Vulkan | Tested |
-| **Linux x86_64** | `qor4b` | Vulkan | Supported |
-| **macOS aarch64** | `qor4b` | Metal | Supported |
-
-Pre-built binaries are available on the [Releases](https://github.com/qora-protocol/QORA-LLM-4B/releases) page. GPU is auto-detected — falls back to CPU if unavailable.
-
-## Quick Start
-
-1. Download from the [Releases](https://github.com/qora-protocol/QORA-LLM-4B/releases) page:
-   - `model.qor4b.part_aa` + `model.qor4b.part_ab` (reassemble below)
-   - `tokenizer.json`
-   - `qor4b.exe` (Windows) or build from source (Linux/macOS)
-
-2. Reassemble the model file:
-
-**Windows (cmd):**
-```cmd
-copy /b model.qor4b.part_aa + model.qor4b.part_ab model.qor4b
 ```
-**Linux / macOS:**
+┌──────────────────────────────────────────────────────────────────────┐
+│                       qora-server  (single binary)                    │
+│                                                                       │
+│  HTTP Layer                                                           │
+│  ├── /v1/inference          ← unified, dispatched by `task` field     │
+│  ├── /v1/chat/completions   ← OpenAI alias → ChatEngine               │
+│  ├── /v1/audio/speech       ← OpenAI alias → TtsEngine                │
+│  ├── /v1/audio/transcriptions ← OpenAI alias → SttEngine              │
+│  ├── /v1/embeddings         ← OpenAI alias → EmbeddingEngine          │
+│  ├── /v1/rerank             ← custom → RerankEngine                   │
+│  ├── /v1/conversations*     ← chat history (per-user)                 │
+│  ├── /v1/admin/*            ← admin console endpoints                 │
+│  ├── /v1/models             ← lists registered models                 │
+│  ├── /health  /metrics      ← infra                                   │
+│                                                                       │
+│  Auth Layer  (redb + Argon2 + HMAC + sliding-window rate limit)       │
+│                                                                       │
+│  Registry  (HashMap<id, Arc<dyn Engine>> built from TOML at startup)  │
+│       │                                                               │
+│       ▼                                                               │
+│  Concrete Engines                                                     │
+│  ├── LlmEngine          ──→  qora-llm crate (in this repo)            │
+│  ├── QoraTtsEngine      ──→  qora-tts crate (D:\Burn-AI\QORA-TTS\)    │
+│  ├── QoraSttEngine      ──→  qora-stt-small (D:\Burn-AI\QORA-STT-Small\)│
+│  ├── QorEmbeddingEngine ──→  qor-rag (C:\Projects\AI\qor-main\...\)   │
+│  └── QorRerankEngine    ──→  qor-rag (same)                            │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Adding a new model
+
+Three scenarios:
+
+### 1. Different size of an existing model class (e.g. swap QOR4B → QOR9B)
+
+Just update `qora-server.toml`:
+
+```toml
+[[models]]
+id = "qora-llm"                                     # keep id stable for clients
+kind = "chat"
+path = "/var/lib/qora/llm/model.qor9b"              # ← new weight file
+tokenizer = "/var/lib/qora/llm/tokenizer.json"
+```
+
+Restart the server. **No code change. No recompile.** This is the value of the registry approach.
+
+### 2. Run multiple sizes side-by-side (e.g. QOR4B + QOR27B)
+
+Add multiple `[[models]]` entries with different `id` fields:
+
+```toml
+[[models]]
+id = "qora-fast"
+kind = "chat"
+path = "/var/lib/qora/4b/model.qor4b"
+tokenizer = "/var/lib/qora/4b/tokenizer.json"
+
+[[models]]
+id = "qora-large"
+kind = "chat"
+path = "/var/lib/qora/27b/model.qor27b"
+tokenizer = "/var/lib/qora/27b/tokenizer.json"
+```
+
+Clients then send `"model": "qora-fast"` or `"model": "qora-large"` in the request. The Registry routes to the right engine.
+
+### 3. New model class (e.g. image generation, video gen)
+
+Bigger work — requires:
+
+- A new trait (`ImageGenEngine`) in `crates/qora-server/src/engine/`
+- A new variant in the `Task` enum
+- A new field in `Registry`
+- A new arm in the `/v1/inference` task dispatch
+- A wrapper crate in `crates/qora-server/src/engines/`
+- An external crate (or path-dep) doing the actual inference
+
+The trait hierarchy is designed for this — adding a new task type is additive, doesn't break existing engines.
+
+---
+
+## Build & Run
+
+### Prerequisites
+- Rust toolchain (edition 2024, latest stable)
+- The QORA-TTS, QORA-STT-Small, qor-rag, qora-simd source trees at the paths Cargo.toml expects
+
+### Build the server
+
 ```bash
-cat model.qor4b.part_aa model.qor4b.part_ab > model.qor4b
+cd D:\Burn-AI\QOR4B
+cargo build --release --workspace --bin qora-server
 ```
+
+Build artifacts at `target\release\qora-server.exe`.
+
+### Run locally (development)
+
+1. Set required environment variables:
+
+```bash
+$env:QORA_SERVER_SECRET = "any-32-byte-random-hex"
+$env:QORA_ADMIN_TOKEN   = "any-admin-secret"
+```
+
+2. Edit `config\qora-server.toml.example` → save as `qora-server.toml` with paths pointing to your local model files.
 
 3. Run:
 
 ```bash
-# Text generation (auto-detects GPU)
-qor4b --prompt "Explain quantum computing" --max-tokens 500
-
-# Force CPU-only
-qor4b --prompt "Hello" --cpu
-
-# Image understanding
-qor4b --prompt "What's in this image?" --image photo.jpg
-
-# Video understanding (directory of frame images)
-qor4b --prompt "What happens in this video?" --video frames_dir/
-
-# Thinking mode (default, extended reasoning)
-qor4b --prompt "Solve: integral of x^2 * e^x dx" --think-budget 2048
-
-# No-think mode (faster, direct answers)
-qor4b --prompt "What is 2+2?" --no-think
-
-# Greedy decoding (deterministic output)
-qor4b --prompt "Hello" --greedy
+.\target\release\qora-server.exe qora-server.toml
 ```
 
-### CLI Flags
+Server boots, loads all configured models eagerly, listens on the configured bind address.
 
-| Flag | Description |
-|------|-------------|
-| `--prompt TEXT` | Input prompt (default: "Hello, how are you?") |
-| `--image PATH` | Path to an image file (PNG/JPG) |
-| `--video PATH` | Path to directory of frame images (PNG/JPG, sorted by name) |
-| `--max-tokens N` | Max tokens to generate (default: 1024) |
-| `--think-budget N` | Max thinking tokens before forcing answer (default: 1024) |
-| `--no-think` | Disable thinking mode (direct answers) |
-| `--show-think` | Display thinking tokens on stderr |
-| `--greedy` | Greedy decoding (temperature=0, not recommended with thinking mode) |
-| `--cpu` | Force CPU inference (skip GPU auto-detection) |
+### Run the frontends locally
 
-### Sampling Defaults
-
-| Parameter | Think mode | No-think mode |
-|-----------|-----------|---------------|
-| temperature | 1.0 | 0.7 |
-| top_k | 20 | 20 |
-| top_p | 0.95 | 0.95 |
-| presence_penalty | 1.5 | 1.5 |
-
-### Video Input
-
-Video is provided as a directory of frame images (not a video file). Extract frames however you like:
+In two separate terminals:
 
 ```bash
-# Example: extract 4 frames from a video with ffmpeg
-ffmpeg -i video.mp4 -vf "select=not(mod(n\,30))" -frames:v 4 frames/frame_%02d.png
-
-# Then run
-qor4b --prompt "Describe what happens" --video frames/
+# Admin console (port 5173)
+cd C:\Projects\Chat\fruntend\admin
+npm install
+npm run dev
 ```
-
-Frames are loaded in alphabetical order, resized to uniform dimensions (max 768px, divisible by 32), and processed as temporal pairs via Conv3d. Odd frame counts are padded by duplicating the last frame.
-
-## Building from Source
 
 ```bash
-# CPU-only (all platforms)
-cargo build --release
-
-# GPU — Windows/Linux (Vulkan)
-cargo build --release --features gpu
-
-# GPU — macOS (Metal)
-cargo build --release --features gpu-metal
+# User chat panel (port 5174)
+cd C:\Projects\Chat\fruntend\chat
+npm install
+npm run dev
 ```
 
-### Dependencies
+In the admin login screen, enter `http://localhost:8080` (or wherever qora-server is listening) and the `QORA_ADMIN_TOKEN` you set above.
 
-- **Language**: Pure Rust (2024 edition)
-- `cortex` — Rust deep learning framework (GPU via wgpu/Vulkan/Metal backend)
-- `rayon` — Thread pool for parallel GEMV, attention, lm_head
-- `half` — F16 support
-- `image` — Image loading (PNG/JPG)
-- `tokenizers` — HuggingFace tokenizer
-- `memmap2` — Memory-mapped I/O for converter
-- `serde_json` — Config parsing
-- **No ML framework** for CPU inference — all matrix ops are hand-written Rust with AVX-512 SIMD
-- **Cortex framework** used for GPU tensor operations and binary format types
+---
 
-### Cross-Platform Releases
+## Production Deployment
 
-Pre-built binaries are automatically built via GitHub Actions for:
-- **Windows x86_64** — CPU + GPU (Vulkan)
-- **Linux x86_64** — CPU + GPU (Vulkan)
-- **macOS aarch64** — CPU + GPU (Metal)
+For deployment to a Linux box (e.g. EPYC server):
 
-Create a git tag (e.g. `v0.1.0`) and push to trigger a release build.
+1. Build for Linux: `cargo build --release --workspace --bin qora-server` (or cross-compile)
+2. Copy binary + model weight files to the server
+3. Run the install script: `sudo ./scripts/install.sh`
+4. Edit `/etc/qora/qora-server.toml` with model paths
+5. Set secrets in `/etc/qora/qora.env`
+6. `systemctl enable --now qora-server`
+7. Validate with `docs/production-load-test.md` runbook
 
-## File Structure
+Full deployment guide: [`docs/deployment.md`](docs/deployment.md).
 
+---
+
+## API Reference
+
+OpenAI-compatible — most clients work with just a base-URL change.
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/v1/chat/completions` | POST | text + vision chat (streaming or non-stream) |
+| `/v1/audio/speech` | POST | TTS — text in, audio bytes out |
+| `/v1/audio/transcriptions` | POST | STT — audio in (multipart), text out |
+| `/v1/embeddings` | POST | text → vector |
+| `/v1/rerank` | POST | rank documents against a query |
+| `/v1/inference` | POST | unified — set `task` field to dispatch |
+| `/v1/models` | GET | list all registered models |
+| `/v1/conversations` | POST/GET | create / list user's chat conversations |
+| `/v1/conversations/{id}` | GET/DELETE | get conversation + messages / delete |
+| `/v1/conversations/{id}/export` | GET | download user's data (with embeddings) |
+| `/v1/admin/*` | various | admin console (token-protected) |
+| `/health` | GET | liveness |
+| `/metrics` | GET | Prometheus |
+
+Full schemas + curl examples: [`docs/api.md`](docs/api.md). Drop-in OpenAI SDK examples (Python + Node): [`docs/examples/`](docs/examples/).
+
+---
+
+## Configuration (qora-server.toml)
+
+Complete schema in [`config/qora-server.toml.example`](config/qora-server.toml.example). Key sections:
+
+```toml
+[server]            # bind address + optional TLS cert/key paths
+[scheduler]         # slot count, queue size, timeouts (LLM-specific tuning)
+[auth]              # admin_token env var name + redb path
+[limits.default]    # default per-key rate limits (rpm, tpm)
+[observability]     # Prometheus bind, log level, log format
+[loading]           # eager (default) vs lazy
+[history]           # which embedding model to use for chat history retrieval
+
+[[models]]          # one per registered engine — repeat for as many as you want
+id = "..."
+kind = "chat" | "tts" | "stt" | "embedding" | "rerank"
+path = "..."
+tokenizer = "..."   # optional, depending on kind
+description = "..."
 ```
-src/
-  main.rs           — CLI entry point, argument parsing
-  config.rs         — Model architecture configuration
-  gemv.rs           — GEMV/GEMM kernels (F16 + Q4), hybrid forward pass, batched prefill
-  simd.rs           — AVX-512 SIMD kernels (Q4/F16 GEMV, DeltaNet, fused MLP)
-  generate.rs       — Text generation loop (text, image, video modes)
-  tokenizer.rs      — Tokenizer wrapper and chat templates
-  vision.rs         — Vision encoder (ViT + merger), image/video loading
-  save.rs           — Binary model format (.qor4b) save/load
-  convert.rs        — One-time safetensors → .qor4b converter
-  system.rs         — System awareness (RAM detection, smart limits)
-  gpu_loader.rs     — CPU → GPU weight conversion (Q4/F16 → Burn tensors)
-  gpu_inference.rs  — GPU forward pass (DeltaNet + Full Attention), prefill + decode
-  lib.rs            — Module exports
-```
 
-## Model Binary Format (.qor4b)
+---
 
-Custom binary format for fast loading:
+## Architectural Decisions (worth remembering)
 
-```
-Header:  "QOR4" magic + version(u32) + format(u8: 0=F16, 1=Q4)
-Config:  Architecture params (vocab, hidden, layers, heads, etc.)
-Layers:  32 layers, each with type byte + layer-specific weights
-Global:  Embedding + final norm + precomputed RoPE tables
-Vision:  Conv3d patch embed + pos_embed + 24 ViT blocks + merger MLP
-```
+### Why a Cargo workspace with path-deps?
+- `qora-llm` is a workspace member because we modified it heavily during development.
+- TTS / STT / RAG are external crates because they're already complete — we just consume their public APIs.
+- For deployment, only the compiled binary + model weight files matter. Source layout is a developer ergonomics question.
 
-Loading is ~25s for the Q4 model (~3.5 GB) via buffered sequential reads.
+### Why `redb` instead of SQLite?
+- QORA's promise is "pure Rust, single binary, no C deps." sqlx + libsqlite3-sys breaks that.
+- `redb` is a pure-Rust embedded ACID DB used in production by Iroh and others.
+- API keys, usage records, and chat history all live in one redb file with separate logical tables.
 
-## Performance
+### Why HMAC index + Argon2 verify for API keys?
+- Plain Argon2 verify is intentionally slow (~50–200 ms). Iterating all keys per request would be 50+ seconds at scale.
+- HMAC-SHA256 with a server-side secret gives O(1) lookup; Argon2 verify on the matched record is defense-in-depth.
+- Same pattern Stripe and similar APIs use.
 
-Tested on i5-11500 (6C/12T), 16GB RAM, GTX 1660 SUPER (6GB):
+### Why per-engine concurrency semaphores?
+- TTS / STT / vision encoding can each allocate ~GB of intermediate state per request.
+- Without limits, N parallel requests = N×GB transient memory → OOM.
+- Defaults: vision=1 (serial), tts=2, stt=2, embed=8 (light), rerank=4. Tuneable.
 
-| Task | GPU | CPU |
-|------|-----|-----|
-| Text decode | **~3.3 tok/s** | ~1.3 tok/s (AVX-512) / ~0.54 tok/s (scalar) |
-| Text prefill (89 tok) | **~4.5 tok/s** | ~3.9 tok/s (AVX-512) / ~1.9 tok/s (scalar) |
-| Image encode (256x256) | — | ~90s |
-| Video encode (4 frames) | — | ~180s |
-| Model load (Q4) | ~25s | ~25s |
-| GPU weight upload | ~6s | — |
+### Why a separate trait per task type instead of one mega-trait?
+- Each engine has different request/response shapes (chat streams; TTS returns binary; rerank needs query+docs).
+- One trait would need every engine to implement every method — wasteful and confusing.
+- The `ModelEngine` base trait carries the shared metadata (`id()`, `task()`, `description()`); task traits are specialized.
 
-## Comparison with QORA-0.8B
+### Why one TOML config file lists all models, not auto-discovery?
+- Auto-discovery is fragile (file system probing, ambiguous types).
+- Explicit config means: operator decides what to serve, in what order, with what id, and can audit it.
+- Adding a new model = add one `[[models]]` block + restart. No code change, no UI, no surprises.
 
-| | QORA-4B | QORA-0.8B |
-|---|---------|-----------|
-| Parameters | 4B | 0.8B |
-| Model size (Q4) | 3.5 GB | 600 MB |
-| Load time | ~25s | ~500ms |
-| Decode speed (GPU) | ~3.3 tok/s | N/A |
-| Decode speed (CPU) | ~1.3 tok/s | ~3.9 tok/s |
-| RAM usage | ~3.5 GB | ~791 MB |
-| GPU support | Yes (Vulkan/Metal) | No (not needed) |
-| Vision | 24L ViT (1024) | 12L ViT (768) |
-| Best for | Desktop, complex reasoning | Mobile, edge, quick tasks |
+---
 
+## Status
+
+- ✅ Core engines: LLM (chat + vision), TTS, STT, Embedding, Rerank
+- ✅ Auth + admin keys + rate limiting + redb
+- ✅ Chat history with auto-embed + rerank-as-context + per-user export
+- ✅ Admin console (React)
+- ✅ User chat panel (React, exists separately at C:\Projects\Chat\fruntend)
+- ✅ Prometheus metrics, structured tracing
+- ✅ TLS via rustls, systemd deployment
+- ⏳ Production EPYC load test — runbook ready, awaiting hardware deployment
+
+---
+
+## Where to look when you forget something
+
+| Question | File |
+|---|---|
+| What does each crate do? | This README, "Repository structure" section |
+| How do I add a new model size? | This README, "Adding a new model" |
+| What's the API surface? | [`docs/api.md`](docs/api.md) |
+| How do I deploy? | [`docs/deployment.md`](docs/deployment.md) |
+| What's the multi-model design rationale? | [`docs/superpowers/specs/2026-04-26-qora-multimodel-design.md`](docs/superpowers/specs/2026-04-26-qora-multimodel-design.md) |
+| Why was there an earlier (now-removed) v1.0.0 tag? | The original tag was a single-model slice. We expanded scope; the real v1.0.0 covers multi-model. |
+| What's in qora-llm specifically? | [`crates/qora-llm/README.md`](crates/qora-llm/README.md) |
+| How does chat history retrieval work? | `crates/qora-server/src/history/retrieve.rs` (cosine similarity over stored embeddings) |
+| Where are API keys stored? | redb at `auth.db_path` — never plaintext, only HMAC index + Argon2 hash |
+
+---
+
+## License
+
+Apache 2.0. The base models (Qwen3.5-4B, Qwen3-TTS, etc.) are released by their respective authors under Apache 2.0.
