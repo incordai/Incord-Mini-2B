@@ -60,7 +60,7 @@ fn build_test_app(model_id: &str) -> (axum::Router, TempDir) {
     let db = db::open(&db_path).unwrap();
 
     let auth = Arc::new(AuthState {
-        db,
+        db: db.clone(),
         server_secret: Arc::new(TEST_SECRET.to_vec()),
         limiter: RateLimiter::new(),
     });
@@ -77,7 +77,7 @@ fn build_test_app(model_id: &str) -> (axum::Router, TempDir) {
         format!("Test engine {}", model_id),
     ));
     let registry = Registry::builder().add_chat(engine).build();
-    let inference_state = Arc::new(InferenceState::for_test(registry));
+    let inference_state = Arc::new(InferenceState::for_test(registry, db.clone()));
 
     let app = build_router(inference_state, auth, admin_state);
     (app, dir)

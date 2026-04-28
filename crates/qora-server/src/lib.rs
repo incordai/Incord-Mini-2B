@@ -7,6 +7,7 @@ pub mod db;
 pub mod engine;
 pub mod engines;
 pub mod error;
+pub mod history;
 pub mod http;
 pub mod loader;
 pub mod metrics;

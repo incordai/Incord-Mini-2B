@@ -2,7 +2,7 @@
 
 use axum::response::IntoResponse;
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Multipart, State},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
@@ -18,6 +18,7 @@ use crate::api::openai::response::{
     ChatCompletionChunk, ChatCompletionResponse, Choice, ChunkChoice, ChunkDelta, ResponseMessage,
     Usage,
 };
+use crate::auth::keys::ApiKey;
 use crate::engine::Task;
 use crate::engine::chat::{ChatEvent, ChatMessage, ChatRequest, FinishReason};
 use crate::engine::embed::EmbedRequest as EngineEmbedRequest;
@@ -25,6 +26,7 @@ use crate::engine::rerank::RerankRequest as EngineRerankRequest;
 use crate::engine::stt::SttRequest as EngineSttRequest;
 use crate::engine::tts::TtsRequest as EngineTtsRequest;
 use crate::error::ServerError;
+use crate::history::{retrieve, store};
 use crate::http::sse::into_sse_response;
 use crate::registry::Registry;
 
@@ -42,11 +44,17 @@ pub struct InferenceState {
     pub embed_semaphore: Arc<tokio::sync::Semaphore>,
     /// Semaphore for rerank.
     pub rerank_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Shared redb instance for both auth keys AND chat history.
+    /// (Separate logical tables in the same DB file.)
+    pub history_db: Arc<redb::Database>,
+    /// History config: embedding model + top_k for context injection.
+    pub history_config: crate::config::HistoryConfig,
 }
 
 impl InferenceState {
     /// Build with default-permissive semaphores for tests.
-    pub fn for_test(registry: Registry) -> Self {
+    /// Caller must supply a `history_db` (use `crate::db::open` with a tempdir).
+    pub fn for_test(registry: Registry, history_db: Arc<redb::Database>) -> Self {
         Self {
             registry,
             vision_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -54,6 +62,8 @@ impl InferenceState {
             stt_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
             embed_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
             rerank_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+            history_db,
+            history_config: crate::config::HistoryConfig::default(),
         }
     }
 }
@@ -80,8 +90,10 @@ pub async fn unified_inference(
 
 /// OpenAI alias: /v1/chat/completions accepts ChatCompletionRequest, translates to InferenceRequest.
 /// Supports image_url content parts — images are encoded via the engine's vision encoder.
+/// Also supports conversation_id + use_history for RAG-style context injection from chat history.
 pub async fn openai_chat_completions(
     State(state): State<Arc<InferenceState>>,
+    Extension(key): Extension<ApiKey>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, ServerError> {
     if !state.registry.contains(&req.model) {
@@ -150,9 +162,83 @@ pub async fn openai_chat_completions(
         None
     };
 
+    // -----------------------------------------------------------------------
+    // History injection: if use_history + conversation_id, embed the query,
+    // find top-K relevant prior messages, and prepend them as system context.
+    // -----------------------------------------------------------------------
+    let conversation_id = req.conversation_id.clone();
+    let user_id = key.user_id.clone();
+
+    // History injection — all early-exit conditions checked up front so nesting stays flat.
+    'history: {
+        let Some(conv_id) = conversation_id.as_ref() else { break 'history };
+        if !req.use_history { break 'history }
+        let Some(embed_model_id) = state.history_config.embed_model.as_ref() else { break 'history };
+        let Some(embed_engine) = state.registry.get_embed(embed_model_id) else { break 'history };
+
+        let query_text = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        if query_text.is_empty() { break 'history }
+
+        let embed_req = EngineEmbedRequest {
+            model: embed_model_id.clone(),
+            input: vec![query_text],
+        };
+        let _permit = state
+            .embed_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ServerError::Internal("embed semaphore closed".into()))?;
+        let Ok(out) = embed_engine.embed(embed_req).await else { break 'history };
+        let Some(query_emb) = out.embeddings.first() else { break 'history };
+
+        let relevant = retrieve::find_relevant_history(
+            &state.history_db,
+            conv_id,
+            &user_id,
+            query_emb,
+            state.history_config.top_k,
+        )
+        .unwrap_or_default();
+
+        if !relevant.is_empty() {
+            let mut history_text = String::from("Relevant prior conversation:\n");
+            let mut total_chars = 0usize;
+            for m in &relevant {
+                let line = format!("- [{}] {}\n", m.role, m.content);
+                if total_chars + line.len() > state.history_config.max_context_chars {
+                    break;
+                }
+                total_chars += line.len();
+                history_text.push_str(&line);
+            }
+            let mut new_msgs = vec![ChatMessage {
+                role: "system".to_string(),
+                content: history_text,
+            }];
+            new_msgs.extend(messages);
+            messages = new_msgs;
+        }
+    }
+
+    // Snapshot of user-role messages for history persistence.
+    let user_messages_snapshot: Vec<ChatMessage> = messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .cloned()
+        .collect();
+
+    let model_name = req.model.clone();
+    let stream = req.stream;
+
     let inference_req = InferenceRequest {
         task: Task::Chat,
-        model: req.model,
+        model: req.model.clone(),
         messages,
         input: None,
         voice: None,
@@ -166,10 +252,74 @@ pub async fn openai_chat_completions(
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         top_p: req.top_p,
-        stream: req.stream,
+        stream,
         think: req.think,
         think_budget: req.think_budget,
     };
+
+    // When a conversation_id is set and non-stream: run chat inline so we can
+    // capture and persist both user messages and the assistant response.
+    // For stream + conversation_id: persist user messages immediately; assistant
+    // persistence is deferred (TODO M17.x — wrap stream to accumulate on [DONE]).
+    if let Some(conv_id) = conversation_id {
+        // Persist user messages (best-effort, no embedding computed in M17 v1).
+        for um in &user_messages_snapshot {
+            let _ = store::append_message(
+                &state.history_db,
+                &conv_id,
+                &user_id,
+                &um.role,
+                &um.content,
+                None,
+            );
+        }
+
+        if !stream {
+            // Run the chat engine inline so we can capture the assistant response.
+            let chat_engine = state.registry.get_chat(&model_name).ok_or_else(|| {
+                ServerError::BadRequest(format!("model `{}` is not a chat model", model_name))
+            })?;
+            let max_tokens = inference_req.max_tokens.unwrap_or(1024);
+            let chat_req = ChatRequest {
+                model: inference_req.model.clone(),
+                messages: inference_req.messages.clone(),
+                max_tokens: inference_req.max_tokens,
+                temperature: inference_req.temperature,
+                top_p: inference_req.top_p,
+                stream: false,
+                think: inference_req.think,
+                think_budget: inference_req.think_budget,
+                vision_embeds,
+            };
+            let (tx, rx) = mpsc::channel::<ChatEvent>(64);
+            let engine_clone = chat_engine.clone();
+            tokio::spawn(async move {
+                let _ = engine_clone.chat(chat_req, tx).await;
+            });
+
+            let json_resp = non_stream_response(model_name.clone(), max_tokens, rx).await?;
+            let assistant_content = json_resp
+                .0
+                .choices
+                .first()
+                .map(|c| c.message.content.clone())
+                .unwrap_or_default();
+
+            // Persist assistant response (best-effort).
+            let _ = store::append_message(
+                &state.history_db,
+                &conv_id,
+                &user_id,
+                "assistant",
+                &assistant_content,
+                None,
+            );
+
+            return Ok(json_resp.into_response());
+        }
+        // Stream with conversation_id: user messages already persisted above.
+        // TODO M17.x: wrap stream to accumulate tokens and persist assistant on [DONE].
+    }
 
     handle_chat_with_vision(state, inference_req, vision_embeds).await
 }

@@ -57,6 +57,9 @@ async fn main() -> anyhow::Result<()> {
         stt_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         embed_semaphore: Arc::new(tokio::sync::Semaphore::new(8)), // lighter, allow more
         rerank_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        // Chat history shares the same redb file as auth keys (separate logical tables).
+        history_db: auth.db.clone(),
+        history_config: config.history.clone(),
     });
     let router = build_router(inference_state, auth, admin_state);
 

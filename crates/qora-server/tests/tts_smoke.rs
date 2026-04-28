@@ -37,7 +37,7 @@ fn build_empty_app() -> (axum::Router, TempDir) {
         admin_token: TEST_ADMIN_TOKEN.to_string(),
     });
     let registry = Registry::builder().build();
-    let state = Arc::new(InferenceState::for_test(registry));
+    let state = Arc::new(InferenceState::for_test(registry, db.clone()));
     let app = build_router(state, auth, admin_state);
     (app, dir)
 }

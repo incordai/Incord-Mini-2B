@@ -41,6 +41,16 @@ pub struct ChatCompletionRequest {
 
     #[serde(default)]
     pub show_think: Option<bool>,
+
+    /// If set, this chat is part of an existing conversation.
+    /// New messages get appended; if use_history is true, prior context is injected.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+
+    /// Inject relevant historical messages from this conversation as context.
+    /// Requires conversation_id to be set.
+    #[serde(default)]
+    pub use_history: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
