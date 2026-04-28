@@ -12,10 +12,62 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::json;
 use tower::ServiceExt;
+use tempfile::TempDir;
 
+use qora_server::auth::admin::AdminState;
+use qora_server::auth::middleware::AuthState;
+use qora_server::auth::ratelimit::RateLimiter;
+use qora_server::db;
 use qora_server::http::handlers::inference::InferenceState;
 use qora_server::http::router::build_router;
 use qora_server::registry::Registry;
+
+const TEST_ADMIN_TOKEN: &str = "test-admin-tts";
+const TEST_SECRET: &[u8] = b"test-tts-secret";
+
+fn build_empty_app() -> (axum::Router, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let db = db::open(&dir.path().join("test.redb")).unwrap();
+    let auth = Arc::new(AuthState {
+        db: db.clone(),
+        server_secret: Arc::new(TEST_SECRET.to_vec()),
+        limiter: RateLimiter::new(),
+    });
+    let admin_state = Arc::new(AdminState {
+        admin_token: TEST_ADMIN_TOKEN.to_string(),
+    });
+    let registry = Registry::builder().build();
+    let state = Arc::new(InferenceState { registry });
+    let app = build_router(state, auth, admin_state);
+    (app, dir)
+}
+
+/// Mint a user key via admin endpoint.
+async fn mint_key(app: axum::Router) -> (String, axum::Router) {
+    let body = json!({
+        "user_id": "tts-test-user",
+        "name": "tts-test-key",
+        "rpm_limit": 10000,
+        "tpm_limit": 10000000
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/admin/keys")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    (val["raw_key"].as_str().unwrap().to_string(), app)
+}
 
 // ---------------------------------------------------------------------------
 // Routing / dispatch tests (no real model needed)
@@ -24,10 +76,8 @@ use qora_server::registry::Registry;
 /// Verify that a TTS request for an unknown model returns 400 — not a panic or 500.
 #[tokio::test]
 async fn tts_unknown_model_returns_400() {
-    // Registry with no TTS engine registered.
-    let registry = Registry::builder().build();
-    let state = Arc::new(InferenceState { registry });
-    let app = build_router(state);
+    let (app, _dir) = build_empty_app();
+    let (raw_key, app) = mint_key(app).await;
 
     let body = json!({
         "task": "tts",
@@ -41,6 +91,7 @@ async fn tts_unknown_model_returns_400() {
                 .method("POST")
                 .uri("/v1/inference")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {raw_key}"))
                 .body(Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -53,9 +104,8 @@ async fn tts_unknown_model_returns_400() {
 /// Verify that /v1/audio/speech for an unknown model returns 400.
 #[tokio::test]
 async fn openai_speech_unknown_model_returns_400() {
-    let registry = Registry::builder().build();
-    let state = Arc::new(InferenceState { registry });
-    let app = build_router(state);
+    let (app, _dir) = build_empty_app();
+    let (raw_key, app) = mint_key(app).await;
 
     let body = json!({
         "model": "nonexistent-tts",
@@ -69,6 +119,7 @@ async fn openai_speech_unknown_model_returns_400() {
                 .method("POST")
                 .uri("/v1/audio/speech")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {raw_key}"))
                 .body(Body::from(body.to_string()))
                 .unwrap(),
         )
@@ -81,9 +132,8 @@ async fn openai_speech_unknown_model_returns_400() {
 /// Verify that a TTS request with missing input returns 400, not a panic.
 #[tokio::test]
 async fn tts_missing_input_field_returns_400() {
-    let registry = Registry::builder().build();
-    let state = Arc::new(InferenceState { registry });
-    let app = build_router(state);
+    let (app, _dir) = build_empty_app();
+    let (raw_key, app) = mint_key(app).await;
 
     // Even if the model were registered, a missing "input" field should be rejected.
     // With no model registered, we get 400 for unknown model first — either way 400.
@@ -99,6 +149,7 @@ async fn tts_missing_input_field_returns_400() {
                 .method("POST")
                 .uri("/v1/inference")
                 .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {raw_key}"))
                 .body(Body::from(body.to_string()))
                 .unwrap(),
         )

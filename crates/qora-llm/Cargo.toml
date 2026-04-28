@@ -12,7 +12,7 @@ name = "convert"
 path = "src/convert.rs"
 
 [[bin]]
-name = "qora-server"
+name = "qor4b-server"
 path = "src/bin/qora_server.rs"
 
 [[bin]]

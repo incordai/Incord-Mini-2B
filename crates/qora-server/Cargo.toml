@@ -6,6 +6,10 @@ edition.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "qora-server"
+path = "src/bin/qora_server.rs"
+
 [dependencies]
 qor4b = { path = "../qora-llm" }
 qora-tts = { path = "../../../QORA-TTS" }
