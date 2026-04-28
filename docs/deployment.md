@@ -1,13 +1,13 @@
 # QORA Server Deployment Guide
 
-This guide covers deploying the QORA API server on a single Linux box.
+This guide covers deploying the QORA multi-model API server on a single Linux box.
 
 ## Hardware Requirements
 
-Minimum (light traffic, ~10 concurrent users):
+Minimum (light traffic, ~10 concurrent users, all engines loaded):
 - CPU with AVX-512 support (Intel 11th gen+, AMD Zen 4+)
-- 8 GB RAM
-- 8 GB disk
+- 16 GB RAM (LLM ~4 GB + TTS ~1 GB + STT ~500 MB + RAG ~500 MB + OS overhead)
+- 20 GB disk
 
 Recommended (production, ~150 concurrent users):
 - AMD EPYC 9354 or similar (32C/64T, 12-channel DDR5, ~400 GB/s memory bandwidth)
@@ -15,13 +15,33 @@ Recommended (production, ~150 concurrent users):
 - 2× 4 TB NVMe SSD (RAID 1 for the auth.redb file)
 - 1 Gbit/s network minimum (2 Gbit/s recommended for streaming many concurrent SSE connections)
 
+RAM sizing for all five engines loaded simultaneously:
+
+| Engine | Model size (approx) |
+|--------|-------------------|
+| LLM (chat + vision) | ~4 GB (4B Q4) |
+| TTS | ~1 GB |
+| STT (Whisper-small) | ~500 MB |
+| Embedding | ~400 MB |
+| Reranker | ~400 MB |
+| **Total** | **~6–7 GB weights** + OS + buffers ≈ **12–15 GB minimum** |
+
+If you load a larger LLM variant (9B or 27B), add proportionally more RAM.
+
 ## Required Files
 
+Per-engine model files (all paths configurable in `qora-server.toml`):
+
 - `qora-server` binary (built from this repo via `cargo build --release --bin qora-server`)
-- `model.qor4b` — quantized model weights (~3.5 GB)
-- `tokenizer.json` — HuggingFace tokenizer file
+- **LLM engine**: `model.qor4b` (~3.5 GB), `tokenizer.json`
+- **TTS engine**: `model.qora-tts`, `tokenizer.json`
+- **STT engine**: `model.qora-stt-small`
+- **Embedding engine**: `embed.bin`
+- **Rerank engine**: `rerank.bin`
 - `qora-server.toml` — server config
 - `qora.env` — environment variables (secrets)
+
+Engines you do not need can simply be omitted from the `[[models]]` list in the config — they will not be loaded.
 
 ## Install
 
@@ -41,17 +61,56 @@ This:
 
 ## Configuration
 
-Edit `/etc/qora/qora-server.toml`:
+Edit `/etc/qora/qora-server.toml`. The key sections are:
 
-- **`server.bind`**: `"0.0.0.0:443"` for TLS, or `"127.0.0.1:8080"` if behind a reverse proxy
-- **`server.tls_cert` / `tls_key`**: paths to fullchain and privkey PEM files (omit both for plain HTTP)
-- **`model.path`**, **`model.tokenizer`**: paths to model + tokenizer
-- **`scheduler.slot_count`**: number of concurrent decoders. Start with 64 for the EPYC reference; tune based on memory bandwidth and per-user latency target.
-- **`scheduler.max_queue`**: how many requests to queue before returning 503. Default 1000.
-- **`auth.db_path`**: path to redb file (must be writable by qora user)
-- **`limits.default.rpm` / `tpm`**: default per-key rate limits
+### `[server]`
 
-Edit `/etc/qora/qora.env`:
+- **`bind`**: `"0.0.0.0:443"` for TLS, or `"127.0.0.1:8080"` if behind a reverse proxy
+- **`tls_cert` / `tls_key`**: paths to fullchain and privkey PEM files (omit both for plain HTTP)
+
+### `[scheduler]`
+
+- **`slot_count`**: number of concurrent LLM decoders. Start with 64 for the EPYC reference; tune based on memory bandwidth and per-user latency target.
+- **`max_queue`**: how many requests to queue before returning 503. Default 1000.
+
+### `[auth]`
+
+- **`db_path`**: path to redb file (must be writable by qora user)
+
+### `[limits.default]`
+
+- **`rpm` / `tpm`**: default per-key rate limits
+
+### `[[models]]` — registering engines
+
+Each `[[models]]` entry loads one model at startup and registers it in the runtime registry. The `id` is what clients send in the `model` field of their requests.
+
+```toml
+[[models]]
+id = "qora-llm"
+kind = "chat"           # one of: chat | tts | stt | embedding | rerank
+path = "/var/lib/qora/llm/model.qor4b"
+tokenizer = "/var/lib/qora/llm/tokenizer.json"
+description = "QORA hybrid LLM (text + vision)"
+```
+
+Required fields per `kind`:
+
+| `kind` | Required fields | Optional fields |
+|--------|----------------|-----------------|
+| `chat` | `path`, `tokenizer` | `description` |
+| `tts` | `path`, `tokenizer` | `description` |
+| `stt` | `path` | `description` |
+| `embedding` | `path` | `description` |
+| `rerank` | `path` | `description` |
+
+You can register multiple models of the same kind under different `id` values (e.g., a 4B and a 9B LLM at the same time). See `config/qora-server.toml.example` for a full example.
+
+### `[loading]`
+
+- **`mode`**: `"eager"` (default) loads all models at startup. `"lazy"` loads on first request. Use `eager` for production to surface load errors before traffic arrives.
+
+### `/etc/qora/qora.env`
 
 - **`QORA_SERVER_SECRET`**: 32-byte random hex. Generate with:
   ```bash
@@ -116,7 +175,19 @@ Stop: `systemctl stop qora-server` (graceful — finishes in-flight requests)
 Restart: `systemctl restart qora-server`
 Logs: `journalctl -u qora-server -f`
 Health: `curl https://api.your-domain.com/health`
+Models: `curl https://api.your-domain.com/v1/models` (lists all registered engines + IDs)
 Metrics: `curl http://localhost:9090/metrics` (or wherever Prometheus is configured)
+
+### Inference endpoints
+
+| Endpoint | Method | Task |
+|----------|--------|------|
+| `/v1/inference` | POST | Unified — dispatches by `task` field |
+| `/v1/chat/completions` | POST | LLM chat (OpenAI-compat) |
+| `/v1/audio/speech` | POST | TTS synthesis (OpenAI-compat) |
+| `/v1/audio/transcriptions` | POST | STT transcription (OpenAI-compat, multipart) |
+| `/v1/embeddings` | POST | Sentence embedding (OpenAI-compat) |
+| `/v1/rerank` | POST | Cross-encoder reranking |
 
 ## Admin operations
 
@@ -172,7 +243,9 @@ Key metrics to alert on:
 
 ## Capacity Tuning
 
-The Batcher uses a fixed slot pool. The right `slot_count` balances:
+### LLM (chat) slot pool
+
+The LLM scheduler uses a fixed slot pool. The right `slot_count` balances:
 - **Higher** → more concurrent users, lower per-user throughput
 - **Lower** → fewer concurrent users, higher per-user throughput
 
@@ -184,10 +257,26 @@ For the EPYC 9354 reference target (~400 GB/s memory bandwidth, 3.5 GB Q4 weight
 
 Tune via `scheduler.slot_count` in `qora-server.toml`.
 
+### Per-engine concurrency semaphores
+
+Each non-LLM engine is gated by a Tokio semaphore that caps parallelism to protect memory and CPU:
+
+| Engine | Default permits | Source constant |
+|--------|----------------|-----------------|
+| Vision encoder | 1 | `crates/qora-server/src/http/handlers/inference.rs` |
+| TTS | 2 | same file |
+| STT | 2 | same file |
+| Embedding | 8 | same file |
+| Rerank | 4 | same file |
+
+These defaults are set in `InferenceState::for_test` and the production `main.rs` wiring. Adjust the permit counts in `crates/qora-server/src/bin/qora_server.rs` to match your hardware profile (more RAM / more cores → raise the cap).
+
 ## Troubleshooting
 
-- **Server fails to start with `tokenizer.json not found`**: edit `model.tokenizer` path in toml.
+- **Server fails to start with `tokenizer.json not found`**: check the `path`/`tokenizer` fields for the affected `[[models]]` entry.
 - **`QORA_SERVER_SECRET env var must be set`**: check `/etc/qora/qora.env`.
+- **Unknown model error**: verify the `id` in the request matches a `[[models]]` entry in the config.
 - **All requests return 401 immediately**: verify the `Authorization: Bearer` header has a valid `qora_…` key. Use `curl -v` to inspect.
 - **Requests hang forever**: check `journalctl -u qora-server` for batcher panic; restart service. Most likely a model file corruption or incompatible config version.
 - **Memory growth over time**: redb compaction may be needed. Stop service, run `redb compact /var/lib/qora/auth.redb` (if redb-cli is installed), restart.
+- **TTS/STT requests queue up**: the engine semaphore permits may be too low for your traffic. Increase the permit count in `qora_server.rs` and rebuild.
