@@ -61,4 +61,16 @@ pub trait ChatEngine: ModelEngine {
     /// cache, and sampling. Tokens stream out via sse_tx; the function returns
     /// when generation is complete (or errors).
     async fn chat(&self, req: ChatRequest, sse_tx: mpsc::Sender<ChatEvent>) -> anyhow::Result<()>;
+
+    /// Whether this engine supports vision input.
+    fn supports_vision(&self) -> bool {
+        false
+    }
+
+    /// Encode raw image bytes to vision embeddings, returning (embeds, num_tokens).
+    /// Runs on spawn_blocking internally. Returns an error if the engine does not
+    /// support vision.
+    async fn encode_image(&self, _bytes: Vec<u8>) -> anyhow::Result<(Vec<f32>, usize)> {
+        anyhow::bail!("this engine does not support vision input")
+    }
 }

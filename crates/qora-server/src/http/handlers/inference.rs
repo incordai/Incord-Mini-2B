@@ -28,6 +28,31 @@ use crate::registry::Registry;
 #[derive(Clone)]
 pub struct InferenceState {
     pub registry: Registry,
+    /// Semaphore that gates vision encoding (memory-heavy, ~90 s on CPU).
+    /// 1 permit = serial to avoid OOM on the EPYC.
+    pub vision_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Semaphore for TTS synthesis.
+    pub tts_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Semaphore for STT transcription.
+    pub stt_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Semaphore for embedding (lighter — allow more parallel).
+    pub embed_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Semaphore for rerank.
+    pub rerank_semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl InferenceState {
+    /// Build with default-permissive semaphores for tests.
+    pub fn for_test(registry: Registry) -> Self {
+        Self {
+            registry,
+            vision_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+            tts_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+            stt_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+            embed_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
+            rerank_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        }
+    }
 }
 
 /// Unified endpoint: dispatches by `task` field.
@@ -48,26 +73,62 @@ pub async fn unified_inference(
 }
 
 /// OpenAI alias: /v1/chat/completions accepts ChatCompletionRequest, translates to InferenceRequest.
+/// Supports image_url content parts — images are encoded via the engine's vision encoder.
 pub async fn openai_chat_completions(
     State(state): State<Arc<InferenceState>>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, ServerError> {
-    let messages: Vec<ChatMessage> = req.messages.into_iter().map(|m| ChatMessage {
-        role: m.role,
-        content: match m.content {
-            MessageContent::Text(s) => s,
+    if !state.registry.contains(&req.model) {
+        return Err(ServerError::BadRequest(format!("unknown model: {}", req.model)));
+    }
+    let engine = state.registry.get_chat(&req.model)
+        .ok_or_else(|| ServerError::BadRequest(format!("model `{}` is not a chat model", req.model)))?;
+
+    // Parse messages; extract image bytes from any image_url content parts.
+    let mut images: Vec<Vec<u8>> = Vec::new();
+    let mut messages: Vec<ChatMessage> = Vec::new();
+    for m in req.messages {
+        let mut text = String::new();
+        match m.content {
+            MessageContent::Text(s) => text = s,
             MessageContent::Parts(parts) => {
-                let mut s = String::new();
                 for p in parts {
-                    if let ContentPart::Text { text } = p {
-                        s.push_str(&text);
-                        s.push('\n');
+                    match p {
+                        ContentPart::Text { text: t } => {
+                            text.push_str(&t);
+                            text.push('\n');
+                        }
+                        ContentPart::ImageUrl { image_url } => {
+                            let bytes = parse_image_url(&image_url.url).await?;
+                            images.push(bytes);
+                            // Insert vision placeholder tokens so the LLM knows where image embeds go.
+                            text.push_str("<|vision_start|><|image_pad|><|vision_end|>");
+                        }
                     }
                 }
-                s
             }
-        },
-    }).collect();
+        }
+        messages.push(ChatMessage { role: m.role, content: text });
+    }
+
+    // If the request contained images, encode the first one via the vision encoder.
+    // (Multi-image support is future work — only the first image is used in v1.)
+    let vision_embeds = if !images.is_empty() {
+        if !engine.supports_vision() {
+            return Err(ServerError::BadRequest(format!(
+                "model `{}` does not support vision input", req.model
+            )));
+        }
+        // Acquire the vision semaphore before encoding to avoid OOM.
+        let _permit = state.vision_semaphore.clone().acquire_owned().await
+            .map_err(|_| ServerError::Internal("vision semaphore closed".into()))?;
+        let first = images.into_iter().next().unwrap();
+        let embeds = engine.encode_image(first).await
+            .map_err(|e| ServerError::Inference(format!("vision encode: {e}")))?;
+        Some(embeds)
+    } else {
+        None
+    };
 
     let inference_req = InferenceRequest {
         task: Task::Chat,
@@ -90,10 +151,36 @@ pub async fn openai_chat_completions(
         think_budget: req.think_budget,
     };
 
-    if !state.registry.contains(&inference_req.model) {
-        return Err(ServerError::BadRequest(format!("unknown model: {}", inference_req.model)));
+    handle_chat_with_vision(state, inference_req, vision_embeds).await
+}
+
+/// Parse a data: or http(s):// image URL into raw bytes.
+async fn parse_image_url(url: &str) -> Result<Vec<u8>, ServerError> {
+    if let Some(rest) = url.strip_prefix("data:") {
+        let (header, data) = rest.split_once(',')
+            .ok_or_else(|| ServerError::BadRequest("invalid data url: missing comma".into()))?;
+        if header.contains("base64") {
+            B64.decode(data).map_err(|e| ServerError::BadRequest(format!("base64 decode: {e}")))
+        } else {
+            Ok(data.as_bytes().to_vec())
+        }
+    } else if url.starts_with("http://") || url.starts_with("https://") {
+        let r = reqwest::get(url).await
+            .map_err(|e| ServerError::BadRequest(format!("fetching image: {e}")))?;
+        if !r.status().is_success() {
+            return Err(ServerError::BadRequest(
+                format!("image fetch {} -> {}", url, r.status())
+            ));
+        }
+        Ok(r.bytes().await
+            .map_err(|e| ServerError::BadRequest(e.to_string()))?
+            .to_vec())
+    } else {
+        Err(ServerError::BadRequest(format!(
+            "unsupported image_url scheme: {}",
+            &url[..url.len().min(40)]
+        )))
     }
-    handle_chat(state, inference_req).await
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +191,9 @@ async fn handle_tts(
     state: Arc<InferenceState>,
     req: InferenceRequest,
 ) -> Result<axum::response::Response, ServerError> {
+    let _permit = state.tts_semaphore.clone().acquire_owned().await
+        .map_err(|_| ServerError::Internal("tts semaphore closed".into()))?;
+
     let engine = state.registry.get_tts(&req.model)
         .ok_or_else(|| ServerError::BadRequest(format!("model `{}` is not a tts model", req.model)))?;
 
@@ -192,6 +282,9 @@ async fn handle_stt(
     state: Arc<InferenceState>,
     req: InferenceRequest,
 ) -> Result<axum::response::Response, ServerError> {
+    let _permit = state.stt_semaphore.clone().acquire_owned().await
+        .map_err(|_| ServerError::Internal("stt semaphore closed".into()))?;
+
     let engine = state.registry.get_stt(&req.model)
         .ok_or_else(|| ServerError::BadRequest(
             format!("model `{}` is not an stt model", req.model)
@@ -301,6 +394,9 @@ async fn handle_embed(
     state: Arc<InferenceState>,
     req: InferenceRequest,
 ) -> Result<axum::response::Response, ServerError> {
+    let _permit = state.embed_semaphore.clone().acquire_owned().await
+        .map_err(|_| ServerError::Internal("embed semaphore closed".into()))?;
+
     let engine = state
         .registry
         .get_embed(&req.model)
@@ -424,6 +520,9 @@ async fn handle_rerank(
     state: Arc<InferenceState>,
     req: InferenceRequest,
 ) -> Result<axum::response::Response, ServerError> {
+    let _permit = state.rerank_semaphore.clone().acquire_owned().await
+        .map_err(|_| ServerError::Internal("rerank semaphore closed".into()))?;
+
     let engine = state
         .registry
         .get_rerank(&req.model)
@@ -506,9 +605,19 @@ pub async fn custom_rerank(
 // Chat handler
 // ---------------------------------------------------------------------------
 
+/// Unified-endpoint entry point for chat (no vision; image_url via /v1/chat/completions only).
 async fn handle_chat(
     state: Arc<InferenceState>,
     req: InferenceRequest,
+) -> Result<axum::response::Response, ServerError> {
+    handle_chat_with_vision(state, req, None).await
+}
+
+/// Core chat dispatch that accepts pre-encoded vision embeddings (may be None).
+async fn handle_chat_with_vision(
+    state: Arc<InferenceState>,
+    req: InferenceRequest,
+    vision_embeds: Option<(Vec<f32>, usize)>,
 ) -> Result<axum::response::Response, ServerError> {
     let engine = state.registry.get_chat(&req.model)
         .ok_or_else(|| ServerError::BadRequest(format!("model `{}` is not a chat model", req.model)))?;
@@ -517,21 +626,20 @@ async fn handle_chat(
     let model_name = req.model.clone();
     let max_tokens = req.max_tokens.unwrap_or(1024);
 
-    let messages = req.messages.clone();
-    if messages.is_empty() {
+    if req.messages.is_empty() {
         return Err(ServerError::BadRequest("messages must not be empty for chat".into()));
     }
 
     let chat_req = ChatRequest {
         model: req.model,
-        messages,
+        messages: req.messages,
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         top_p: req.top_p,
         stream: req.stream,
         think: req.think,
         think_budget: req.think_budget,
-        vision_embeds: None,
+        vision_embeds,
     };
 
     let (tx, rx) = mpsc::channel::<ChatEvent>(64);

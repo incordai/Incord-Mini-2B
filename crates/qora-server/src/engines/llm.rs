@@ -105,6 +105,28 @@ impl ModelEngine for LlmEngine {
 
 #[async_trait]
 impl ChatEngine for LlmEngine {
+    fn supports_vision(&self) -> bool {
+        self.weights.vision.is_some()
+    }
+
+    async fn encode_image(&self, bytes: Vec<u8>) -> anyhow::Result<(Vec<f32>, usize)> {
+        if self.weights.vision.is_none() {
+            anyhow::bail!("LlmEngine `{}` has no vision weights", self.id);
+        }
+        let weights = self.weights.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<f32>, usize)> {
+            let vision = weights.vision.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("no vision encoder"))?;
+            let img = image::load_from_memory(&bytes)?;
+            let rgb = img.to_rgb8();
+            let h = rgb.height() as usize;
+            let w = rgb.width() as usize;
+            let (pixels, h2, w2) = qor4b::vision::pixels_from_rgb_bytes(rgb.as_raw(), w, h);
+            let (embeds, num_tokens) = vision.encode_image(&pixels, h2, w2);
+            Ok((embeds, num_tokens))
+        }).await?
+    }
+
     async fn chat(&self, req: ChatRequest, sse_tx: mpsc::Sender<ChatEvent>) -> anyhow::Result<()> {
         let weights = self.weights.clone();
         let tokenizer = self.tokenizer.clone();

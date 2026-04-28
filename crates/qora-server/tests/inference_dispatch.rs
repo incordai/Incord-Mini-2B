@@ -73,7 +73,7 @@ fn build_test_app(
         format!("Test engine {}", model_id),
     ));
     let registry = Registry::builder().add_chat(engine).build();
-    let inference_state = Arc::new(InferenceState { registry });
+    let inference_state = Arc::new(InferenceState::for_test(registry));
 
     let app = build_router(inference_state, auth, admin_state);
     (app, dir)
@@ -310,4 +310,42 @@ async fn metrics_endpoint_open_no_auth() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+/// Sending an image_url to a model whose tiny_weights() has vision=None must return 400.
+#[tokio::test]
+async fn vision_request_to_no_vision_model_returns_400() {
+    let (app, _dir) = build_test_app("no-vision-model");
+    let (raw_key, app) = create_test_key(app).await;
+
+    // A 1×1 transparent PNG encoded as base64
+    let body = json!({
+        "model": "no-vision-model",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe this"},
+                {"type": "image_url", "image_url": {
+                    "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                }}
+            ]
+        }],
+        "max_tokens": 2
+    });
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {raw_key}"))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // tiny_weights() has vision = None → engine.supports_vision() = false → 400 Bad Request
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

@@ -45,7 +45,14 @@ async fn main() -> anyhow::Result<()> {
     let registry = build_registry(&config)?;
     tracing::info!(model_count = registry.len(), "registry ready");
 
-    let inference_state = Arc::new(InferenceState { registry });
+    let inference_state = Arc::new(InferenceState {
+        registry,
+        vision_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),  // serial — vision encode is ~90 s
+        tts_semaphore:    Arc::new(tokio::sync::Semaphore::new(2)),  // 2 concurrent (bandwidth-heavy)
+        stt_semaphore:    Arc::new(tokio::sync::Semaphore::new(2)),
+        embed_semaphore:  Arc::new(tokio::sync::Semaphore::new(8)),  // lighter, allow more
+        rerank_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+    });
     let router = build_router(inference_state, auth, admin_state);
 
     // Serve via TLS or plain HTTP based on config
