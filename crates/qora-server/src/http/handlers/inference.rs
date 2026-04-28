@@ -18,6 +18,8 @@ use crate::api::openai::response::{
 use crate::engine::chat::{ChatEvent, ChatMessage, ChatRequest, FinishReason};
 use crate::engine::tts::TtsRequest as EngineTtsRequest;
 use crate::engine::stt::SttRequest as EngineSttRequest;
+use crate::engine::embed::EmbedRequest as EngineEmbedRequest;
+use crate::engine::rerank::RerankRequest as EngineRerankRequest;
 use crate::engine::Task;
 use crate::error::ServerError;
 use crate::http::sse::into_sse_response;
@@ -40,8 +42,8 @@ pub async fn unified_inference(
         Task::Chat => handle_chat(state, req).await,
         Task::Tts => handle_tts(state, req).await,
         Task::Stt => handle_stt(state, req).await,
-        Task::Embedding => Err(ServerError::Internal("embedding engines not yet wired (M13)".into())),
-        Task::Rerank => Err(ServerError::Internal("rerank engines not yet wired (M13)".into())),
+        Task::Embedding => handle_embed(state, req).await,
+        Task::Rerank => handle_rerank(state, req).await,
     }
 }
 
@@ -289,6 +291,215 @@ pub async fn openai_audio_transcriptions(
     };
 
     handle_stt(state, inference_req).await
+}
+
+// ---------------------------------------------------------------------------
+// Embedding handler + OpenAI /v1/embeddings alias
+// ---------------------------------------------------------------------------
+
+async fn handle_embed(
+    state: Arc<InferenceState>,
+    req: InferenceRequest,
+) -> Result<axum::response::Response, ServerError> {
+    let engine = state
+        .registry
+        .get_embed(&req.model)
+        .ok_or_else(|| ServerError::BadRequest(format!("model `{}` is not an embedding model", req.model)))?;
+
+    // `input` can be a JSON string or an array of strings (OpenAI convention).
+    let input: Vec<String> = match req.input {
+        Some(serde_json::Value::String(s)) => vec![s],
+        Some(serde_json::Value::Array(arr)) => arr
+            .into_iter()
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| ServerError::BadRequest("input array must contain only strings".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(other) => {
+            return Err(ServerError::BadRequest(format!(
+                "input must be a string or array of strings, got: {other}"
+            )));
+        }
+        None => {
+            return Err(ServerError::BadRequest(
+                "embedding request missing 'input' field".into(),
+            ));
+        }
+    };
+
+    let embed_req = EngineEmbedRequest {
+        model: req.model.clone(),
+        input,
+    };
+
+    let output = engine
+        .embed(embed_req)
+        .await
+        .map_err(|e| ServerError::Inference(format!("embedding: {e}")))?;
+
+    // OpenAI-compatible response shape.
+    let data: Vec<serde_json::Value> = output
+        .embeddings
+        .into_iter()
+        .enumerate()
+        .map(|(i, vec)| {
+            serde_json::json!({
+                "object": "embedding",
+                "embedding": vec,
+                "index": i,
+            })
+        })
+        .collect();
+
+    Ok(axum::Json(serde_json::json!({
+        "object": "list",
+        "data": data,
+        "model": req.model,
+        "usage": {
+            "prompt_tokens": 0,
+            "total_tokens": 0,
+        }
+    }))
+    .into_response())
+}
+
+/// OpenAI-compatible request body for `POST /v1/embeddings`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct OpenAiEmbedRequest {
+    pub model: String,
+    /// String or array of strings to embed.
+    pub input: serde_json::Value,
+    /// "float" (default) or "base64" — only "float" supported in v1.
+    #[serde(default)]
+    pub encoding_format: Option<String>,
+    /// Ignored — model defines its own dimensionality (2048 for Qwen3-Embedding-2B).
+    #[serde(default)]
+    pub dimensions: Option<usize>,
+    /// Ignored — for billing pass-through only.
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+/// OpenAI alias: POST /v1/embeddings
+pub async fn openai_embeddings(
+    State(state): State<Arc<InferenceState>>,
+    Json(req): Json<OpenAiEmbedRequest>,
+) -> Result<axum::response::Response, ServerError> {
+    if !state.registry.contains(&req.model) {
+        return Err(ServerError::BadRequest(format!(
+            "unknown model: {}",
+            req.model
+        )));
+    }
+    let inference_req = InferenceRequest {
+        task: Task::Embedding,
+        model: req.model,
+        messages: vec![],
+        input: Some(req.input),
+        voice: None,
+        format: None,
+        language: None,
+        audio: None,
+        audio_format: None,
+        query: None,
+        documents: vec![],
+        top_k: None,
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stream: false,
+        think: None,
+        think_budget: None,
+    };
+    handle_embed(state, inference_req).await
+}
+
+// ---------------------------------------------------------------------------
+// Rerank handler + custom /v1/rerank endpoint
+// ---------------------------------------------------------------------------
+
+async fn handle_rerank(
+    state: Arc<InferenceState>,
+    req: InferenceRequest,
+) -> Result<axum::response::Response, ServerError> {
+    let engine = state
+        .registry
+        .get_rerank(&req.model)
+        .ok_or_else(|| ServerError::BadRequest(format!("model `{}` is not a rerank model", req.model)))?;
+
+    let query = req.query.ok_or_else(|| {
+        ServerError::BadRequest("rerank request missing 'query' field".into())
+    })?;
+
+    if req.documents.is_empty() {
+        return Err(ServerError::BadRequest(
+            "rerank request must have a non-empty 'documents' array".into(),
+        ));
+    }
+
+    let rerank_req = EngineRerankRequest {
+        model: req.model.clone(),
+        query,
+        documents: req.documents,
+        top_k: req.top_k,
+    };
+
+    let output = engine
+        .rerank(rerank_req)
+        .await
+        .map_err(|e| ServerError::Inference(format!("rerank: {e}")))?;
+
+    Ok(axum::Json(serde_json::json!({
+        "results": output.results,
+        "model": req.model,
+    }))
+    .into_response())
+}
+
+/// Custom request body for `POST /v1/rerank`.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CustomRerankRequest {
+    pub model: String,
+    pub query: String,
+    pub documents: Vec<String>,
+    #[serde(default)]
+    pub top_k: Option<usize>,
+}
+
+/// Custom endpoint: POST /v1/rerank
+pub async fn custom_rerank(
+    State(state): State<Arc<InferenceState>>,
+    Json(req): Json<CustomRerankRequest>,
+) -> Result<axum::response::Response, ServerError> {
+    if !state.registry.contains(&req.model) {
+        return Err(ServerError::BadRequest(format!(
+            "unknown model: {}",
+            req.model
+        )));
+    }
+    let inference_req = InferenceRequest {
+        task: Task::Rerank,
+        model: req.model,
+        messages: vec![],
+        input: None,
+        voice: None,
+        format: None,
+        language: None,
+        audio: None,
+        audio_format: None,
+        query: Some(req.query),
+        documents: req.documents,
+        top_k: req.top_k,
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stream: false,
+        think: None,
+        think_budget: None,
+    };
+    handle_rerank(state, inference_req).await
 }
 
 // ---------------------------------------------------------------------------

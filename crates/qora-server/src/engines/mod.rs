@@ -1,5 +1,6 @@
 //! Concrete engine implementations.
 
 pub mod llm;
-pub mod tts;
+pub mod rag;
 pub mod stt;
+pub mod tts;

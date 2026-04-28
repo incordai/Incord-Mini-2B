@@ -10,6 +10,7 @@ path = "src/lib.rs"
 qor4b = { path = "../qora-llm" }
 qora-tts = { path = "../../../QORA-TTS" }
 qora-stt-small = { path = "../../../QORA-STT-Small" }
+qor-rag = { path = "C:/Projects/AI/qor-main/qor-rs/crates/qor-rag" }
 base64 = "0.22"
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -72,4 +73,9 @@ required-features = ["mock-weights"]
 [[test]]
 name = "stt_smoke"
 path = "tests/stt_smoke.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "rag_smoke"
+path = "tests/rag_smoke.rs"
 required-features = ["mock-weights"]

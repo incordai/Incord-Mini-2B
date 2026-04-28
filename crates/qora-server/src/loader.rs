@@ -1,11 +1,14 @@
 //! Build a Registry from ServerConfig at startup.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use anyhow::Context;
 use tracing::info;
 
 use crate::config::{ModelEntry, ModelKind, ServerConfig};
 use crate::engines::llm::LlmEngine;
+use crate::engines::rag::{QorEmbeddingEngine, QorRagBackend, QorRerankEngine};
 use crate::engines::tts::QoraTtsEngine;
 use crate::engines::stt::QoraSttEngine;
 use crate::registry::{Registry, RegistryBuilder};
@@ -13,21 +16,47 @@ use crate::registry::{Registry, RegistryBuilder};
 /// Load every model in the config and build the registry.
 /// In `eager` mode (default), each model's weights are read from disk now.
 /// In `lazy` mode, weights load on first request (not yet wired in this task).
+///
+/// # Backend sharing for RAG engines
+///
+/// Embedding and Rerank entries that resolve to the same model directory share
+/// a single `QorRagBackend` (i.e. one copy of the loaded weights in memory).
+/// We pre-scan all entries whose kind is Embedding or Rerank, deduplicate by
+/// directory path, and load the backend once per unique path.
+///
+/// TODO(M14): If a directory contains only one of embed.qor-rag or rerank.qor-rag,
+/// `QorRag::load` will fail. Ensure config entries point to a directory containing both.
 pub fn build_registry(config: &ServerConfig) -> anyhow::Result<Registry> {
+    // Pre-load shared qor-rag backends keyed by resolved model directory.
+    // This avoids loading the same ~4 GB weights twice when both an Embedding
+    // and a Rerank entry point to the same directory.
+    let mut shared_rag_backends: HashMap<PathBuf, Arc<QorRagBackend>> = HashMap::new();
+
+    for entry in &config.models {
+        if matches!(entry.kind, ModelKind::Embedding | ModelKind::Rerank) {
+            let dir = entry
+                .path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| entry.path.clone());
+
+            if !shared_rag_backends.contains_key(&dir) {
+                info!(model_id = %entry.id, dir = ?dir, "loading qor-rag backend (embedding + rerank weights)...");
+                let backend = QorRagBackend::load(&dir)
+                    .map_err(|e| anyhow::anyhow!("qor-rag backend for model `{}`: {e}", entry.id))?;
+                shared_rag_backends.insert(dir, Arc::new(backend));
+            }
+        }
+    }
+
     let mut builder = Registry::builder();
     for entry in &config.models {
         builder = match entry.kind {
             ModelKind::Chat => add_chat(builder, entry)?,
             ModelKind::Tts => add_tts(builder, entry)?,
             ModelKind::Stt => add_stt(builder, entry)?,
-            ModelKind::Embedding => {
-                tracing::warn!(model_id = %entry.id, "Embedding engine wrapper not yet implemented; skipping");
-                builder
-            }
-            ModelKind::Rerank => {
-                tracing::warn!(model_id = %entry.id, "Rerank engine wrapper not yet implemented; skipping");
-                builder
-            }
+            ModelKind::Embedding => add_embed(builder, entry, &shared_rag_backends)?,
+            ModelKind::Rerank => add_rerank(builder, entry, &shared_rag_backends)?,
         };
     }
 
@@ -68,6 +97,70 @@ fn add_stt(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<Regis
     let engine = QoraSttEngine::load(entry.id.clone(), model_dir, description)?;
 
     Ok(builder.add_stt(Arc::new(engine)))
+}
+
+fn add_embed(
+    builder: RegistryBuilder,
+    entry: &ModelEntry,
+    backends: &HashMap<PathBuf, Arc<QorRagBackend>>,
+) -> anyhow::Result<RegistryBuilder> {
+    let dir = entry
+        .path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| entry.path.clone());
+
+    let backend = backends
+        .get(&dir)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("internal: no qor-rag backend found for dir {}", dir.display()))?;
+
+    let description = entry
+        .description
+        .clone()
+        .unwrap_or_else(|| format!("Embedding model: {}", entry.id));
+
+    info!(model_id = %entry.id, "registering embedding engine");
+
+    let engine = Arc::new(QorEmbeddingEngine {
+        id: entry.id.clone(),
+        description,
+        backend,
+    });
+
+    Ok(builder.add_embed(engine))
+}
+
+fn add_rerank(
+    builder: RegistryBuilder,
+    entry: &ModelEntry,
+    backends: &HashMap<PathBuf, Arc<QorRagBackend>>,
+) -> anyhow::Result<RegistryBuilder> {
+    let dir = entry
+        .path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| entry.path.clone());
+
+    let backend = backends
+        .get(&dir)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("internal: no qor-rag backend found for dir {}", dir.display()))?;
+
+    let description = entry
+        .description
+        .clone()
+        .unwrap_or_else(|| format!("Rerank model: {}", entry.id));
+
+    info!(model_id = %entry.id, "registering rerank engine");
+
+    let engine = Arc::new(QorRerankEngine {
+        id: entry.id.clone(),
+        description,
+        backend,
+    });
+
+    Ok(builder.add_rerank(engine))
 }
 
 fn add_chat(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<RegistryBuilder> {
