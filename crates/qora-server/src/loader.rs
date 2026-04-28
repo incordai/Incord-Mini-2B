@@ -7,6 +7,7 @@ use tracing::info;
 use crate::config::{ModelEntry, ModelKind, ServerConfig};
 use crate::engines::llm::LlmEngine;
 use crate::engines::tts::QoraTtsEngine;
+use crate::engines::stt::QoraSttEngine;
 use crate::registry::{Registry, RegistryBuilder};
 
 /// Load every model in the config and build the registry.
@@ -18,10 +19,7 @@ pub fn build_registry(config: &ServerConfig) -> anyhow::Result<Registry> {
         builder = match entry.kind {
             ModelKind::Chat => add_chat(builder, entry)?,
             ModelKind::Tts => add_tts(builder, entry)?,
-            ModelKind::Stt => {
-                tracing::warn!(model_id = %entry.id, "STT engine wrapper not yet implemented; skipping");
-                builder
-            }
+            ModelKind::Stt => add_stt(builder, entry)?,
             ModelKind::Embedding => {
                 tracing::warn!(model_id = %entry.id, "Embedding engine wrapper not yet implemented; skipping");
                 builder
@@ -53,6 +51,23 @@ fn add_tts(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<Regis
     let engine = QoraTtsEngine::load(entry.id.clone(), model_dir, description)?;
 
     Ok(builder.add_tts(Arc::new(engine)))
+}
+
+fn add_stt(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<RegistryBuilder> {
+    // ModelEntry `path` points to the config.json or model file inside the model dir.
+    // The model dir (containing config.json, model weights, tokenizer.json) is its parent.
+    let model_dir = entry.path.parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| entry.path.clone());
+
+    info!(model_id = %entry.id, dir = ?model_dir, "loading STT model...");
+
+    let description = entry.description.clone()
+        .unwrap_or_else(|| format!("STT model: {}", entry.id));
+
+    let engine = QoraSttEngine::load(entry.id.clone(), model_dir, description)?;
+
+    Ok(builder.add_stt(Arc::new(engine)))
 }
 
 fn add_chat(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<RegistryBuilder> {

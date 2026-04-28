@@ -79,12 +79,12 @@ impl QoraTtsEngine {
     /// Load the TTS model from `model_dir`.
     ///
     /// Expected layout (mirrors the QORA-TTS project):
-    /// ```
+    /// ```text
     /// model_dir/
-    ///   model.qora-tts      ← binary weights (talker + predictor + decoder + speaker_encoder)
-    ///   tokenizer.json      ← HuggingFace tokenizer
-    ///   config.json         ← language id maps (spk_id is empty for this model)
-    ///   voices/             ← reference WAV files: luna.wav, ryan.wav, …
+    ///   model.qora-tts      -- binary weights (talker + predictor + decoder + speaker_encoder)
+    ///   tokenizer.json      -- HuggingFace tokenizer
+    ///   config.json         -- language id maps (spk_id is empty for this model)
+    ///   voices/             -- reference WAV files: luna.wav, ryan.wav, etc.
     /// ```
     pub fn load(
         id: impl Into<String>,

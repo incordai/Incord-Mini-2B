@@ -1,8 +1,9 @@
 //! Unified /v1/inference + OpenAI-compatible aliases.
 
 use std::sync::Arc;
-use axum::{extract::State, Json};
+use axum::{extract::{Multipart, State}, Json};
 use axum::response::IntoResponse;
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use tokio::sync::mpsc;
@@ -16,6 +17,7 @@ use crate::api::openai::response::{
 };
 use crate::engine::chat::{ChatEvent, ChatMessage, ChatRequest, FinishReason};
 use crate::engine::tts::TtsRequest as EngineTtsRequest;
+use crate::engine::stt::SttRequest as EngineSttRequest;
 use crate::engine::Task;
 use crate::error::ServerError;
 use crate::http::sse::into_sse_response;
@@ -37,7 +39,7 @@ pub async fn unified_inference(
     match req.task {
         Task::Chat => handle_chat(state, req).await,
         Task::Tts => handle_tts(state, req).await,
-        Task::Stt => Err(ServerError::Internal("stt engines not yet wired (M12)".into())),
+        Task::Stt => handle_stt(state, req).await,
         Task::Embedding => Err(ServerError::Internal("embedding engines not yet wired (M13)".into())),
         Task::Rerank => Err(ServerError::Internal("rerank engines not yet wired (M13)".into())),
     }
@@ -178,6 +180,115 @@ pub async fn openai_audio_speech(
         ));
     }
     handle_tts(state, inference_req).await
+}
+
+// ---------------------------------------------------------------------------
+// STT handler + OpenAI /v1/audio/transcriptions alias
+// ---------------------------------------------------------------------------
+
+async fn handle_stt(
+    state: Arc<InferenceState>,
+    req: InferenceRequest,
+) -> Result<axum::response::Response, ServerError> {
+    let engine = state.registry.get_stt(&req.model)
+        .ok_or_else(|| ServerError::BadRequest(
+            format!("model `{}` is not an stt model", req.model)
+        ))?;
+
+    // Decode base64 audio bytes
+    let audio_b64 = req.audio.ok_or_else(|| {
+        ServerError::BadRequest("stt request missing 'audio' field (base64-encoded WAV)".into())
+    })?;
+    let audio = B64.decode(&audio_b64)
+        .map_err(|e| ServerError::BadRequest(format!("invalid base64 audio: {e}")))?;
+
+    let stt_req = EngineSttRequest {
+        model: req.model.clone(),
+        audio,
+        format: req.audio_format,
+        language: req.language,
+    };
+
+    let output = engine.transcribe(stt_req).await
+        .map_err(|e| ServerError::Inference(format!("stt transcription: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "text": output.text,
+        "language": output.language_detected,
+    }))
+    .into_response())
+}
+
+/// OpenAI-compatible alias: POST /v1/audio/transcriptions (multipart upload)
+pub async fn openai_audio_transcriptions(
+    State(state): State<Arc<InferenceState>>,
+    mut multipart: Multipart,
+) -> Result<axum::response::Response, ServerError> {
+    let mut model: Option<String> = None;
+    let mut audio_bytes: Option<Vec<u8>> = None;
+    let mut language: Option<String> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ServerError::BadRequest(format!("multipart error: {e}")))?
+    {
+        let name: String = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "model" => {
+                model = Some(
+                    field.text().await
+                        .map_err(|e| ServerError::BadRequest(format!("model field: {e}")))?
+                );
+            }
+            "language" => {
+                language = Some(
+                    field.text().await
+                        .map_err(|e| ServerError::BadRequest(format!("language field: {e}")))?
+                );
+            }
+            "file" => {
+                audio_bytes = Some(
+                    field.bytes().await
+                        .map_err(|e| ServerError::BadRequest(format!("file field: {e}")))?
+                        .to_vec()
+                );
+            }
+            _ => {} // ignore unknown fields per OpenAI spec
+        }
+    }
+
+    let model = model
+        .ok_or_else(|| ServerError::BadRequest("missing 'model' field".into()))?;
+    let audio = audio_bytes
+        .ok_or_else(|| ServerError::BadRequest("missing 'file' field".into()))?;
+
+    if !state.registry.contains(&model) {
+        return Err(ServerError::BadRequest(format!("unknown model: {}", model)));
+    }
+
+    let inference_req = InferenceRequest {
+        task: Task::Stt,
+        model,
+        messages: vec![],
+        input: None,
+        voice: None,
+        format: None,
+        language,
+        audio: Some(B64.encode(&audio)),
+        audio_format: None,
+        query: None,
+        documents: vec![],
+        top_k: None,
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stream: false,
+        think: None,
+        think_budget: None,
+    };
+
+    handle_stt(state, inference_req).await
 }
 
 // ---------------------------------------------------------------------------
