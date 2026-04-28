@@ -15,6 +15,9 @@ pub struct ServerConfig {
     pub models: Vec<ModelEntry>,
     #[serde(default)]
     pub loading: LoadingConfig,
+    /// Chat history persistence settings.
+    #[serde(default)]
+    pub history: HistoryConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,6 +100,26 @@ impl Default for LoadingConfig {
 
 fn default_loading_mode() -> String {
     "eager".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct HistoryConfig {
+    /// Model id of the embedding engine to use for chat history embedding.
+    /// If None, history is stored without embeddings.
+    pub embed_model: Option<String>,
+    /// How many historical messages to inject as context when use_history: true. Default 5.
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+    /// Maximum total characters of historical context to inject. Default 4000 chars.
+    #[serde(default = "default_max_chars")]
+    pub max_context_chars: usize,
+}
+
+fn default_top_k() -> usize {
+    5
+}
+fn default_max_chars() -> usize {
+    4000
 }
 
 impl ServerConfig {

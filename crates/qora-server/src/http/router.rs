@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::auth::admin::{AdminState, admin_guard};
 use crate::auth::middleware::{AuthState, auth_middleware};
 use crate::http::handlers::inference::InferenceState;
-use crate::http::handlers::{admin, health, inference, metrics, models};
+use crate::http::handlers::{admin, conversations, health, inference, metrics, models};
 use crate::http::middleware::request_id_middleware;
 
 pub fn build_router(
@@ -42,6 +42,31 @@ pub fn build_router(
         .with_state(inference_state.clone())
         .route_layer(axum_mw::from_fn_with_state(auth.clone(), auth_middleware));
 
+    // Chat history routes — protected by user-key auth_middleware
+    let history_routes = Router::new()
+        .route(
+            "/v1/conversations",
+            post(conversations::create_conversation_handler),
+        )
+        .route(
+            "/v1/conversations",
+            get(conversations::list_conversations_handler),
+        )
+        .route(
+            "/v1/conversations/{id}",
+            get(conversations::get_conversation_handler),
+        )
+        .route(
+            "/v1/conversations/{id}/export",
+            get(conversations::export_conversation_handler),
+        )
+        .route(
+            "/v1/conversations/{id}",
+            delete(conversations::delete_conversation_handler),
+        )
+        .with_state(inference_state.clone())
+        .route_layer(axum_mw::from_fn_with_state(auth.clone(), auth_middleware));
+
     // Open routes (no auth) — health, models, metrics
     let open_routes = Router::new()
         .route("/health", get(health::health))
@@ -53,5 +78,6 @@ pub fn build_router(
         .merge(open_routes)
         .merge(admin_routes)
         .merge(inference_routes)
+        .merge(history_routes)
         .layer(axum_mw::from_fn(request_id_middleware))
 }

@@ -85,3 +85,8 @@ required-features = ["mock-weights"]
 name = "rag_smoke"
 path = "tests/rag_smoke.rs"
 required-features = ["mock-weights"]
+
+[[test]]
+name = "conversations"
+path = "tests/conversations.rs"
+required-features = ["mock-weights"]

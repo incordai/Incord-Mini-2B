@@ -1,20 +1,34 @@
-//! redb-backed persistence: API keys + usage records.
+//! redb-backed persistence: API keys + usage records + chat history.
 //!
 //! Tables:
-//!   keys_by_id: key_id (UUID str)        -> bincode(StoredKey)
-//!   id_by_hmac: HMAC-SHA256(secret, raw) -> key_id
-//!   usage:      auto-inc u64             -> bincode(StoredUsage)
+//!   keys_by_id:         key_id (UUID str)        -> bincode(StoredKey)
+//!   id_by_hmac:         HMAC-SHA256(secret, raw) -> key_id
+//!   usage:              auto-inc u64             -> bincode(StoredUsage)
+//!   conversations:      conv_id (UUID str)       -> bincode(Conversation)
+//!   messages:           (conv_id || u64 big-endian idx) -> bincode(StoredMessage)
+//!   user_conversations: user_id                  -> multimap(conv_id)
 //!
 //! Server secret comes from env at startup; never persisted.
 
 use anyhow::Context;
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, MultimapTableDefinition, ReadableTable, TableDefinition};
 use std::path::Path;
 use std::sync::Arc;
 
 pub const KEYS_BY_ID: TableDefinition<&str, &[u8]> = TableDefinition::new("keys_by_id");
 pub const ID_BY_HMAC: TableDefinition<&[u8], &str> = TableDefinition::new("id_by_hmac");
 pub const USAGE: TableDefinition<u64, &[u8]> = TableDefinition::new("usage");
+
+/// conversations: conv_id (UUID str) → bincode(Conversation)
+pub const CONVERSATIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("conversations");
+
+/// messages: (conv_id + msg_idx_8bytes) → bincode(StoredMessage)
+/// Composite key: conv_id bytes (36 bytes for UUID) + 8 bytes big-endian u64.
+pub const MESSAGES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("messages");
+
+/// user_conversations: user_id → conv_ids (multimap)
+pub const USER_CONVERSATIONS: MultimapTableDefinition<&str, &str> =
+    MultimapTableDefinition::new("user_conversations");
 
 /// Opens (or creates) the database file. Initializes the table set on first run.
 pub fn open(path: &Path) -> anyhow::Result<Arc<Database>> {
@@ -26,6 +40,9 @@ pub fn open(path: &Path) -> anyhow::Result<Arc<Database>> {
         let _ = write.open_table(KEYS_BY_ID)?;
         let _ = write.open_table(ID_BY_HMAC)?;
         let _ = write.open_table(USAGE)?;
+        let _ = write.open_table(CONVERSATIONS)?;
+        let _ = write.open_table(MESSAGES)?;
+        let _ = write.open_multimap_table(USER_CONVERSATIONS)?;
     }
     write.commit()?;
     Ok(Arc::new(db))
