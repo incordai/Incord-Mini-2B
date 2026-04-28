@@ -1,13 +1,13 @@
 //! Engine trait hierarchy for multi-model serving.
 
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 pub mod chat;
-pub mod tts;     // stub for now
-pub mod stt;     // stub for now
-pub mod embed;   // stub for now
-pub mod rerank;  // stub for now
+pub mod embed; // stub for now
+pub mod rerank;
+pub mod stt; // stub for now
+pub mod tts; // stub for now // stub for now
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

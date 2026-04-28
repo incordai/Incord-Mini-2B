@@ -9,15 +9,15 @@ use crate::engine::ModelEngine;
 pub struct TtsRequest {
     pub model: String,
     pub input: String,
-    pub voice: Option<String>,            // built-in name OR base64 reference WAV
-    pub format: Option<String>,           // "wav" (default), "mp3"
+    pub voice: Option<String>,  // built-in name OR base64 reference WAV
+    pub format: Option<String>, // "wav" (default), "mp3"
     pub language: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TtsOutput {
-    pub audio: Vec<u8>,                   // encoded audio bytes
-    pub format: String,                   // "wav", "mp3"
+    pub audio: Vec<u8>, // encoded audio bytes
+    pub format: String, // "wav", "mp3"
     pub sample_rate: u32,
 }
 

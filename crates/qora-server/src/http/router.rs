@@ -1,10 +1,13 @@
+use axum::{
+    Router, middleware as axum_mw,
+    routing::{delete, get, post},
+};
 use std::sync::Arc;
-use axum::{Router, middleware as axum_mw, routing::{delete, get, post}};
 
-use crate::auth::admin::{admin_guard, AdminState};
-use crate::auth::middleware::{auth_middleware, AuthState};
-use crate::http::handlers::{admin, health, inference, metrics, models};
+use crate::auth::admin::{AdminState, admin_guard};
+use crate::auth::middleware::{AuthState, auth_middleware};
 use crate::http::handlers::inference::InferenceState;
+use crate::http::handlers::{admin, health, inference, metrics, models};
 use crate::http::middleware::request_id_middleware;
 
 pub fn build_router(
@@ -17,14 +20,23 @@ pub fn build_router(
         .route("/v1/admin/keys", post(admin::create_key_handler))
         .route("/v1/admin/keys/{id}", delete(admin::revoke_key_handler))
         .with_state(auth.clone())
-        .layer(axum_mw::from_fn_with_state(admin_state.clone(), admin_guard));
+        .layer(axum_mw::from_fn_with_state(
+            admin_state.clone(),
+            admin_guard,
+        ));
 
     // Inference routes — protected by user-key auth_middleware
     let inference_routes = Router::new()
         .route("/v1/inference", post(inference::unified_inference))
-        .route("/v1/chat/completions", post(inference::openai_chat_completions))
+        .route(
+            "/v1/chat/completions",
+            post(inference::openai_chat_completions),
+        )
         .route("/v1/audio/speech", post(inference::openai_audio_speech))
-        .route("/v1/audio/transcriptions", post(inference::openai_audio_transcriptions))
+        .route(
+            "/v1/audio/transcriptions",
+            post(inference::openai_audio_transcriptions),
+        )
         .route("/v1/embeddings", post(inference::openai_embeddings))
         .route("/v1/rerank", post(inference::custom_rerank))
         .with_state(inference_state.clone())

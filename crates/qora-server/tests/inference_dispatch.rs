@@ -7,12 +7,12 @@
 
 #![cfg(feature = "mock-weights")]
 
-use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::json;
-use tower::ServiceExt;
+use std::sync::Arc;
 use tempfile::TempDir;
+use tower::ServiceExt;
 
 use qor4b::gemv::mock::tiny_weights;
 use qor4b::tokenizer::QoraTokenizer;
@@ -33,8 +33,14 @@ fn build_test_tokenizer() -> Arc<QoraTokenizer> {
     // CARGO_MANIFEST_DIR is crates/qora-server at compile time.
     let candidates = [
         concat!(env!("CARGO_MANIFEST_DIR"), "/../../model/tokenizer.json"),
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../qora-llm/model/tokenizer.json"),
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../qora-llm/tests/fixtures/tokenizer.json"),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../qora-llm/model/tokenizer.json"
+        ),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../qora-llm/tests/fixtures/tokenizer.json"
+        ),
     ];
     for path in candidates {
         let p = std::path::Path::new(path);
@@ -48,9 +54,7 @@ fn build_test_tokenizer() -> Arc<QoraTokenizer> {
 }
 
 /// Build the full test app with auth wired (returns TempDir to keep DB alive).
-fn build_test_app(
-    model_id: &str,
-) -> (axum::Router, TempDir) {
+fn build_test_app(model_id: &str) -> (axum::Router, TempDir) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.redb");
     let db = db::open(&db_path).unwrap();
@@ -138,7 +142,9 @@ async fn unified_inference_dispatches_to_registered_chat_model() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(body["object"], "chat.completion");
     assert!(body["choices"][0]["message"]["content"].is_string());
@@ -170,7 +176,9 @@ async fn openai_alias_dispatches_through_same_engine() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(body["object"], "chat.completion");
 }
@@ -218,7 +226,9 @@ async fn list_models_returns_registry_contents() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(body["object"], "list");
     assert_eq!(body["data"][0]["id"], "model-a");

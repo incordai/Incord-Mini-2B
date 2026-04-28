@@ -1,26 +1,29 @@
 //! Unified /v1/inference + OpenAI-compatible aliases.
 
-use std::sync::Arc;
-use axum::{extract::{Multipart, State}, Json};
 use axum::response::IntoResponse;
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use axum::{
+    Json,
+    extract::{Multipart, State},
+};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use chrono::Utc;
 use futures::stream::{self, StreamExt};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::api::inference_request::InferenceRequest;
-use crate::api::openai::request::{ChatCompletionRequest, MessageContent, ContentPart};
+use crate::api::openai::request::{ChatCompletionRequest, ContentPart, MessageContent};
 use crate::api::openai::response::{
-    ChatCompletionChunk, ChatCompletionResponse, Choice, ChunkChoice, ChunkDelta,
-    ResponseMessage, Usage,
+    ChatCompletionChunk, ChatCompletionResponse, Choice, ChunkChoice, ChunkDelta, ResponseMessage,
+    Usage,
 };
+use crate::engine::Task;
 use crate::engine::chat::{ChatEvent, ChatMessage, ChatRequest, FinishReason};
-use crate::engine::tts::TtsRequest as EngineTtsRequest;
-use crate::engine::stt::SttRequest as EngineSttRequest;
 use crate::engine::embed::EmbedRequest as EngineEmbedRequest;
 use crate::engine::rerank::RerankRequest as EngineRerankRequest;
-use crate::engine::Task;
+use crate::engine::stt::SttRequest as EngineSttRequest;
+use crate::engine::tts::TtsRequest as EngineTtsRequest;
 use crate::error::ServerError;
 use crate::http::sse::into_sse_response;
 use crate::registry::Registry;
@@ -61,7 +64,10 @@ pub async fn unified_inference(
     Json(req): Json<InferenceRequest>,
 ) -> Result<axum::response::Response, ServerError> {
     if !state.registry.contains(&req.model) {
-        return Err(ServerError::BadRequest(format!("unknown model: {}", req.model)));
+        return Err(ServerError::BadRequest(format!(
+            "unknown model: {}",
+            req.model
+        )));
     }
     match req.task {
         Task::Chat => handle_chat(state, req).await,
@@ -79,10 +85,14 @@ pub async fn openai_chat_completions(
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, ServerError> {
     if !state.registry.contains(&req.model) {
-        return Err(ServerError::BadRequest(format!("unknown model: {}", req.model)));
+        return Err(ServerError::BadRequest(format!(
+            "unknown model: {}",
+            req.model
+        )));
     }
-    let engine = state.registry.get_chat(&req.model)
-        .ok_or_else(|| ServerError::BadRequest(format!("model `{}` is not a chat model", req.model)))?;
+    let engine = state.registry.get_chat(&req.model).ok_or_else(|| {
+        ServerError::BadRequest(format!("model `{}` is not a chat model", req.model))
+    })?;
 
     // Parse messages; extract image bytes from any image_url content parts.
     let mut images: Vec<Vec<u8>> = Vec::new();
@@ -108,7 +118,10 @@ pub async fn openai_chat_completions(
                 }
             }
         }
-        messages.push(ChatMessage { role: m.role, content: text });
+        messages.push(ChatMessage {
+            role: m.role,
+            content: text,
+        });
     }
 
     // If the request contained images, encode the first one via the vision encoder.
@@ -116,14 +129,21 @@ pub async fn openai_chat_completions(
     let vision_embeds = if !images.is_empty() {
         if !engine.supports_vision() {
             return Err(ServerError::BadRequest(format!(
-                "model `{}` does not support vision input", req.model
+                "model `{}` does not support vision input",
+                req.model
             )));
         }
         // Acquire the vision semaphore before encoding to avoid OOM.
-        let _permit = state.vision_semaphore.clone().acquire_owned().await
+        let _permit = state
+            .vision_semaphore
+            .clone()
+            .acquire_owned()
+            .await
             .map_err(|_| ServerError::Internal("vision semaphore closed".into()))?;
         let first = images.into_iter().next().unwrap();
-        let embeds = engine.encode_image(first).await
+        let embeds = engine
+            .encode_image(first)
+            .await
             .map_err(|e| ServerError::Inference(format!("vision encode: {e}")))?;
         Some(embeds)
     } else {
@@ -157,22 +177,28 @@ pub async fn openai_chat_completions(
 /// Parse a data: or http(s):// image URL into raw bytes.
 async fn parse_image_url(url: &str) -> Result<Vec<u8>, ServerError> {
     if let Some(rest) = url.strip_prefix("data:") {
-        let (header, data) = rest.split_once(',')
+        let (header, data) = rest
+            .split_once(',')
             .ok_or_else(|| ServerError::BadRequest("invalid data url: missing comma".into()))?;
         if header.contains("base64") {
-            B64.decode(data).map_err(|e| ServerError::BadRequest(format!("base64 decode: {e}")))
+            B64.decode(data)
+                .map_err(|e| ServerError::BadRequest(format!("base64 decode: {e}")))
         } else {
             Ok(data.as_bytes().to_vec())
         }
     } else if url.starts_with("http://") || url.starts_with("https://") {
-        let r = reqwest::get(url).await
+        let r = reqwest::get(url)
+            .await
             .map_err(|e| ServerError::BadRequest(format!("fetching image: {e}")))?;
         if !r.status().is_success() {
-            return Err(ServerError::BadRequest(
-                format!("image fetch {} -> {}", url, r.status())
-            ));
+            return Err(ServerError::BadRequest(format!(
+                "image fetch {} -> {}",
+                url,
+                r.status()
+            )));
         }
-        Ok(r.bytes().await
+        Ok(r.bytes()
+            .await
             .map_err(|e| ServerError::BadRequest(e.to_string()))?
             .to_vec())
     } else {
@@ -191,19 +217,30 @@ async fn handle_tts(
     state: Arc<InferenceState>,
     req: InferenceRequest,
 ) -> Result<axum::response::Response, ServerError> {
-    let _permit = state.tts_semaphore.clone().acquire_owned().await
+    let _permit = state
+        .tts_semaphore
+        .clone()
+        .acquire_owned()
+        .await
         .map_err(|_| ServerError::Internal("tts semaphore closed".into()))?;
 
-    let engine = state.registry.get_tts(&req.model)
-        .ok_or_else(|| ServerError::BadRequest(format!("model `{}` is not a tts model", req.model)))?;
+    let engine = state.registry.get_tts(&req.model).ok_or_else(|| {
+        ServerError::BadRequest(format!("model `{}` is not a tts model", req.model))
+    })?;
 
     // Extract input text from the generic `input` field.
     let input_text = match req.input {
         Some(serde_json::Value::String(s)) => s,
-        Some(other) => return Err(ServerError::BadRequest(
-            format!("tts input must be a string, got: {other}")
-        )),
-        None => return Err(ServerError::BadRequest("tts request missing 'input' field".into())),
+        Some(other) => {
+            return Err(ServerError::BadRequest(format!(
+                "tts input must be a string, got: {other}"
+            )));
+        }
+        None => {
+            return Err(ServerError::BadRequest(
+                "tts request missing 'input' field".into(),
+            ));
+        }
     };
 
     let tts_req = EngineTtsRequest {
@@ -214,19 +251,22 @@ async fn handle_tts(
         language: req.language,
     };
 
-    let output = engine.synthesize(tts_req).await
+    let output = engine
+        .synthesize(tts_req)
+        .await
         .map_err(|e| ServerError::Inference(format!("tts synthesis: {e}")))?;
 
     let content_type = match output.format.as_str() {
-        "wav"  => "audio/wav",
-        "mp3"  => "audio/mpeg",
-        _      => "application/octet-stream",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        _ => "application/octet-stream",
     };
 
     Ok((
         [(axum::http::header::CONTENT_TYPE, content_type)],
         output.audio,
-    ).into_response())
+    )
+        .into_response())
 }
 
 /// OpenAI-compatible request body for `/v1/audio/speech`.
@@ -267,9 +307,10 @@ pub async fn openai_audio_speech(
     };
 
     if !state.registry.contains(&inference_req.model) {
-        return Err(ServerError::BadRequest(
-            format!("unknown model: {}", inference_req.model)
-        ));
+        return Err(ServerError::BadRequest(format!(
+            "unknown model: {}",
+            inference_req.model
+        )));
     }
     handle_tts(state, inference_req).await
 }
@@ -282,19 +323,23 @@ async fn handle_stt(
     state: Arc<InferenceState>,
     req: InferenceRequest,
 ) -> Result<axum::response::Response, ServerError> {
-    let _permit = state.stt_semaphore.clone().acquire_owned().await
+    let _permit = state
+        .stt_semaphore
+        .clone()
+        .acquire_owned()
+        .await
         .map_err(|_| ServerError::Internal("stt semaphore closed".into()))?;
 
-    let engine = state.registry.get_stt(&req.model)
-        .ok_or_else(|| ServerError::BadRequest(
-            format!("model `{}` is not an stt model", req.model)
-        ))?;
+    let engine = state.registry.get_stt(&req.model).ok_or_else(|| {
+        ServerError::BadRequest(format!("model `{}` is not an stt model", req.model))
+    })?;
 
     // Decode base64 audio bytes
     let audio_b64 = req.audio.ok_or_else(|| {
         ServerError::BadRequest("stt request missing 'audio' field (base64-encoded WAV)".into())
     })?;
-    let audio = B64.decode(&audio_b64)
+    let audio = B64
+        .decode(&audio_b64)
         .map_err(|e| ServerError::BadRequest(format!("invalid base64 audio: {e}")))?;
 
     let stt_req = EngineSttRequest {
@@ -304,7 +349,9 @@ async fn handle_stt(
         language: req.language,
     };
 
-    let output = engine.transcribe(stt_req).await
+    let output = engine
+        .transcribe(stt_req)
+        .await
         .map_err(|e| ServerError::Inference(format!("stt transcription: {e}")))?;
 
     Ok(Json(serde_json::json!({
@@ -332,31 +379,36 @@ pub async fn openai_audio_transcriptions(
         match name.as_str() {
             "model" => {
                 model = Some(
-                    field.text().await
-                        .map_err(|e| ServerError::BadRequest(format!("model field: {e}")))?
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| ServerError::BadRequest(format!("model field: {e}")))?,
                 );
             }
             "language" => {
                 language = Some(
-                    field.text().await
-                        .map_err(|e| ServerError::BadRequest(format!("language field: {e}")))?
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| ServerError::BadRequest(format!("language field: {e}")))?,
                 );
             }
             "file" => {
                 audio_bytes = Some(
-                    field.bytes().await
+                    field
+                        .bytes()
+                        .await
                         .map_err(|e| ServerError::BadRequest(format!("file field: {e}")))?
-                        .to_vec()
+                        .to_vec(),
                 );
             }
             _ => {} // ignore unknown fields per OpenAI spec
         }
     }
 
-    let model = model
-        .ok_or_else(|| ServerError::BadRequest("missing 'model' field".into()))?;
-    let audio = audio_bytes
-        .ok_or_else(|| ServerError::BadRequest("missing 'file' field".into()))?;
+    let model = model.ok_or_else(|| ServerError::BadRequest("missing 'model' field".into()))?;
+    let audio =
+        audio_bytes.ok_or_else(|| ServerError::BadRequest("missing 'file' field".into()))?;
 
     if !state.registry.contains(&model) {
         return Err(ServerError::BadRequest(format!("unknown model: {}", model)));
@@ -394,13 +446,16 @@ async fn handle_embed(
     state: Arc<InferenceState>,
     req: InferenceRequest,
 ) -> Result<axum::response::Response, ServerError> {
-    let _permit = state.embed_semaphore.clone().acquire_owned().await
+    let _permit = state
+        .embed_semaphore
+        .clone()
+        .acquire_owned()
+        .await
         .map_err(|_| ServerError::Internal("embed semaphore closed".into()))?;
 
-    let engine = state
-        .registry
-        .get_embed(&req.model)
-        .ok_or_else(|| ServerError::BadRequest(format!("model `{}` is not an embedding model", req.model)))?;
+    let engine = state.registry.get_embed(&req.model).ok_or_else(|| {
+        ServerError::BadRequest(format!("model `{}` is not an embedding model", req.model))
+    })?;
 
     // `input` can be a JSON string or an array of strings (OpenAI convention).
     let input: Vec<String> = match req.input {
@@ -408,9 +463,9 @@ async fn handle_embed(
         Some(serde_json::Value::Array(arr)) => arr
             .into_iter()
             .map(|v| {
-                v.as_str()
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| ServerError::BadRequest("input array must contain only strings".into()))
+                v.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                    ServerError::BadRequest("input array must contain only strings".into())
+                })
             })
             .collect::<Result<Vec<_>, _>>()?,
         Some(other) => {
@@ -520,17 +575,20 @@ async fn handle_rerank(
     state: Arc<InferenceState>,
     req: InferenceRequest,
 ) -> Result<axum::response::Response, ServerError> {
-    let _permit = state.rerank_semaphore.clone().acquire_owned().await
+    let _permit = state
+        .rerank_semaphore
+        .clone()
+        .acquire_owned()
+        .await
         .map_err(|_| ServerError::Internal("rerank semaphore closed".into()))?;
 
-    let engine = state
-        .registry
-        .get_rerank(&req.model)
-        .ok_or_else(|| ServerError::BadRequest(format!("model `{}` is not a rerank model", req.model)))?;
-
-    let query = req.query.ok_or_else(|| {
-        ServerError::BadRequest("rerank request missing 'query' field".into())
+    let engine = state.registry.get_rerank(&req.model).ok_or_else(|| {
+        ServerError::BadRequest(format!("model `{}` is not a rerank model", req.model))
     })?;
+
+    let query = req
+        .query
+        .ok_or_else(|| ServerError::BadRequest("rerank request missing 'query' field".into()))?;
 
     if req.documents.is_empty() {
         return Err(ServerError::BadRequest(
@@ -619,15 +677,18 @@ async fn handle_chat_with_vision(
     req: InferenceRequest,
     vision_embeds: Option<(Vec<f32>, usize)>,
 ) -> Result<axum::response::Response, ServerError> {
-    let engine = state.registry.get_chat(&req.model)
-        .ok_or_else(|| ServerError::BadRequest(format!("model `{}` is not a chat model", req.model)))?;
+    let engine = state.registry.get_chat(&req.model).ok_or_else(|| {
+        ServerError::BadRequest(format!("model `{}` is not a chat model", req.model))
+    })?;
 
     let stream = req.stream;
     let model_name = req.model.clone();
     let max_tokens = req.max_tokens.unwrap_or(1024);
 
     if req.messages.is_empty() {
-        return Err(ServerError::BadRequest("messages must not be empty for chat".into()));
+        return Err(ServerError::BadRequest(
+            "messages must not be empty for chat".into(),
+        ));
     }
 
     let chat_req = ChatRequest {
@@ -651,7 +712,9 @@ async fn handle_chat_with_vision(
     if stream {
         Ok(stream_response(model_name, max_tokens, rx).into_response())
     } else {
-        Ok(non_stream_response(model_name, max_tokens, rx).await?.into_response())
+        Ok(non_stream_response(model_name, max_tokens, rx)
+            .await?
+            .into_response())
     }
 }
 
@@ -667,8 +730,14 @@ async fn non_stream_response(
 
     while let Some(ev) = rx.recv().await {
         match ev {
-            ChatEvent::Token(_, text) => { content.push_str(&text); output_tokens += 1; }
-            ChatEvent::Finish(r) => { finish = r; break; }
+            ChatEvent::Token(_, text) => {
+                content.push_str(&text);
+                output_tokens += 1;
+            }
+            ChatEvent::Finish(r) => {
+                finish = r;
+                break;
+            }
             ChatEvent::Error(e) => return Err(ServerError::Inference(e)),
         }
     }
@@ -680,11 +749,14 @@ async fn non_stream_response(
         model,
         choices: vec![Choice {
             index: 0,
-            message: ResponseMessage { role: "assistant".into(), content },
+            message: ResponseMessage {
+                role: "assistant".into(),
+                content,
+            },
             finish_reason: Some(finish.as_openai().into()),
         }],
         usage: Usage {
-            prompt_tokens: 0,  // engine doesn't currently report this; v1 leaves as 0
+            prompt_tokens: 0, // engine doesn't currently report this; v1 leaves as 0
             completion_tokens: output_tokens,
             total_tokens: output_tokens,
         },
@@ -711,7 +783,10 @@ fn stream_response(
                         model: model.clone(),
                         choices: vec![ChunkChoice {
                             index: 0,
-                            delta: ChunkDelta { role: None, content: Some(text) },
+                            delta: ChunkDelta {
+                                role: None,
+                                content: Some(text),
+                            },
                             finish_reason: None,
                         }],
                     };

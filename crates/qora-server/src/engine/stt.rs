@@ -8,8 +8,8 @@ use crate::engine::ModelEngine;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SttRequest {
     pub model: String,
-    pub audio: Vec<u8>,                   // raw audio bytes (WAV/MP3/Opus — engine decodes)
-    pub format: Option<String>,           // hint, optional
+    pub audio: Vec<u8>,         // raw audio bytes (WAV/MP3/Opus — engine decodes)
+    pub format: Option<String>, // hint, optional
     pub language: Option<String>,
 }
 

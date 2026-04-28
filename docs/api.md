@@ -27,7 +27,13 @@ List available models.
   "object": "list",
   "data": [
     {
-      "id": "qora-4b",
+      "id": "qora-llm",
+      "object": "model",
+      "created": 1700000000,
+      "owned_by": "qora"
+    },
+    {
+      "id": "qora-tts",
       "object": "model",
       "created": 1700000000,
       "owned_by": "qora"
@@ -36,15 +42,65 @@ List available models.
 }
 ```
 
-### `POST /v1/chat/completions`
+---
 
-The main inference endpoint. OpenAI-compatible.
+### `POST /v1/inference`
+
+Unified inference endpoint. Dispatches to the correct engine based on the `task` field. All other endpoints are OpenAI-compatible aliases that map to this one internally.
 
 #### Request
 
 ```json
 {
-  "model": "qora-4b",
+  "task": "chat",
+  "model": "qora-llm",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "Hello!"}
+  ],
+  "max_tokens": 200,
+  "temperature": 0.7,
+  "stream": false
+}
+```
+
+The `task` field selects the engine:
+
+| `task` value | Engine used | Required fields |
+|---|---|---|
+| `chat` | LLM chat engine | `messages` |
+| `tts` | TTS engine | `input` (string) |
+| `stt` | STT engine | `audio` (base64 WAV bytes) |
+| `embedding` | Embedding engine | `input` (string or array of strings) |
+| `rerank` | Rerank engine | `query`, `documents` |
+
+All other task-specific fields follow the same schema as the dedicated endpoints below.
+
+#### curl example
+
+```bash
+curl -sS "$QORA_URL/v1/inference" \
+    -H "Authorization: Bearer $QORA_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "task": "chat",
+        "model": "qora-llm",
+        "messages": [{"role": "user", "content": "Hello!"}],
+        "max_tokens": 100
+    }'
+```
+
+---
+
+### `POST /v1/chat/completions`
+
+The main LLM inference endpoint. OpenAI-compatible.
+
+#### Request
+
+```json
+{
+  "model": "qora-llm",
   "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": "Hello!"}
@@ -60,7 +116,7 @@ Vision (text + image):
 
 ```json
 {
-  "model": "qora-4b",
+  "model": "qora-llm",
   "messages": [{
     "role": "user",
     "content": [
@@ -83,7 +139,7 @@ The image_url field accepts:
   "id": "chatcmpl-...",
   "object": "chat.completion",
   "created": 1700000000,
-  "model": "qora-4b",
+  "model": "qora-llm",
   "choices": [{
     "index": 0,
     "message": {"role": "assistant", "content": "Hello! How can I help?"},
@@ -102,11 +158,11 @@ The image_url field accepts:
 Server-Sent Events. Each event is a JSON `chat.completion.chunk`:
 
 ```
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"qora-4b","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"qora-llm","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
 
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"qora-4b","choices":[{"index":0,"delta":{"content":"!"},"finish_reason":null}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"qora-llm","choices":[{"index":0,"delta":{"content":"!"},"finish_reason":null}]}
 
-data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"qora-4b","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1700000000,"model":"qora-llm","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
 
 data: [DONE]
 ```
@@ -115,7 +171,7 @@ data: [DONE]
 
 | Parameter | Type | Default | Notes |
 |-----------|------|---------|-------|
-| `model` | string | required | Must be `"qora-4b"` |
+| `model` | string | required | Must match a registered `chat` model id |
 | `messages` | array | required | OpenAI message format |
 | `stream` | bool | `false` | Stream tokens via SSE |
 | `max_tokens` | int | 1024 | Max completion tokens |
@@ -133,6 +189,212 @@ QORA-specific extensions (additive to OpenAI schema; ignored by standard clients
 | `think` | bool | `true` | Enable extended chain-of-thought |
 | `think_budget` | int | 1024 | Max thinking tokens |
 | `show_think` | bool | `false` | Include thinking tokens in output |
+
+#### curl example
+
+```bash
+curl -sS "$QORA_URL/v1/chat/completions" \
+    -H "Authorization: Bearer $QORA_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qora-llm",
+        "messages": [{"role": "user", "content": "Hello!"}],
+        "max_tokens": 200
+    }'
+```
+
+---
+
+### `POST /v1/audio/speech`
+
+Text-to-speech synthesis. OpenAI-compatible.
+
+#### Request
+
+```json
+{
+  "model": "qora-tts",
+  "input": "Hello, this is QORA text-to-speech.",
+  "voice": "en-female-1",
+  "response_format": "wav"
+}
+```
+
+| Parameter | Type | Default | Notes |
+|-----------|------|---------|-------|
+| `model` | string | required | Must match a registered `tts` model id |
+| `input` | string | required | Text to synthesize |
+| `voice` | string | engine default | Voice identifier (engine-specific) |
+| `response_format` | string | `"wav"` | `"wav"` or `"mp3"` (v1 supports `"wav"`) |
+| `language` | string | auto-detect | BCP 47 language tag |
+
+#### Response
+
+Raw audio bytes with `Content-Type: audio/wav` (or `audio/mpeg` for mp3).
+
+#### curl example
+
+```bash
+curl -sS "$QORA_URL/v1/audio/speech" \
+    -H "Authorization: Bearer $QORA_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qora-tts",
+        "input": "Hello from QORA.",
+        "voice": "en-female-1",
+        "response_format": "wav"
+    }' --output output.wav
+```
+
+---
+
+### `POST /v1/audio/transcriptions`
+
+Speech-to-text transcription. OpenAI-compatible multipart upload.
+
+#### Request
+
+`multipart/form-data` with fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `model` | string | Must match a registered `stt` model id |
+| `file` | binary | Audio file bytes (WAV recommended) |
+| `language` | string | Optional BCP 47 language tag (e.g. `"en"`) |
+
+#### Response
+
+```json
+{
+  "text": "Hello, this is QORA speech-to-text.",
+  "language": "en"
+}
+```
+
+#### curl example
+
+```bash
+curl -sS "$QORA_URL/v1/audio/transcriptions" \
+    -H "Authorization: Bearer $QORA_KEY" \
+    -F "model=qora-stt" \
+    -F "file=@recording.wav" \
+    -F "language=en"
+```
+
+---
+
+### `POST /v1/embeddings`
+
+Sentence / document embedding. OpenAI-compatible.
+
+#### Request
+
+```json
+{
+  "model": "qora-embed",
+  "input": "Text to embed"
+}
+```
+
+`input` can be a single string or an array of strings.
+
+| Parameter | Type | Default | Notes |
+|-----------|------|---------|-------|
+| `model` | string | required | Must match a registered `embedding` model id |
+| `input` | string or array | required | Text(s) to embed |
+| `encoding_format` | string | `"float"` | Only `"float"` supported in v1 |
+
+#### Response
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "object": "embedding",
+      "embedding": [0.012, -0.034, ...],
+      "index": 0
+    }
+  ],
+  "model": "qora-embed",
+  "usage": {"prompt_tokens": 0, "total_tokens": 0}
+}
+```
+
+Embedding dimensionality is 2048 for the default multilingual embedding model.
+
+#### curl example
+
+```bash
+curl -sS "$QORA_URL/v1/embeddings" \
+    -H "Authorization: Bearer $QORA_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qora-embed",
+        "input": ["Hello world", "QORA embedding example"]
+    }'
+```
+
+---
+
+### `POST /v1/rerank`
+
+Cross-encoder reranking. QORA custom endpoint (not in OpenAI spec).
+
+#### Request
+
+```json
+{
+  "model": "qora-rerank",
+  "query": "What is the capital of France?",
+  "documents": [
+    "Paris is the capital and most populous city of France.",
+    "Berlin is the capital of Germany.",
+    "Lyon is a major city in south-eastern France."
+  ],
+  "top_k": 2
+}
+```
+
+| Parameter | Type | Default | Notes |
+|-----------|------|---------|-------|
+| `model` | string | required | Must match a registered `rerank` model id |
+| `query` | string | required | The query to rank documents against |
+| `documents` | array | required | Non-empty array of strings to rerank |
+| `top_k` | int | all | Return only the top-k results |
+
+#### Response
+
+```json
+{
+  "results": [
+    {"index": 0, "score": 0.97, "document": "Paris is the capital and most populous city of France."},
+    {"index": 2, "score": 0.43, "document": "Lyon is a major city in south-eastern France."}
+  ],
+  "model": "qora-rerank"
+}
+```
+
+Results are sorted by score descending.
+
+#### curl example
+
+```bash
+curl -sS "$QORA_URL/v1/rerank" \
+    -H "Authorization: Bearer $QORA_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "qora-rerank",
+        "query": "capital of France",
+        "documents": [
+            "Paris is the capital of France.",
+            "Berlin is the capital of Germany."
+        ],
+        "top_k": 1
+    }'
+```
+
+---
 
 ## Errors
 
@@ -169,6 +431,6 @@ Defaults are configurable per key by the operator. Hitting either returns 429 wi
 
 ## Drop-in OpenAI compatibility
 
-QORA implements the same wire format as OpenAI's `/v1/chat/completions`. The `openai` Python and Node SDKs work unchanged — just point them at your QORA URL.
+QORA implements the same wire format as OpenAI's v1 API for chat completions, audio speech, audio transcriptions, and embeddings. The `openai` Python and Node SDKs work unchanged — just point them at your QORA URL.
 
 See examples under `docs/examples/`.

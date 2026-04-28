@@ -11,8 +11,8 @@ async fn stt_transcribes_short_audio() {
         return;
     }
 
-    use qora_server::engines::stt::QoraSttEngine;
     use qora_server::engine::stt::{SttEngine, SttRequest};
+    use qora_server::engines::stt::QoraSttEngine;
 
     let engine = match QoraSttEngine::load("test-stt", stt_model_dir, "Test STT") {
         Ok(e) => e,

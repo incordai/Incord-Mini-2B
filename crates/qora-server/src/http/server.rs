@@ -1,7 +1,7 @@
-use std::net::SocketAddr;
 use anyhow::Context;
 use axum::Router;
 use axum_server::tls_rustls::RustlsConfig;
+use std::net::SocketAddr;
 
 pub async fn serve_plain(router: Router, bind: &str) -> anyhow::Result<()> {
     let addr: SocketAddr = bind.parse().context("parsing bind address")?;

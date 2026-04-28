@@ -1,6 +1,6 @@
-use std::sync::Arc;
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use serde::Serialize;
+use std::sync::Arc;
 
 use crate::http::handlers::inference::InferenceState;
 
@@ -21,14 +21,19 @@ pub struct ModelInfo {
 }
 
 pub async fn list_models(State(state): State<Arc<InferenceState>>) -> Json<ModelsListResponse> {
-    let data = state.registry.all().into_iter().map(|engine| ModelInfo {
-        id: engine.id().to_string(),
-        object: "model",
-        created: 1_700_000_000,
-        owned_by: "qora".to_string(),
-        description: engine.description().to_string(),
-        task: format!("{:?}", engine.task()).to_lowercase(),
-    }).collect();
+    let data = state
+        .registry
+        .all()
+        .into_iter()
+        .map(|engine| ModelInfo {
+            id: engine.id().to_string(),
+            object: "model",
+            created: 1_700_000_000,
+            owned_by: "qora".to_string(),
+            description: engine.description().to_string(),
+            task: format!("{:?}", engine.task()).to_lowercase(),
+        })
+        .collect();
     Json(ModelsListResponse {
         object: "list",
         data,

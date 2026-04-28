@@ -7,12 +7,12 @@
 
 #![cfg(feature = "mock-weights")]
 
-use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::json;
-use tower::ServiceExt;
+use std::sync::Arc;
 use tempfile::TempDir;
+use tower::ServiceExt;
 
 use qora_server::auth::admin::AdminState;
 use qora_server::auth::middleware::AuthState;
@@ -64,7 +64,9 @@ async fn mint_key(app: axum::Router) -> (String, axum::Router) {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     (val["raw_key"].as_str().unwrap().to_string(), app)
 }
@@ -170,12 +172,15 @@ async fn tts_missing_input_field_returns_400() {
 async fn tts_synthesizes_short_text() {
     let tts_model_dir = std::path::PathBuf::from("D:/Burn-AI/QORA-TTS/model/1.7B");
     if !tts_model_dir.exists() {
-        eprintln!("skipping tts_synthesizes_short_text: model not at {}", tts_model_dir.display());
+        eprintln!(
+            "skipping tts_synthesizes_short_text: model not at {}",
+            tts_model_dir.display()
+        );
         return;
     }
 
-    use qora_server::engines::tts::QoraTtsEngine;
     use qora_server::engine::tts::{TtsEngine, TtsRequest};
+    use qora_server::engines::tts::QoraTtsEngine;
 
     let engine = match QoraTtsEngine::load("test-tts", tts_model_dir, "Test TTS") {
         Ok(e) => e,
@@ -188,7 +193,7 @@ async fn tts_synthesizes_short_text() {
     let req = TtsRequest {
         model: "test-tts".to_string(),
         input: "hello".to_string(),
-        voice: Some("luna".to_string()),  // luna.wav ships with the 1.7B model
+        voice: Some("luna".to_string()), // luna.wav ships with the 1.7B model
         format: Some("wav".to_string()),
         language: Some("english".to_string()),
     };

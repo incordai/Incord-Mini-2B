@@ -12,10 +12,10 @@
 //! For v1 we write the incoming bytes to a temp file and pass that path;
 //! the temp file is cleaned up after transcription.
 
-use std::path::PathBuf;
-use std::sync::Arc;
 use anyhow::Context;
 use async_trait::async_trait;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::engine::stt::{SttEngine, SttOutput, SttRequest};
 use crate::engine::{ModelEngine, Task};
@@ -74,8 +74,10 @@ impl QoraSttEngine {
         // 1. Load config
         let config_path = model_dir.join("config.json");
         tracing::info!(path = ?config_path, "loading STT config...");
-        let config = qora_stt_small::config::WhisperConfig::from_file(&config_path)
-            .map_err(|e| anyhow::anyhow!("loading STT config from {}: {e}", config_path.display()))?;
+        let config =
+            qora_stt_small::config::WhisperConfig::from_file(&config_path).map_err(|e| {
+                anyhow::anyhow!("loading STT config from {}: {e}", config_path.display())
+            })?;
 
         // 2. Load weights — prefer safetensors; fall back to binary .qora-stt-small
         let binary_path = model_dir.join("model.qora-stt-small");
@@ -100,7 +102,12 @@ impl QoraSttEngine {
         let tokenizer_path = model_dir.join("tokenizer.json");
         tracing::info!(path = ?tokenizer_path, "loading STT tokenizer...");
         let tokenizer = qora_stt_small::tokenizer::WhisperTokenizer::from_file(&tokenizer_path)
-            .map_err(|e| anyhow::anyhow!("loading STT tokenizer from {}: {e}", tokenizer_path.display()))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "loading STT tokenizer from {}: {e}",
+                    tokenizer_path.display()
+                )
+            })?;
 
         tracing::info!(
             model_id = %id,
@@ -112,7 +119,11 @@ impl QoraSttEngine {
         Ok(Self {
             id,
             description,
-            model: Arc::new(SttModelHandle { weights, config, tokenizer }),
+            model: Arc::new(SttModelHandle {
+                weights,
+                config,
+                tokenizer,
+            }),
         })
     }
 }
@@ -122,9 +133,15 @@ impl QoraSttEngine {
 // ---------------------------------------------------------------------------
 
 impl ModelEngine for QoraSttEngine {
-    fn id(&self) -> &str { &self.id }
-    fn task(&self) -> Task { Task::Stt }
-    fn description(&self) -> &str { &self.description }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn task(&self) -> Task {
+        Task::Stt
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
 }
 
 #[async_trait]
@@ -136,10 +153,8 @@ impl SttEngine for QoraSttEngine {
         // Write incoming audio bytes to a temp WAV file — qora-stt-small's
         // transcribe() API takes a &Path, so we materialise the bytes to disk.
         let temp_path = tokio::task::spawn_blocking(move || -> anyhow::Result<PathBuf> {
-            let path = std::env::temp_dir()
-                .join(format!("qora-stt-{}.wav", uuid::Uuid::new_v4()));
-            std::fs::write(&path, &req.audio)
-                .context("writing temp audio file for STT")?;
+            let path = std::env::temp_dir().join(format!("qora-stt-{}.wav", uuid::Uuid::new_v4()));
+            std::fs::write(&path, &req.audio).context("writing temp audio file for STT")?;
             Ok(path)
         })
         .await??;

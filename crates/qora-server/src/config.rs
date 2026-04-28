@@ -1,7 +1,7 @@
 //! Multi-model server config (TOML).
 
-use std::path::{Path, PathBuf};
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
@@ -89,11 +89,15 @@ pub struct LoadingConfig {
 
 impl Default for LoadingConfig {
     fn default() -> Self {
-        Self { mode: default_loading_mode() }
+        Self {
+            mode: default_loading_mode(),
+        }
     }
 }
 
-fn default_loading_mode() -> String { "eager".to_string() }
+fn default_loading_mode() -> String {
+    "eager".to_string()
+}
 
 impl ServerConfig {
     pub fn load_from_path(path: &Path) -> anyhow::Result<Self> {
@@ -112,7 +116,9 @@ mod tests {
     #[test]
     fn loads_config_with_multiple_models() {
         let mut tmp = NamedTempFile::new().unwrap();
-        writeln!(tmp, r#"
+        writeln!(
+            tmp,
+            r#"
 [server]
 bind = "127.0.0.1:8080"
 
@@ -163,7 +169,9 @@ path = "/var/lib/qora/rag/embed.bin"
 id = "qora-rerank"
 kind = "rerank"
 path = "/var/lib/qora/rag/rerank.bin"
-"#).unwrap();
+"#
+        )
+        .unwrap();
 
         let cfg = ServerConfig::load_from_path(tmp.path()).unwrap();
         assert_eq!(cfg.models.len(), 5);
@@ -178,7 +186,9 @@ path = "/var/lib/qora/rag/rerank.bin"
     #[test]
     fn loads_with_no_models() {
         let mut tmp = NamedTempFile::new().unwrap();
-        writeln!(tmp, r#"
+        writeln!(
+            tmp,
+            r#"
 [server]
 bind = "127.0.0.1:8080"
 
@@ -200,7 +210,9 @@ tpm = 60000
 prometheus_bind = "127.0.0.1:9090"
 log_level = "info"
 log_format = "json"
-"#).unwrap();
+"#
+        )
+        .unwrap();
         let cfg = ServerConfig::load_from_path(tmp.path()).unwrap();
         assert!(cfg.models.is_empty());
     }
@@ -208,7 +220,9 @@ log_format = "json"
     #[test]
     fn loading_mode_defaults_to_eager() {
         let mut tmp = NamedTempFile::new().unwrap();
-        writeln!(tmp, r#"
+        writeln!(
+            tmp,
+            r#"
 [server]
 bind = "127.0.0.1:8080"
 
@@ -230,7 +244,9 @@ tpm = 60000
 prometheus_bind = "127.0.0.1:9090"
 log_level = "info"
 log_format = "json"
-"#).unwrap();
+"#
+        )
+        .unwrap();
         let cfg = ServerConfig::load_from_path(tmp.path()).unwrap();
         assert_eq!(cfg.loading.mode, "eager");
     }

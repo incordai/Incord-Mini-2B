@@ -1,6 +1,6 @@
+use anyhow::Context;
 use std::path::PathBuf;
 use std::sync::Arc;
-use anyhow::Context;
 
 use qora_server::auth::admin::AdminState;
 use qora_server::auth::middleware::AuthState;
@@ -15,7 +15,8 @@ use qora_server::loader::build_registry;
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    let config_path = std::env::args().nth(1)
+    let config_path = std::env::args()
+        .nth(1)
         .unwrap_or_else(|| "qora-server.toml".to_string());
     let config = ServerConfig::load_from_path(&PathBuf::from(&config_path))
         .with_context(|| format!("loading config from {config_path}"))?;
@@ -30,8 +31,12 @@ async fn main() -> anyhow::Result<()> {
         .into_bytes();
 
     // Admin token
-    let admin_token = std::env::var(&config.auth.admin_token_env)
-        .with_context(|| format!("admin token env var {} not set", config.auth.admin_token_env))?;
+    let admin_token = std::env::var(&config.auth.admin_token_env).with_context(|| {
+        format!(
+            "admin token env var {} not set",
+            config.auth.admin_token_env
+        )
+    })?;
 
     let auth = Arc::new(AuthState {
         db,
@@ -47,10 +52,10 @@ async fn main() -> anyhow::Result<()> {
 
     let inference_state = Arc::new(InferenceState {
         registry,
-        vision_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),  // serial — vision encode is ~90 s
-        tts_semaphore:    Arc::new(tokio::sync::Semaphore::new(2)),  // 2 concurrent (bandwidth-heavy)
-        stt_semaphore:    Arc::new(tokio::sync::Semaphore::new(2)),
-        embed_semaphore:  Arc::new(tokio::sync::Semaphore::new(8)),  // lighter, allow more
+        vision_semaphore: Arc::new(tokio::sync::Semaphore::new(1)), // serial — vision encode is ~90 s
+        tts_semaphore: Arc::new(tokio::sync::Semaphore::new(2)), // 2 concurrent (bandwidth-heavy)
+        stt_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+        embed_semaphore: Arc::new(tokio::sync::Semaphore::new(8)), // lighter, allow more
         rerank_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
     });
     let router = build_router(inference_state, auth, admin_state);
@@ -61,16 +66,15 @@ async fn main() -> anyhow::Result<()> {
             let tls = qora_server::http::tls::load_tls_config(cert, key).await?;
             qora_server::http::server::serve_tls(router, &config.server.bind, tls).await
         }
-        (None, None) => {
-            qora_server::http::server::serve_plain(router, &config.server.bind).await
-        }
-        _ => Err(anyhow::anyhow!("tls_cert and tls_key must be set together or both omitted")),
+        (None, None) => qora_server::http::server::serve_plain(router, &config.server.bind).await,
+        _ => Err(anyhow::anyhow!(
+            "tls_cert and tls_key must be set together or both omitted"
+        )),
     }
 }
 
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     fmt().with_env_filter(filter).json().init();
 }

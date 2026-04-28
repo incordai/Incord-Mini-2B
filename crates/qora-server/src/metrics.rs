@@ -2,8 +2,7 @@
 
 use once_cell::sync::Lazy;
 use prometheus::{
-    CounterVec, Encoder, HistogramVec, TextEncoder,
-    register_counter_vec, register_histogram_vec,
+    CounterVec, Encoder, HistogramVec, TextEncoder, register_counter_vec, register_histogram_vec,
 };
 
 pub static REQUESTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
@@ -26,8 +25,12 @@ pub static REQUEST_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 pub static ERRORS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
-    register_counter_vec!("qora_server_errors_total", "Total errors by type", &["error_type"])
-        .unwrap()
+    register_counter_vec!(
+        "qora_server_errors_total",
+        "Total errors by type",
+        &["error_type"]
+    )
+    .unwrap()
 });
 
 pub fn render_metrics() -> String {

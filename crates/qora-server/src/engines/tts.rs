@@ -15,15 +15,15 @@
 //! Audio output: generate_speech returns Vec<f32> (mono, 24 kHz, [-1.0, 1.0]).
 //! We convert to 16-bit PCM and encode as WAV in-memory.
 
+use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
-use async_trait::async_trait;
 
 use qora_tts::audio_features::MelConfig;
 use qora_tts::code_predictor::CodePredictorWeights;
 use qora_tts::decoder::SpeechDecoderWeights;
-use qora_tts::generate_new::{generate_speech, TTSParams};
-use qora_tts::speaker_encoder::{extract_speaker_embedding, SpeakerEncoderWeights};
+use qora_tts::generate_new::{TTSParams, generate_speech};
+use qora_tts::speaker_encoder::{SpeakerEncoderWeights, extract_speaker_embedding};
 use qora_tts::talker::TalkerWeights;
 use qora_tts::tokenizer::TTSTokenizer;
 
@@ -96,10 +96,7 @@ impl QoraTtsEngine {
 
         let model_path = model_dir.join("model.qora-tts");
         if !model_path.exists() {
-            anyhow::bail!(
-                "TTS model binary not found at {}",
-                model_path.display()
-            );
+            anyhow::bail!("TTS model binary not found at {}", model_path.display());
         }
 
         tracing::info!(path = ?model_path, "loading qora-tts weights...");
@@ -117,10 +114,7 @@ impl QoraTtsEngine {
 
         let tokenizer_path = model_dir.join("tokenizer.json");
         if !tokenizer_path.exists() {
-            anyhow::bail!(
-                "TTS tokenizer not found at {}",
-                tokenizer_path.display()
-            );
+            anyhow::bail!("TTS tokenizer not found at {}", tokenizer_path.display());
         }
         let tokenizer = TTSTokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("loading tokenizer: {e}"))?;
@@ -227,7 +221,8 @@ impl TtsEngine for QoraTtsEngine {
                 .map_err(|e| anyhow::anyhow!("reading voice WAV {}: {e}", voice_path.display()))?;
 
             let mel_config = MelConfig::speaker_encoder();
-            let mel_spec = qora_tts::audio_features::extract_mel_spectrogram(&ref_audio, &mel_config);
+            let mel_spec =
+                qora_tts::audio_features::extract_mel_spectrogram(&ref_audio, &mel_config);
 
             let voice_embedding = extract_speaker_embedding(&mel_spec, &model.speaker_encoder, 128);
 
@@ -239,12 +234,12 @@ impl TtsEngine for QoraTtsEngine {
                 &model.decoder,
                 &model.tokenizer,
                 &text,
-                0,              // speaker_id: not used when voice_embedding is Some
+                0, // speaker_id: not used when voice_embedding is Some
                 language_id,
-                None,           // voice_codes: no .codes file for HTTP path
+                None, // voice_codes: no .codes file for HTTP path
                 Some(&voice_embedding),
                 &TTSParams::default(),
-                None,           // seed: non-deterministic by default
+                None, // seed: non-deterministic by default
             );
 
             // Encode f32 PCM → 16-bit WAV bytes (in-memory).

@@ -1,17 +1,23 @@
 //! Smoke test verifying LlmEngine implements ChatEngine over mock weights.
 
-use std::sync::Arc;
 use qor4b::gemv::mock::tiny_weights;
 use qor4b::tokenizer::QoraTokenizer;
 use qora_server::engine::chat::{ChatEngine, ChatMessage, ChatRequest};
 use qora_server::engines::llm::LlmEngine;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Build a minimal tokenizer from the mock model file path used by other test suites.
 fn test_tokenizer() -> Arc<QoraTokenizer> {
     let candidates = [
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../qora-llm/model/tokenizer.json"),
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../qora-llm/tests/fixtures/tokenizer.json"),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../qora-llm/model/tokenizer.json"
+        ),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../qora-llm/tests/fixtures/tokenizer.json"
+        ),
         concat!(env!("CARGO_MANIFEST_DIR"), "/../../model/tokenizer.json"),
     ];
     for path in candidates {
@@ -38,7 +44,10 @@ async fn llm_engine_implements_chat_engine() {
     let (tx, mut rx) = mpsc::channel(64);
     let req = ChatRequest {
         model: "qora-4b-mock".to_string(),
-        messages: vec![ChatMessage { role: "user".to_string(), content: "hi".to_string() }],
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hi".to_string(),
+        }],
         max_tokens: Some(2),
         temperature: Some(0.0),
         top_p: Some(0.95),
@@ -51,16 +60,17 @@ async fn llm_engine_implements_chat_engine() {
     // Run engine.chat — should produce at least one token and a Finish event
     let engine_arc = std::sync::Arc::new(engine);
     let engine_clone = engine_arc.clone();
-    let handle = tokio::spawn(async move {
-        engine_clone.chat(req, tx).await
-    });
+    let handle = tokio::spawn(async move { engine_clone.chat(req, tx).await });
 
     let mut tokens = 0;
     let mut finished = false;
     while let Some(ev) = rx.recv().await {
         match ev {
             qora_server::engine::chat::ChatEvent::Token(_, _) => tokens += 1,
-            qora_server::engine::chat::ChatEvent::Finish(_) => { finished = true; break; }
+            qora_server::engine::chat::ChatEvent::Finish(_) => {
+                finished = true;
+                break;
+            }
             qora_server::engine::chat::ChatEvent::Error(e) => panic!("unexpected error: {e}"),
         }
     }

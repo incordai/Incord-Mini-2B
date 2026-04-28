@@ -22,10 +22,10 @@
 //! and Rerank entries point to the same directory, the backend is loaded twice. A future
 //! optimisation would deduplicate by dir path in `build_registry`.
 
-use std::sync::Arc;
 use async_trait::async_trait;
+use std::sync::Arc;
 
-use crate::engine::embed::{EmbeddingEngine, EmbedOutput, EmbedRequest};
+use crate::engine::embed::{EmbedOutput, EmbedRequest, EmbeddingEngine};
 use crate::engine::rerank::{RerankEngine, RerankOutput, RerankRequest, RerankResult};
 use crate::engine::{ModelEngine, Task};
 

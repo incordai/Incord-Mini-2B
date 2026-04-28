@@ -20,7 +20,9 @@ fn config_supports_5_model_kinds() {
     // without requiring implementations to exist yet.
     use std::io::Write;
     let mut tmp = tempfile::NamedTempFile::new().unwrap();
-    writeln!(tmp, r#"
+    writeln!(
+        tmp,
+        r#"
 [server]
 bind = "127.0.0.1:8080"
 
@@ -68,15 +70,47 @@ path = "/x"
 id = "any-rerank"
 kind = "rerank"
 path = "/x"
-"#).unwrap();
+"#
+    )
+    .unwrap();
 
     let cfg = ServerConfig::load_from_path(tmp.path()).unwrap();
     assert_eq!(cfg.models.len(), 5);
-    assert_eq!(cfg.models.iter().filter(|m| m.kind == ModelKind::Chat).count(), 1);
-    assert_eq!(cfg.models.iter().filter(|m| m.kind == ModelKind::Tts).count(), 1);
-    assert_eq!(cfg.models.iter().filter(|m| m.kind == ModelKind::Stt).count(), 1);
-    assert_eq!(cfg.models.iter().filter(|m| m.kind == ModelKind::Embedding).count(), 1);
-    assert_eq!(cfg.models.iter().filter(|m| m.kind == ModelKind::Rerank).count(), 1);
+    assert_eq!(
+        cfg.models
+            .iter()
+            .filter(|m| m.kind == ModelKind::Chat)
+            .count(),
+        1
+    );
+    assert_eq!(
+        cfg.models
+            .iter()
+            .filter(|m| m.kind == ModelKind::Tts)
+            .count(),
+        1
+    );
+    assert_eq!(
+        cfg.models
+            .iter()
+            .filter(|m| m.kind == ModelKind::Stt)
+            .count(),
+        1
+    );
+    assert_eq!(
+        cfg.models
+            .iter()
+            .filter(|m| m.kind == ModelKind::Embedding)
+            .count(),
+        1
+    );
+    assert_eq!(
+        cfg.models
+            .iter()
+            .filter(|m| m.kind == ModelKind::Rerank)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -86,12 +120,18 @@ async fn registry_with_mock_chat_engine_dispatches_correctly() {
 
     // Build a mock chat engine using qor4b::gemv::mock::tiny_weights
     let weights = Arc::new(qor4b::gemv::mock::tiny_weights());
-    let tokenizer_path = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../qora-llm/model/tokenizer.json"));
+    let tokenizer_path = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../qora-llm/model/tokenizer.json"
+    ));
     let tokenizer = if tokenizer_path.exists() {
         Arc::new(qor4b::tokenizer::QoraTokenizer::from_file(&tokenizer_path).unwrap())
     } else {
         // Skip this test if no tokenizer fixture is available
-        eprintln!("skipping: tokenizer fixture not found at {}", tokenizer_path.display());
+        eprintln!(
+            "skipping: tokenizer fixture not found at {}",
+            tokenizer_path.display()
+        );
         return;
     };
 

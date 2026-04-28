@@ -1,16 +1,16 @@
 //! Build a Registry from ServerConfig at startup.
 
+use anyhow::Context;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use anyhow::Context;
 use tracing::info;
 
 use crate::config::{ModelEntry, ModelKind, ServerConfig};
 use crate::engines::llm::LlmEngine;
 use crate::engines::rag::{QorEmbeddingEngine, QorRagBackend, QorRerankEngine};
-use crate::engines::tts::QoraTtsEngine;
 use crate::engines::stt::QoraSttEngine;
+use crate::engines::tts::QoraTtsEngine;
 use crate::registry::{Registry, RegistryBuilder};
 
 /// Load every model in the config and build the registry.
@@ -40,11 +40,13 @@ pub fn build_registry(config: &ServerConfig) -> anyhow::Result<Registry> {
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| entry.path.clone());
 
-            if !shared_rag_backends.contains_key(&dir) {
-                info!(model_id = %entry.id, dir = ?dir, "loading qor-rag backend (embedding + rerank weights)...");
-                let backend = QorRagBackend::load(&dir)
-                    .map_err(|e| anyhow::anyhow!("qor-rag backend for model `{}`: {e}", entry.id))?;
-                shared_rag_backends.insert(dir, Arc::new(backend));
+            if let std::collections::hash_map::Entry::Vacant(e) = shared_rag_backends.entry(dir) {
+                let dir_ref = e.key();
+                info!(model_id = %entry.id, dir = ?dir_ref, "loading qor-rag backend (embedding + rerank weights)...");
+                let backend = QorRagBackend::load(dir_ref).map_err(|e2| {
+                    anyhow::anyhow!("qor-rag backend for model `{}`: {e2}", entry.id)
+                })?;
+                e.insert(Arc::new(backend));
             }
         }
     }
@@ -68,13 +70,17 @@ pub fn build_registry(config: &ServerConfig) -> anyhow::Result<Registry> {
 fn add_tts(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<RegistryBuilder> {
     // The ModelEntry `path` points to the .qora-tts binary file; the model dir
     // (containing config.json, tokenizer.json, and the binary itself) is its parent.
-    let model_dir = entry.path.parent()
+    let model_dir = entry
+        .path
+        .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| entry.path.clone());
 
     info!(model_id = %entry.id, dir = ?model_dir, "loading TTS model...");
 
-    let description = entry.description.clone()
+    let description = entry
+        .description
+        .clone()
         .unwrap_or_else(|| format!("TTS model: {}", entry.id));
 
     let engine = QoraTtsEngine::load(entry.id.clone(), model_dir, description)?;
@@ -85,13 +91,17 @@ fn add_tts(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<Regis
 fn add_stt(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<RegistryBuilder> {
     // ModelEntry `path` points to the config.json or model file inside the model dir.
     // The model dir (containing config.json, model weights, tokenizer.json) is its parent.
-    let model_dir = entry.path.parent()
+    let model_dir = entry
+        .path
+        .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| entry.path.clone());
 
     info!(model_id = %entry.id, dir = ?model_dir, "loading STT model...");
 
-    let description = entry.description.clone()
+    let description = entry
+        .description
+        .clone()
         .unwrap_or_else(|| format!("STT model: {}", entry.id));
 
     let engine = QoraSttEngine::load(entry.id.clone(), model_dir, description)?;
@@ -110,10 +120,12 @@ fn add_embed(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| entry.path.clone());
 
-    let backend = backends
-        .get(&dir)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("internal: no qor-rag backend found for dir {}", dir.display()))?;
+    let backend = backends.get(&dir).cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "internal: no qor-rag backend found for dir {}",
+            dir.display()
+        )
+    })?;
 
     let description = entry
         .description
@@ -142,10 +154,12 @@ fn add_rerank(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| entry.path.clone());
 
-    let backend = backends
-        .get(&dir)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("internal: no qor-rag backend found for dir {}", dir.display()))?;
+    let backend = backends.get(&dir).cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "internal: no qor-rag backend found for dir {}",
+            dir.display()
+        )
+    })?;
 
     let description = entry
         .description
@@ -164,7 +178,9 @@ fn add_rerank(
 }
 
 fn add_chat(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<RegistryBuilder> {
-    let tokenizer_path = entry.tokenizer.as_ref()
+    let tokenizer_path = entry
+        .tokenizer
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("chat model `{}` missing `tokenizer` field", entry.id))?;
 
     info!(model_id = %entry.id, path = ?entry.path, "loading chat model weights...");
@@ -177,7 +193,9 @@ fn add_chat(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<Regi
         .map_err(|e| anyhow::anyhow!("loading tokenizer from {}: {e}", tokenizer_path.display()))?;
     let tokenizer = Arc::new(tokenizer);
 
-    let description = entry.description.clone()
+    let description = entry
+        .description
+        .clone()
         .unwrap_or_else(|| format!("Chat model: {}", entry.id));
 
     let engine = Arc::new(LlmEngine::new(

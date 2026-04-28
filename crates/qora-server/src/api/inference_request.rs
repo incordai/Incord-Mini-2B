@@ -1,8 +1,8 @@
 //! The unified /v1/inference request type. Dispatches by `task` field.
 
-use serde::{Deserialize, Serialize};
 use crate::engine::Task;
 use crate::engine::chat::ChatMessage;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InferenceRequest {
@@ -15,7 +15,7 @@ pub struct InferenceRequest {
 
     // Common text input (for tts/embedding)
     #[serde(default)]
-    pub input: Option<serde_json::Value>,  // can be string or array of strings
+    pub input: Option<serde_json::Value>, // can be string or array of strings
 
     // TTS-specific
     #[serde(default)]
@@ -27,7 +27,7 @@ pub struct InferenceRequest {
 
     // STT-specific
     #[serde(default)]
-    pub audio: Option<String>,             // base64-encoded
+    pub audio: Option<String>, // base64-encoded
     #[serde(default)]
     pub audio_format: Option<String>,
 

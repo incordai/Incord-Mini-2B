@@ -1,10 +1,10 @@
 //! Concrete ChatEngine wrapping the existing QORA LLM inference.
 
-use std::sync::Arc;
 use async_trait::async_trait;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use qor4b::gemv::{forward_decode, prefill, prefill_with_vision, HybridCache, ModelWeights};
+use qor4b::gemv::{HybridCache, ModelWeights, forward_decode, prefill, prefill_with_vision};
 use qor4b::tokenizer::QoraTokenizer;
 
 use crate::engine::chat::{ChatEngine, ChatEvent, ChatRequest, FinishReason};
@@ -12,6 +12,7 @@ use crate::engine::{ModelEngine, Task};
 
 /// xorshift64 sampler — simplified inline sampler for v1 LlmEngine.
 /// Mirrors the Sampler used by the v1 chat handler.
+#[allow(clippy::too_many_arguments)]
 fn sample_token(
     logits: &mut [f32],
     generated: &[u32],
@@ -28,36 +29,62 @@ fn sample_token(
         for &t in recent {
             if (t as usize) < logits.len() {
                 let l = &mut logits[t as usize];
-                if *l > 0.0 { *l /= repetition_penalty; } else { *l *= repetition_penalty; }
+                if *l > 0.0 {
+                    *l /= repetition_penalty;
+                } else {
+                    *l *= repetition_penalty;
+                }
             }
         }
     }
     if presence_penalty > 0.0 && !generated.is_empty() {
         let mut seen = vec![false; logits.len()];
-        for &t in generated { if (t as usize) < seen.len() { seen[t as usize] = true; } }
-        for (i, &s) in seen.iter().enumerate() { if s { logits[i] -= presence_penalty; } }
+        for &t in generated {
+            if (t as usize) < seen.len() {
+                seen[t as usize] = true;
+            }
+        }
+        for (i, &s) in seen.iter().enumerate() {
+            if s {
+                logits[i] -= presence_penalty;
+            }
+        }
     }
     if temperature == 0.0 {
         let mut best = 0;
         let mut best_v = logits[0];
         for (i, &v) in logits.iter().enumerate() {
-            if v > best_v { best_v = v; best = i; }
+            if v > best_v {
+                best_v = v;
+                best = i;
+            }
         }
         return best as u32;
     }
-    for v in logits.iter_mut() { *v /= temperature; }
+    for v in logits.iter_mut() {
+        *v /= temperature;
+    }
     let mut idx: Vec<u32> = (0..logits.len() as u32).collect();
     idx.sort_unstable_by(|&a, &b| logits[b as usize].partial_cmp(&logits[a as usize]).unwrap());
     idx.truncate(top_k);
-    let max = idx.iter().map(|&i| logits[i as usize]).fold(f32::NEG_INFINITY, f32::max);
-    let exp: Vec<f32> = idx.iter().map(|&i| (logits[i as usize] - max).exp()).collect();
+    let max = idx
+        .iter()
+        .map(|&i| logits[i as usize])
+        .fold(f32::NEG_INFINITY, f32::max);
+    let exp: Vec<f32> = idx
+        .iter()
+        .map(|&i| (logits[i as usize] - max).exp())
+        .collect();
     let sum: f32 = exp.iter().sum();
     let probs: Vec<f32> = exp.iter().map(|p| p / sum).collect();
     let mut cum = 0.0;
     let mut cutoff = idx.len();
-    for i in 0..idx.len() {
-        cum += probs[i];
-        if cum >= top_p { cutoff = i + 1; break; }
+    for (i, &p) in probs.iter().enumerate().take(idx.len()) {
+        cum += p;
+        if cum >= top_p {
+            cutoff = i + 1;
+            break;
+        }
     }
     let final_idx = &idx[..cutoff];
     let final_probs = &probs[..cutoff];
@@ -69,7 +96,9 @@ fn sample_token(
     let mut acc = 0.0;
     for (i, &p) in final_probs.iter().enumerate() {
         acc += p;
-        if r <= acc { return final_idx[i]; }
+        if r <= acc {
+            return final_idx[i];
+        }
     }
     final_idx[final_idx.len() - 1]
 }
@@ -98,9 +127,15 @@ impl LlmEngine {
 }
 
 impl ModelEngine for LlmEngine {
-    fn id(&self) -> &str { &self.id }
-    fn task(&self) -> Task { Task::Chat }
-    fn description(&self) -> &str { &self.description }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn task(&self) -> Task {
+        Task::Chat
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
 }
 
 #[async_trait]
@@ -115,7 +150,9 @@ impl ChatEngine for LlmEngine {
         }
         let weights = self.weights.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<f32>, usize)> {
-            let vision = weights.vision.as_ref()
+            let vision = weights
+                .vision
+                .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("no vision encoder"))?;
             let img = image::load_from_memory(&bytes)?;
             let rgb = img.to_rgb8();
@@ -124,7 +161,8 @@ impl ChatEngine for LlmEngine {
             let (pixels, h2, w2) = qor4b::vision::pixels_from_rgb_bytes(rgb.as_raw(), w, h);
             let (embeds, num_tokens) = vision.encode_image(&pixels, h2, w2);
             Ok((embeds, num_tokens))
-        }).await?
+        })
+        .await?
     }
 
     async fn chat(&self, req: ChatRequest, sse_tx: mpsc::Sender<ChatEvent>) -> anyhow::Result<()> {
@@ -159,7 +197,8 @@ impl ChatEngine for LlmEngine {
             let mut rng_state: u64 = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos() as u64 | 1;
+                .as_nanos() as u64
+                | 1;
 
             for _step in 0..max_new_tokens {
                 let token = sample_token(
@@ -190,7 +229,8 @@ impl ChatEngine for LlmEngine {
 
             let _ = sse_tx.blocking_send(ChatEvent::Finish(FinishReason::Length));
             Ok(())
-        }).await?
+        })
+        .await?
     }
 }
 

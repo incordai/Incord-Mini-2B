@@ -24,10 +24,7 @@ fn find_model_dir() -> Option<&'static Path> {
         "C:/Projects/AI/qor-main/qor-rs/crates/qor-rag/model",
         "D:/Burn-AI/qor-rag/model",
     ];
-    CANDIDATES
-        .iter()
-        .map(|s| Path::new(s))
-        .find(|p| p.exists())
+    CANDIDATES.iter().map(|s| Path::new(s)).find(|p| p.exists())
 }
 
 #[tokio::test]
@@ -40,9 +37,9 @@ async fn embedding_returns_vector() {
         }
     };
 
-    use qora_server::engines::rag::{QorRagBackend, QorEmbeddingEngine};
-    use qora_server::engine::embed::{EmbeddingEngine, EmbedRequest};
     use qora_server::engine::ModelEngine;
+    use qora_server::engine::embed::{EmbedRequest, EmbeddingEngine};
+    use qora_server::engines::rag::{QorEmbeddingEngine, QorRagBackend};
 
     let backend = match QorRagBackend::load(model_dir) {
         Ok(b) => Arc::new(b),
@@ -70,7 +67,11 @@ async fn embedding_returns_vector() {
 
     let out = engine.embed(req).await.expect("embedding should succeed");
 
-    assert_eq!(out.embeddings.len(), 2, "should return one vector per input");
+    assert_eq!(
+        out.embeddings.len(),
+        2,
+        "should return one vector per input"
+    );
     assert!(out.dim > 0, "dimension should be positive");
     assert_eq!(
         out.embeddings[0].len(),
@@ -84,7 +85,10 @@ async fn embedding_returns_vector() {
     );
 
     // Qwen3-Embedding-2B produces 2048-dim vectors.
-    assert_eq!(out.dim, 2048, "expected 2048-dim embeddings from Qwen3-Embedding-2B");
+    assert_eq!(
+        out.dim, 2048,
+        "expected 2048-dim embeddings from Qwen3-Embedding-2B"
+    );
 
     // Vectors should be L2-normalized (norm ≈ 1.0).
     for (i, v) in out.embeddings.iter().enumerate() {
@@ -106,9 +110,9 @@ async fn rerank_scores_and_sorts() {
         }
     };
 
-    use qora_server::engines::rag::{QorRagBackend, QorRerankEngine};
-    use qora_server::engine::rerank::{RerankEngine, RerankRequest};
     use qora_server::engine::ModelEngine;
+    use qora_server::engine::rerank::{RerankEngine, RerankRequest};
+    use qora_server::engines::rag::{QorRagBackend, QorRerankEngine};
 
     let backend = match QorRagBackend::load(model_dir) {
         Ok(b) => Arc::new(b),
@@ -139,7 +143,11 @@ async fn rerank_scores_and_sorts() {
 
     let out = engine.rerank(req).await.expect("rerank should succeed");
 
-    assert_eq!(out.results.len(), 3, "should return a score for each document");
+    assert_eq!(
+        out.results.len(),
+        3,
+        "should return a score for each document"
+    );
 
     // Results are sorted descending by score.
     for w in out.results.windows(2) {
@@ -178,8 +186,8 @@ async fn rerank_top_k_truncation() {
         }
     };
 
-    use qora_server::engines::rag::{QorRagBackend, QorRerankEngine};
     use qora_server::engine::rerank::{RerankEngine, RerankRequest};
+    use qora_server::engines::rag::{QorRagBackend, QorRerankEngine};
 
     let backend = match QorRagBackend::load(model_dir) {
         Ok(b) => Arc::new(b),
@@ -208,5 +216,9 @@ async fn rerank_top_k_truncation() {
     };
 
     let out = engine.rerank(req).await.expect("rerank should succeed");
-    assert_eq!(out.results.len(), 2, "top_k=2 should return exactly 2 results");
+    assert_eq!(
+        out.results.len(),
+        2,
+        "top_k=2 should return exactly 2 results"
+    );
 }
