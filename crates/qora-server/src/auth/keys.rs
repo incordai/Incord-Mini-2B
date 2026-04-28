@@ -214,6 +214,24 @@ pub fn lookup_by_raw(
     Ok(Some(ApiKey::from(&updated)))
 }
 
+/// List all stored keys, returning public ApiKey structs (no hash material).
+/// Sorted by created_at descending.
+pub fn list_all(db: &Arc<Database>) -> anyhow::Result<Vec<ApiKey>> {
+    let read = db.begin_read()?;
+    let keys = read.open_table(KEYS_BY_ID)?;
+    let mut out = Vec::new();
+    for entry in keys.iter()? {
+        let entry = entry?;
+        let v = entry.1;
+        let (stored, _): (StoredKey, usize) =
+            bincode::serde::decode_from_slice(v.value(), BINCODE_CFG)
+                .context("bincode StoredKey decode in list_all")?;
+        out.push(ApiKey::from(&stored));
+    }
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(out)
+}
+
 /// Mark a key inactive. Returns true if the key existed.
 pub fn revoke_key(db: &Arc<Database>, id: &str) -> anyhow::Result<bool> {
     let write = db.begin_write()?;
