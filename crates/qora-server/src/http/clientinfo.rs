@@ -73,3 +73,44 @@ pub fn extract_proxy_country(parts: &Parts) -> Option<String> {
         .filter(|s| !s.is_empty() && *s != "XX")
         .map(|s| s.to_string())
 }
+
+/// Extract user-supplied country code from X-User-Country header.
+/// Set by the frontend after a geo lookup; takes priority over CDN and GeoIP.
+pub fn extract_user_country(parts: &Parts) -> Option<String> {
+    parts
+        .headers
+        .get("x-user-country")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Extract user-supplied city from X-User-City header.
+pub fn extract_user_city(parts: &Parts) -> Option<String> {
+    parts
+        .headers
+        .get("x-user-city")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Extract user-supplied region from X-User-Region header.
+pub fn extract_user_region(parts: &Parts) -> Option<String> {
+    parts
+        .headers
+        .get("x-user-region")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Extract user-supplied timezone from X-User-Timezone header.
+pub fn extract_user_timezone(parts: &Parts) -> Option<String> {
+    parts
+        .headers
+        .get("x-user-timezone")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}

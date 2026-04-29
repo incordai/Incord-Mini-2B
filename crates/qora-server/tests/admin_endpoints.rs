@@ -641,3 +641,68 @@ async fn admin_can_view_guest_messages() {
         .expect("should have an assistant message");
     assert_eq!(asst_msg["guest_id"], "guest-m21-msgs");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 10: User-supplied geo headers take priority; timezone is persisted
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn user_supplied_geo_headers_take_priority() {
+    let (app, _dir) = build_test_app();
+
+    // Send chat as guest with all four geo headers set by the frontend.
+    let chat_body = json!({
+        "model": "admin-test-llm",
+        "messages": [{"role": "user", "content": "hi from Berlin"}],
+        "max_tokens": 2,
+        "temperature": 0.0
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-guest-id", "g-geo")
+                .header("x-user-country", "DE")
+                .header("x-user-city", "Berlin")
+                .header("x-user-region", "Berlin")
+                .header("x-user-timezone", "Europe/Berlin")
+                .body(Body::from(chat_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "guest chat should succeed");
+
+    // Retrieve messages via admin endpoint and verify geo fields were persisted.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/admin/guests/g-geo/messages")
+                .header("authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let msgs = body["data"].as_array().expect("data should be an array");
+
+    let user_msg = msgs
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("should have a user message");
+
+    assert_eq!(user_msg["country"].as_str().unwrap_or(""), "DE");
+    assert_eq!(user_msg["city"].as_str().unwrap_or(""), "Berlin");
+    assert_eq!(user_msg["timezone"].as_str().unwrap_or(""), "Europe/Berlin");
+}

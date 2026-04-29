@@ -44,11 +44,13 @@ pub struct ClientInfo {
     pub ip: Option<String>,
     pub user_agent: Option<String>,
     /// ISO 3166-1 alpha-2 country code, e.g. "US".
-    /// Sourced from: CDN header (CF-IPCountry) → offline GeoIP lookup → None.
+    /// Sourced (in priority order): user-supplied X-User-Country header →
+    /// CDN header (CF-IPCountry) → offline GeoIP lookup → None.
     pub country: Option<String>,
     pub country_name: Option<String>,
     pub city: Option<String>,
     pub region: Option<String>,
+    pub timezone: Option<String>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
 }
@@ -64,9 +66,15 @@ pub async fn auth_middleware(
     let (parts, body) = req.into_parts();
     let ip = crate::http::clientinfo::extract_client_ip(&parts);
     let user_agent = crate::http::clientinfo::extract_user_agent(&parts);
-    let proxy_country = crate::http::clientinfo::extract_proxy_country(&parts);
+    let cdn_country = crate::http::clientinfo::extract_proxy_country(&parts);
 
-    // GeoIP lookup (offline). CDN-supplied country takes precedence over GeoIP result.
+    // User-supplied geo headers (sent by the frontend after an IP lookup).
+    let user_country = crate::http::clientinfo::extract_user_country(&parts);
+    let user_city = crate::http::clientinfo::extract_user_city(&parts);
+    let user_region = crate::http::clientinfo::extract_user_region(&parts);
+    let user_timezone = crate::http::clientinfo::extract_user_timezone(&parts);
+
+    // GeoIP lookup (offline). Priority: user-supplied > CDN header > GeoIP DB.
     let geo = ip
         .as_deref()
         .and_then(|addr| state.geo.lookup(addr))
@@ -74,11 +82,11 @@ pub async fn auth_middleware(
     let client = ClientInfo {
         ip,
         user_agent,
-        // CDN country header wins if present; fall back to offline GeoIP.
-        country: proxy_country.or(geo.country),
+        country: user_country.or(cdn_country).or(geo.country),
         country_name: geo.country_name,
-        city: geo.city,
-        region: geo.region,
+        city: user_city.or(geo.city),
+        region: user_region.or(geo.region),
+        timezone: user_timezone,
         latitude: geo.latitude,
         longitude: geo.longitude,
     };
@@ -152,6 +160,7 @@ pub async fn auth_middleware(
             client.user_agent.as_deref(),
             client.country.as_deref(),
             client.city.as_deref(),
+            client.timezone.as_deref(),
         )
         .map_err(|e| ServerError::Db(e.to_string()))?
         {

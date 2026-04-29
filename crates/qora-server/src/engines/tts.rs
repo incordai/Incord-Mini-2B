@@ -238,6 +238,7 @@ impl TtsEngine for QoraTtsEngine {
                 language_id,
                 None, // voice_codes: no .codes file for HTTP path
                 Some(&voice_embedding),
+                None, // instruct: no instruction prefix
                 &TTSParams::default(),
                 None, // seed: non-deterministic by default
             );
