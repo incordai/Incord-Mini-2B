@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use qor4b::gemv::{HybridCache, ModelWeights, forward_decode, prefill, prefill_with_vision};
-use qor4b::tokenizer::QoraTokenizer;
+use qor4b::tokenizer::{QoraTokenizer, THINK_END, THINK_START};
 
 use crate::engine::chat::{ChatEngine, ChatEvent, ChatRequest, FinishReason};
 use crate::engine::{ModelEngine, Task};
@@ -200,6 +200,17 @@ impl ChatEngine for LlmEngine {
                 .as_nanos() as u64
                 | 1;
 
+            // Default: hide the model's internal <think>...</think> reasoning.
+            // Clients can opt in to seeing it via show_think: true.
+            //
+            // The format_chat prompt already contains `<think>\n` as a prefix when
+            // `think: true`, so generation starts INSIDE the think block. We must
+            // suppress from the very first sampled token until THINK_END is emitted.
+            // (Reference: qora-llm's generate.rs line 141, `in_think_block = params.think`.)
+            let think_mode = req.think.unwrap_or(true);
+            let show_think = req.show_think.unwrap_or(false);
+            let mut suppress = think_mode && !show_think;
+
             for _step in 0..max_new_tokens {
                 let token = sample_token(
                     &mut logits,
@@ -212,11 +223,26 @@ impl ChatEngine for LlmEngine {
                     &mut rng_state,
                 );
                 generated.push(token);
-                let text = tokenizer.decode(&[token]);
 
-                if sse_tx.blocking_send(ChatEvent::Token(token, text)).is_err() {
-                    let _ = sse_tx.blocking_send(ChatEvent::Finish(FinishReason::Cancelled));
-                    return Ok(());
+                // Decide whether to emit + update suppression for the next iteration.
+                let should_emit = if show_think {
+                    true
+                } else if token == THINK_START {
+                    suppress = true;
+                    false
+                } else if token == THINK_END {
+                    suppress = false;
+                    false
+                } else {
+                    !suppress
+                };
+
+                if should_emit {
+                    let text = tokenizer.decode(&[token]);
+                    if sse_tx.blocking_send(ChatEvent::Token(token, text)).is_err() {
+                        let _ = sse_tx.blocking_send(ChatEvent::Finish(FinishReason::Cancelled));
+                        return Ok(());
+                    }
                 }
 
                 if token == eos_token_id {

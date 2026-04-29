@@ -56,6 +56,11 @@ pub fn build_router(
             "/v1/admin/conversations/{id}",
             get(admin::get_conversation_admin_handler),
         )
+        .route("/v1/admin/guests", get(admin::list_guests_handler))
+        .route(
+            "/v1/admin/guests/{id}/messages",
+            get(admin::get_guest_messages_handler),
+        )
         .with_state(admin_full);
 
     // Merge both admin sub-routers and apply the admin_guard layer to both.

@@ -17,6 +17,9 @@ pub struct ChatRequest {
     /// QORA-specific extensions
     pub think: Option<bool>,
     pub think_budget: Option<u32>,
+    /// If true, include the model's <think>...</think> reasoning in the
+    /// streamed output. Default: false (hide thinking, show only the final answer).
+    pub show_think: Option<bool>,
     /// Optional pre-encoded vision embeddings (for chat-with-image flow).
     /// (embeds, num_vision_tokens). Set by the HTTP layer after
     /// running the vision encoder; the engine consumes them.

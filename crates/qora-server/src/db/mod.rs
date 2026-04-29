@@ -11,6 +11,7 @@
 //!   sessions:           session_token            -> bincode(Session)
 //!   guest_quotas:       guest_id                 -> bincode(GuestQuota)
 //!   email_to_user:      email                    -> user_id
+//!   guest_messages:     auto-inc u64             -> bincode(GuestMessage)
 //!
 //! Server secret comes from env at startup; never persisted.
 
@@ -46,6 +47,9 @@ pub const GUEST_QUOTAS: TableDefinition<&str, &[u8]> = TableDefinition::new("gue
 /// email_to_user: email → user_id (lookup by email at login)
 pub const EMAIL_TO_USER: TableDefinition<&str, &str> = TableDefinition::new("email_to_user");
 
+/// guest_messages: auto-inc id (u64) → bincode(GuestMessage)
+pub const GUEST_MESSAGES: TableDefinition<u64, &[u8]> = TableDefinition::new("guest_messages");
+
 /// Opens (or creates) the database file. Initializes the table set on first run.
 pub fn open(path: &Path) -> anyhow::Result<Arc<Database>> {
     let db = Database::create(path).with_context(|| format!("open redb at {}", path.display()))?;
@@ -63,6 +67,7 @@ pub fn open(path: &Path) -> anyhow::Result<Arc<Database>> {
         let _ = write.open_table(SESSIONS)?;
         let _ = write.open_table(GUEST_QUOTAS)?;
         let _ = write.open_table(EMAIL_TO_USER)?;
+        let _ = write.open_table(GUEST_MESSAGES)?;
     }
     write.commit()?;
     Ok(Arc::new(db))

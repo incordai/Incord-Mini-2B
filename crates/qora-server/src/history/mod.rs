@@ -23,5 +23,6 @@ pub struct StoredMessage {
     pub embedding: Option<Vec<f32>>,
 }
 
+pub mod guest;
 pub mod retrieve;
 pub mod store;
