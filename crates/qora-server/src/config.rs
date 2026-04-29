@@ -18,6 +18,9 @@ pub struct ServerConfig {
     /// Chat history persistence settings.
     #[serde(default)]
     pub history: HistoryConfig,
+    /// Per-tier rate limits and guest quotas.
+    #[serde(default)]
+    pub tiers: TierConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -120,6 +123,43 @@ fn default_top_k() -> usize {
 }
 fn default_max_chars() -> usize {
     4000
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TierConfig {
+    #[serde(default)]
+    pub anonymous: AnonymousTier,
+    #[serde(default)]
+    pub free: PerKeyLimits,
+    #[serde(default)]
+    pub paid: PerKeyLimits,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnonymousTier {
+    #[serde(default = "default_max_msg")]
+    pub max_messages_per_guest: u32,
+}
+
+impl Default for AnonymousTier {
+    fn default() -> Self {
+        Self {
+            max_messages_per_guest: 10,
+        }
+    }
+}
+
+fn default_max_msg() -> u32 {
+    10
+}
+
+impl Default for PerKeyLimits {
+    fn default() -> Self {
+        Self {
+            rpm: 60,
+            tpm: 60_000,
+        }
+    }
 }
 
 impl ServerConfig {

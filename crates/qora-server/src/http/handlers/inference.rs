@@ -18,7 +18,7 @@ use crate::api::openai::response::{
     ChatCompletionChunk, ChatCompletionResponse, Choice, ChunkChoice, ChunkDelta, ResponseMessage,
     Usage,
 };
-use crate::auth::keys::ApiKey;
+use crate::auth::middleware::AuthIdentity;
 use crate::engine::Task;
 use crate::engine::chat::{ChatEvent, ChatMessage, ChatRequest, FinishReason};
 use crate::engine::embed::EmbedRequest as EngineEmbedRequest;
@@ -93,7 +93,7 @@ pub async fn unified_inference(
 /// Also supports conversation_id + use_history for RAG-style context injection from chat history.
 pub async fn openai_chat_completions(
     State(state): State<Arc<InferenceState>>,
-    Extension(key): Extension<ApiKey>,
+    Extension(identity): Extension<AuthIdentity>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, ServerError> {
     if !state.registry.contains(&req.model) {
@@ -167,7 +167,12 @@ pub async fn openai_chat_completions(
     // find top-K relevant prior messages, and prepend them as system context.
     // -----------------------------------------------------------------------
     let conversation_id = req.conversation_id.clone();
-    let user_id = key.user_id.clone();
+    // Derive a stable user_id from whichever identity path was used.
+    let user_id = match &identity {
+        AuthIdentity::ApiKey { key } => key.user_id.clone(),
+        AuthIdentity::User { user } => user.id.clone(),
+        AuthIdentity::Guest { guest_id, .. } => guest_id.clone(),
+    };
 
     // History injection — all early-exit conditions checked up front so nesting stays flat.
     'history: {

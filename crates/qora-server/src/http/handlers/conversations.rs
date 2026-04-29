@@ -10,10 +10,19 @@ use axum::{
 use serde::Serialize;
 use serde_json::json;
 
-use crate::auth::keys::ApiKey;
+use crate::auth::middleware::AuthIdentity;
 use crate::error::ServerError;
 use crate::history::{retrieve, store};
 use crate::http::handlers::inference::InferenceState;
+
+/// Derive a stable user_id string from any AuthIdentity.
+fn user_id_from_identity(identity: &AuthIdentity) -> String {
+    match identity {
+        AuthIdentity::ApiKey { key } => key.user_id.clone(),
+        AuthIdentity::User { user } => user.id.clone(),
+        AuthIdentity::Guest { guest_id, .. } => guest_id.clone(),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // POST /v1/conversations — create a new conversation
@@ -32,10 +41,11 @@ pub struct CreateConvResponse {
 
 pub async fn create_conversation_handler(
     State(state): State<Arc<InferenceState>>,
-    Extension(key): Extension<ApiKey>,
+    Extension(identity): Extension<AuthIdentity>,
     Json(req): Json<CreateConvRequest>,
 ) -> Result<Json<CreateConvResponse>, ServerError> {
-    let conv = store::create_conversation(&state.history_db, &key.user_id, req.title)
+    let user_id = user_id_from_identity(&identity);
+    let conv = store::create_conversation(&state.history_db, &user_id, req.title)
         .map_err(|e| ServerError::Db(e.to_string()))?;
     Ok(Json(CreateConvResponse {
         id: conv.id,
@@ -49,9 +59,10 @@ pub async fn create_conversation_handler(
 
 pub async fn list_conversations_handler(
     State(state): State<Arc<InferenceState>>,
-    Extension(key): Extension<ApiKey>,
+    Extension(identity): Extension<AuthIdentity>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
-    let convs = retrieve::list_user_conversations(&state.history_db, &key.user_id)
+    let user_id = user_id_from_identity(&identity);
+    let convs = retrieve::list_user_conversations(&state.history_db, &user_id)
         .map_err(|e| ServerError::Db(e.to_string()))?;
     Ok(Json(json!({
         "object": "list",
@@ -65,14 +76,15 @@ pub async fn list_conversations_handler(
 
 pub async fn get_conversation_handler(
     State(state): State<Arc<InferenceState>>,
-    Extension(key): Extension<ApiKey>,
+    Extension(identity): Extension<AuthIdentity>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
-    let conv = retrieve::get_conversation(&state.history_db, &id, &key.user_id)
+    let user_id = user_id_from_identity(&identity);
+    let conv = retrieve::get_conversation(&state.history_db, &id, &user_id)
         .map_err(|e| ServerError::Db(e.to_string()))?
         .ok_or_else(|| ServerError::BadRequest("conversation not found".into()))?;
 
-    let msgs = retrieve::get_messages(&state.history_db, &id, &key.user_id)
+    let msgs = retrieve::get_messages(&state.history_db, &id, &user_id)
         .map_err(|e| ServerError::Db(e.to_string()))?;
 
     Ok(Json(json!({
@@ -95,14 +107,15 @@ pub async fn get_conversation_handler(
 
 pub async fn export_conversation_handler(
     State(state): State<Arc<InferenceState>>,
-    Extension(key): Extension<ApiKey>,
+    Extension(identity): Extension<AuthIdentity>,
     Path(id): Path<String>,
 ) -> Result<axum::response::Response, ServerError> {
-    let conv = retrieve::get_conversation(&state.history_db, &id, &key.user_id)
+    let user_id = user_id_from_identity(&identity);
+    let conv = retrieve::get_conversation(&state.history_db, &id, &user_id)
         .map_err(|e| ServerError::Db(e.to_string()))?
         .ok_or_else(|| ServerError::BadRequest("conversation not found".into()))?;
 
-    let msgs = retrieve::get_messages(&state.history_db, &id, &key.user_id)
+    let msgs = retrieve::get_messages(&state.history_db, &id, &user_id)
         .map_err(|e| ServerError::Db(e.to_string()))?;
 
     // Export full data INCLUDING embeddings
@@ -142,18 +155,19 @@ pub async fn export_conversation_handler(
 
 pub async fn delete_conversation_handler(
     State(state): State<Arc<InferenceState>>,
-    Extension(key): Extension<ApiKey>,
+    Extension(identity): Extension<AuthIdentity>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ServerError> {
+    let user_id = user_id_from_identity(&identity);
     // Pre-check: verify existence + ownership (returns None for both not-found and wrong owner).
-    let conv = retrieve::get_conversation(&state.history_db, &id, &key.user_id)
+    let conv = retrieve::get_conversation(&state.history_db, &id, &user_id)
         .map_err(|e| ServerError::Db(e.to_string()))?;
     if conv.is_none() {
         return Err(ServerError::BadRequest("conversation not found".into()));
     }
 
     // Now delete — ownership is already verified above, so bail! won't fire.
-    let existed = store::delete_conversation(&state.history_db, &id, &key.user_id)
+    let existed = store::delete_conversation(&state.history_db, &id, &user_id)
         .map_err(|e| ServerError::Db(e.to_string()))?;
     if !existed {
         return Err(ServerError::BadRequest("conversation not found".into()));

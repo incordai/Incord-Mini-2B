@@ -32,6 +32,7 @@ fn build_empty_app() -> (axum::Router, TempDir) {
         db: db.clone(),
         server_secret: Arc::new(TEST_SECRET.to_vec()),
         limiter: RateLimiter::new(),
+        tiers: Default::default(),
     });
     let admin_state = Arc::new(AdminState {
         admin_token: TEST_ADMIN_TOKEN.to_string(),

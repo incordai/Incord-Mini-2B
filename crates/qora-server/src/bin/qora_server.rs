@@ -42,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         server_secret: Arc::new(server_secret),
         limiter: RateLimiter::new(),
+        tiers: config.tiers.clone(),
     });
     let admin_state = Arc::new(AdminState { admin_token });
 

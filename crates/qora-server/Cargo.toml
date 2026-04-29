@@ -95,3 +95,8 @@ required-features = ["mock-weights"]
 name = "admin_endpoints"
 path = "tests/admin_endpoints.rs"
 required-features = ["mock-weights"]
+
+[[test]]
+name = "tiered_auth"
+path = "tests/tiered_auth.rs"
+required-features = ["mock-weights"]
