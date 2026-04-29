@@ -1,8 +1,10 @@
 use axum::{
     Router, middleware as axum_mw,
     routing::{delete, get, post},
+    http::{Method, header},
 };
 use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::auth::admin::{AdminState, admin_guard};
 use crate::auth::middleware::{AuthState, auth_middleware};
@@ -16,6 +18,23 @@ pub fn build_router(
     auth: Arc<AuthState>,
     admin_state: Arc<AdminState>,
 ) -> Router {
+    // CORS layer for local development — allow_origin(Any) is intentionally
+    // permissive so the admin UI (localhost:5173) and chat UI (localhost:5174)
+    // can reach the server without separate proxy config.
+    //
+    // NOTE: This is dev-only permissiveness. In production the actual security
+    // boundary is enforced by auth_middleware (Bearer token check on every
+    // protected route); a load balancer or reverse proxy can additionally
+    // restrict origins. Leaving Any here does not weaken auth.
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+        ])
+        .expose_headers([header::CONTENT_DISPOSITION]);
     // Build combined state for handlers that need both auth DB and inference/registry/history.
     let admin_full = Arc::new(AdminFullState {
         auth: auth.clone(),
@@ -106,4 +125,6 @@ pub fn build_router(
         .merge(inference_routes)
         .merge(history_routes)
         .layer(axum_mw::from_fn(request_id_middleware))
+        // CORS layer is outermost so it wraps every route including OPTIONS pre-flight
+        .layer(cors)
 }
