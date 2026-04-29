@@ -1,4 +1,4 @@
-//! redb-backed persistence: API keys + usage records + chat history.
+//! redb-backed persistence: API keys + usage records + chat history + users + sessions + guests.
 //!
 //! Tables:
 //!   keys_by_id:         key_id (UUID str)        -> bincode(StoredKey)
@@ -7,6 +7,10 @@
 //!   conversations:      conv_id (UUID str)       -> bincode(Conversation)
 //!   messages:           (conv_id || u64 big-endian idx) -> bincode(StoredMessage)
 //!   user_conversations: user_id                  -> multimap(conv_id)
+//!   users:              user_id (UUID str)       -> bincode(StoredUser)
+//!   sessions:           session_token            -> bincode(Session)
+//!   guest_quotas:       guest_id                 -> bincode(GuestQuota)
+//!   email_to_user:      email                    -> user_id
 //!
 //! Server secret comes from env at startup; never persisted.
 
@@ -30,6 +34,18 @@ pub const MESSAGES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("messag
 pub const USER_CONVERSATIONS: MultimapTableDefinition<&str, &str> =
     MultimapTableDefinition::new("user_conversations");
 
+/// users: user_id (UUID str) → bincode(StoredUser)
+pub const USERS: TableDefinition<&str, &[u8]> = TableDefinition::new("users");
+
+/// sessions: session_token → bincode(Session)
+pub const SESSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("sessions");
+
+/// guest_quotas: guest_id → bincode(GuestQuota)
+pub const GUEST_QUOTAS: TableDefinition<&str, &[u8]> = TableDefinition::new("guest_quotas");
+
+/// email_to_user: email → user_id (lookup by email at login)
+pub const EMAIL_TO_USER: TableDefinition<&str, &str> = TableDefinition::new("email_to_user");
+
 /// Opens (or creates) the database file. Initializes the table set on first run.
 pub fn open(path: &Path) -> anyhow::Result<Arc<Database>> {
     let db = Database::create(path).with_context(|| format!("open redb at {}", path.display()))?;
@@ -43,6 +59,10 @@ pub fn open(path: &Path) -> anyhow::Result<Arc<Database>> {
         let _ = write.open_table(CONVERSATIONS)?;
         let _ = write.open_table(MESSAGES)?;
         let _ = write.open_multimap_table(USER_CONVERSATIONS)?;
+        let _ = write.open_table(USERS)?;
+        let _ = write.open_table(SESSIONS)?;
+        let _ = write.open_table(GUEST_QUOTAS)?;
+        let _ = write.open_table(EMAIL_TO_USER)?;
     }
     write.commit()?;
     Ok(Arc::new(db))

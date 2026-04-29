@@ -11,6 +11,8 @@ pub enum ServerError {
     BadRequest(String),
     #[error("authentication failed")]
     Unauthorized,
+    #[error("payment required: {message}")]
+    PaymentRequired { message: String },
     #[error("rate limit exceeded")]
     RateLimited { retry_after_secs: u64 },
     #[error("server queue full")]
@@ -34,6 +36,11 @@ impl IntoResponse for ServerError {
                 StatusCode::UNAUTHORIZED,
                 "authentication_error",
                 self.to_string(),
+            ),
+            Self::PaymentRequired { message } => (
+                StatusCode::PAYMENT_REQUIRED,
+                "quota_exceeded",
+                message.clone(),
             ),
             Self::RateLimited { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
