@@ -232,6 +232,15 @@ pub async fn openai_chat_completions(
         }
     }
 
+    // Inject geo context as a system message so the model knows where the user is.
+    // Prepended before any history-injected context; only when at least one field is present.
+    if let Some(geo_ctx) = build_geo_context(&client) {
+        messages.insert(0, ChatMessage {
+            role: "system".to_string(),
+            content: geo_ctx,
+        });
+    }
+
     // Snapshot of user-role messages for history persistence.
     let user_messages_snapshot: Vec<ChatMessage> = messages
         .iter()
@@ -897,6 +906,37 @@ pub async fn custom_rerank(
         show_think: None,
     };
     handle_rerank(state, inference_req).await
+}
+
+// ---------------------------------------------------------------------------
+// Geo context helpers
+// ---------------------------------------------------------------------------
+
+/// Build a system-message string that tells the AI where the user is located.
+/// Returns `None` when no geo fields are present (avoids injecting an empty prefix).
+fn build_geo_context(client: &ClientInfo) -> Option<String> {
+    let parts: Vec<String> = [
+        client.city.as_deref(),
+        client.region.as_deref(),
+        client.country_name.as_deref().or(client.country.as_deref()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(String::from)
+    .collect();
+
+    if parts.is_empty() && client.timezone.is_none() {
+        return None;
+    }
+
+    let mut s = String::from("[Context for assistant]\n");
+    if !parts.is_empty() {
+        s.push_str(&format!("User location: {}\n", parts.join(", ")));
+    }
+    if let Some(tz) = &client.timezone {
+        s.push_str(&format!("User timezone: {tz}\n"));
+    }
+    Some(s)
 }
 
 // ---------------------------------------------------------------------------

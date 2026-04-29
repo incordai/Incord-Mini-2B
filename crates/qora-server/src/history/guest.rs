@@ -30,6 +30,9 @@ pub struct GuestMessage {
     /// City name. None when no geo data available.
     #[serde(default)]
     pub city: Option<String>,
+    /// IANA timezone, e.g. "America/New_York". None when not supplied by client.
+    #[serde(default)]
+    pub timezone: Option<String>,
     pub timestamp: i64,
 }
 
@@ -63,6 +66,7 @@ pub fn append(
             user_agent: client.user_agent.clone(),
             country: client.country.clone(),
             city: client.city.clone(),
+            timezone: client.timezone.clone(),
             timestamp: now,
         };
         let bytes = bincode::serde::encode_to_vec(&msg, BINCODE_CFG)?;
@@ -110,6 +114,7 @@ pub struct GuestSummary {
     pub last_ip: Option<String>,
     pub last_country: Option<String>,
     pub last_city: Option<String>,
+    pub last_timezone: Option<String>,
     pub last_user_agent: Option<String>,
 }
 
@@ -135,6 +140,7 @@ pub fn list_all_guests(db: &Arc<Database>) -> anyhow::Result<HashMap<String, Gue
             last_ip: m.ip.clone(),
             last_country: m.country.clone(),
             last_city: m.city.clone(),
+            last_timezone: m.timezone.clone(),
             last_user_agent: m.user_agent.clone(),
         });
         s.message_count += 1;
@@ -146,6 +152,7 @@ pub fn list_all_guests(db: &Arc<Database>) -> anyhow::Result<HashMap<String, Gue
             s.last_ip = m.ip.clone();
             s.last_country = m.country.clone();
             s.last_city = m.city.clone();
+            s.last_timezone = m.timezone.clone();
             s.last_user_agent = m.user_agent.clone();
         }
     }

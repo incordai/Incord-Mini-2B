@@ -33,8 +33,12 @@ pub struct GuestQuota {
     /// City name from the most recent request.
     #[serde(default)]
     pub last_city: Option<String>,
+    /// IANA timezone from the most recent request, e.g. "America/New_York".
+    #[serde(default)]
+    pub last_timezone: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn check_and_increment(
     db: &Arc<Database>,
     guest_id: &str,
@@ -43,6 +47,7 @@ pub fn check_and_increment(
     user_agent: Option<&str>,
     country: Option<&str>,
     city: Option<&str>,
+    timezone: Option<&str>,
 ) -> anyhow::Result<Result<GuestQuota, GuestQuota>> {
     let now = Utc::now().timestamp();
     let write = db.begin_write()?;
@@ -67,6 +72,7 @@ pub fn check_and_increment(
         last_user_agent: None,
         last_country: None,
         last_city: None,
+        last_timezone: None,
     });
 
     if quota.msg_count >= max_messages {
@@ -81,6 +87,7 @@ pub fn check_and_increment(
     quota.last_user_agent = user_agent.map(|s| s.to_string()).or(quota.last_user_agent);
     quota.last_country = country.map(|s| s.to_string()).or(quota.last_country);
     quota.last_city = city.map(|s| s.to_string()).or(quota.last_city);
+    quota.last_timezone = timezone.map(|s| s.to_string()).or(quota.last_timezone);
 
     let bytes = bincode::serde::encode_to_vec(&quota, BINCODE_CFG)?;
     {
@@ -124,23 +131,23 @@ mod tests {
         // max = 3
         for i in 1..=3 {
             let result =
-                check_and_increment(&db, "guest-1", 3, None, None, None, None).unwrap();
+                check_and_increment(&db, "guest-1", 3, None, None, None, None, None).unwrap();
             let quota = result.expect("should succeed under limit");
             assert_eq!(quota.msg_count, i);
         }
         // 4th should fail
-        let result = check_and_increment(&db, "guest-1", 3, None, None, None, None).unwrap();
+        let result = check_and_increment(&db, "guest-1", 3, None, None, None, None, None).unwrap();
         assert!(result.is_err(), "4th message should exceed quota");
     }
 
     #[test]
     fn separate_guests_independent() {
         let db = fresh_db();
-        check_and_increment(&db, "guest-a", 1, None, None, None, None)
+        check_and_increment(&db, "guest-a", 1, None, None, None, None, None)
             .unwrap()
             .unwrap();
         // guest-a is now at max=1; guest-b should still work
-        let result = check_and_increment(&db, "guest-b", 1, None, None, None, None).unwrap();
+        let result = check_and_increment(&db, "guest-b", 1, None, None, None, None, None).unwrap();
         assert!(result.is_ok());
     }
 
@@ -155,6 +162,7 @@ mod tests {
             Some("TestBrowser/1.0"),
             Some("US"),
             Some("New York"),
+            Some("America/New_York"),
         )
         .unwrap()
         .unwrap();
@@ -162,10 +170,11 @@ mod tests {
         assert_eq!(result.last_user_agent.as_deref(), Some("TestBrowser/1.0"));
         assert_eq!(result.last_country.as_deref(), Some("US"));
         assert_eq!(result.last_city.as_deref(), Some("New York"));
+        assert_eq!(result.last_timezone.as_deref(), Some("America/New_York"));
 
-        // Second call updates IP + country; UA and city kept if absent
+        // Second call updates IP + country; UA, city, timezone kept if absent
         let result2 =
-            check_and_increment(&db, "guest-ip", 10, Some("5.6.7.8"), None, Some("GB"), None)
+            check_and_increment(&db, "guest-ip", 10, Some("5.6.7.8"), None, Some("GB"), None, None)
                 .unwrap()
                 .unwrap();
         assert_eq!(result2.last_ip.as_deref(), Some("5.6.7.8"));
@@ -174,5 +183,7 @@ mod tests {
         assert_eq!(result2.last_country.as_deref(), Some("GB"));
         // City kept from first call
         assert_eq!(result2.last_city.as_deref(), Some("New York"));
+        // Timezone kept from first call
+        assert_eq!(result2.last_timezone.as_deref(), Some("America/New_York"));
     }
 }
