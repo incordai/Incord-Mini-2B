@@ -18,7 +18,7 @@ use crate::api::openai::response::{
     ChatCompletionChunk, ChatCompletionResponse, Choice, ChunkChoice, ChunkDelta, ResponseMessage,
     Usage,
 };
-use crate::auth::middleware::AuthIdentity;
+use crate::auth::middleware::{AuthIdentity, ClientInfo};
 use crate::engine::Task;
 use crate::engine::chat::{ChatEvent, ChatMessage, ChatRequest, FinishReason};
 use crate::engine::embed::EmbedRequest as EngineEmbedRequest;
@@ -94,6 +94,7 @@ pub async fn unified_inference(
 pub async fn openai_chat_completions(
     State(state): State<Arc<InferenceState>>,
     Extension(identity): Extension<AuthIdentity>,
+    Extension(client): Extension<ClientInfo>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, ServerError> {
     if !state.registry.contains(&req.model) {
@@ -260,6 +261,7 @@ pub async fn openai_chat_completions(
         stream,
         think: req.think,
         think_budget: req.think_budget,
+        show_think: req.show_think,
     };
 
     // When a conversation_id is set and non-stream: run chat inline so we can
@@ -294,6 +296,7 @@ pub async fn openai_chat_completions(
                 stream: false,
                 think: inference_req.think,
                 think_budget: inference_req.think_budget,
+                show_think: inference_req.show_think,
                 vision_embeds,
             };
             let (tx, rx) = mpsc::channel::<ChatEvent>(64);
@@ -320,10 +323,88 @@ pub async fn openai_chat_completions(
                 None,
             );
 
+            // Persist guest messages for admin visibility (non-stream path).
+            if let AuthIdentity::Guest { guest_id, .. } = &identity {
+                let user_content = user_messages_snapshot
+                    .first()
+                    .map(|m| m.content.as_str())
+                    .unwrap_or("");
+                let _ = crate::history::guest::append(
+                    &state.history_db,
+                    guest_id,
+                    "user",
+                    user_content,
+                    &client,
+                );
+                let _ = crate::history::guest::append(
+                    &state.history_db,
+                    guest_id,
+                    "assistant",
+                    &assistant_content,
+                    &client,
+                );
+            }
+
             return Ok(json_resp.into_response());
         }
         // Stream with conversation_id: user messages already persisted above.
         // TODO M17.x: wrap stream to accumulate tokens and persist assistant on [DONE].
+    } else if !stream {
+        // No conversation_id — guest messages still need to be persisted (non-stream only).
+        // For stream without conversation_id: TODO persist on [DONE].
+        if let AuthIdentity::Guest { guest_id, .. } = &identity {
+            let chat_engine = state.registry.get_chat(&model_name).ok_or_else(|| {
+                ServerError::BadRequest(format!("model `{}` is not a chat model", model_name))
+            })?;
+            let max_tokens = inference_req.max_tokens.unwrap_or(1024);
+            let chat_req = ChatRequest {
+                model: inference_req.model.clone(),
+                messages: inference_req.messages.clone(),
+                max_tokens: inference_req.max_tokens,
+                temperature: inference_req.temperature,
+                top_p: inference_req.top_p,
+                stream: false,
+                think: inference_req.think,
+                think_budget: inference_req.think_budget,
+                show_think: inference_req.show_think,
+                vision_embeds,
+            };
+            let (tx, rx) = mpsc::channel::<ChatEvent>(64);
+            let engine_clone = chat_engine.clone();
+            tokio::spawn(async move {
+                let _ = engine_clone.chat(chat_req, tx).await;
+            });
+
+            let json_resp = non_stream_response(model_name.clone(), max_tokens, rx).await?;
+            let assistant_content = json_resp
+                .0
+                .choices
+                .first()
+                .map(|c| c.message.content.clone())
+                .unwrap_or_default();
+
+            let user_content = user_messages_snapshot
+                .first()
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+            let _ = crate::history::guest::append(
+                &state.history_db,
+                guest_id,
+                "user",
+                user_content,
+                &client,
+            );
+            let _ = crate::history::guest::append(
+                &state.history_db,
+                guest_id,
+                "assistant",
+                &assistant_content,
+                &client,
+            );
+            // TODO M21.x: persist streamed assistant response for guests
+
+            return Ok(json_resp.into_response());
+        }
     }
 
     handle_chat_with_vision(state, inference_req, vision_embeds).await
@@ -459,6 +540,7 @@ pub async fn openai_audio_speech(
         stream: false,
         think: None,
         think_budget: None,
+        show_think: None,
     };
 
     if !state.registry.contains(&inference_req.model) {
@@ -588,6 +670,7 @@ pub async fn openai_audio_transcriptions(
         stream: false,
         think: None,
         think_budget: None,
+        show_think: None,
     };
 
     handle_stt(state, inference_req).await
@@ -718,6 +801,7 @@ pub async fn openai_embeddings(
         stream: false,
         think: None,
         think_budget: None,
+        show_think: None,
     };
     handle_embed(state, inference_req).await
 }
@@ -810,6 +894,7 @@ pub async fn custom_rerank(
         stream: false,
         think: None,
         think_budget: None,
+        show_think: None,
     };
     handle_rerank(state, inference_req).await
 }
@@ -855,6 +940,7 @@ async fn handle_chat_with_vision(
         stream: req.stream,
         think: req.think,
         think_budget: req.think_budget,
+        show_think: req.show_think,
         vision_embeds,
     };
 

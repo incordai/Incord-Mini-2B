@@ -17,6 +17,8 @@ pub struct AuthState {
     pub server_secret: Arc<Vec<u8>>,
     pub limiter: RateLimiter,
     pub tiers: crate::config::TierConfig,
+    /// Offline GeoIP database. GeoDb::empty() when no .mmdb file is configured.
+    pub geo: crate::geoip::GeoDb,
 }
 
 /// The resolved identity of a request — inserted as an Axum extension.
@@ -34,11 +36,55 @@ pub enum AuthIdentity {
     },
 }
 
+/// IP, User-Agent, and geo data extracted from the incoming request.
+/// Set as an Axum extension before identity resolution so all downstream
+/// handlers can access it without re-parsing headers.
+#[derive(Debug, Clone, Default)]
+pub struct ClientInfo {
+    pub ip: Option<String>,
+    pub user_agent: Option<String>,
+    /// ISO 3166-1 alpha-2 country code, e.g. "US".
+    /// Sourced from: CDN header (CF-IPCountry) → offline GeoIP lookup → None.
+    pub country: Option<String>,
+    pub country_name: Option<String>,
+    pub city: Option<String>,
+    pub region: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+}
+
 pub async fn auth_middleware(
     State(state): State<Arc<AuthState>>,
-    mut req: Request,
+    req: Request,
     next: Next,
 ) -> Result<Response, ServerError> {
+    // Capture client IP + UA + geo BEFORE consuming the request into parts.
+    // Deconstruct into Parts so we can pass them to the clientinfo helpers,
+    // then reconstruct before resolving identity.
+    let (parts, body) = req.into_parts();
+    let ip = crate::http::clientinfo::extract_client_ip(&parts);
+    let user_agent = crate::http::clientinfo::extract_user_agent(&parts);
+    let proxy_country = crate::http::clientinfo::extract_proxy_country(&parts);
+
+    // GeoIP lookup (offline). CDN-supplied country takes precedence over GeoIP result.
+    let geo = ip
+        .as_deref()
+        .and_then(|addr| state.geo.lookup(addr))
+        .unwrap_or_default();
+    let client = ClientInfo {
+        ip,
+        user_agent,
+        // CDN country header wins if present; fall back to offline GeoIP.
+        country: proxy_country.or(geo.country),
+        country_name: geo.country_name,
+        city: geo.city,
+        region: geo.region,
+        latitude: geo.latitude,
+        longitude: geo.longitude,
+    };
+    let mut req = Request::from_parts(parts, body);
+    req.extensions_mut().insert(client.clone());
+
     let auth_header = req
         .headers()
         .get(AUTHORIZATION)
@@ -96,10 +142,18 @@ pub async fn auth_middleware(
             return Err(ServerError::Unauthorized);
         }
     } else if let Some(guest_id) = guest_header {
-        // Guest path — check + increment quota
+        // Guest path — check + increment quota, recording client IP + UA
         let max = state.tiers.anonymous.max_messages_per_guest;
-        match crate::auth::guest::check_and_increment(&state.db, &guest_id, max)
-            .map_err(|e| ServerError::Db(e.to_string()))?
+        match crate::auth::guest::check_and_increment(
+            &state.db,
+            &guest_id,
+            max,
+            client.ip.as_deref(),
+            client.user_agent.as_deref(),
+            client.country.as_deref(),
+            client.city.as_deref(),
+        )
+        .map_err(|e| ServerError::Db(e.to_string()))?
         {
             Ok(q) => AuthIdentity::Guest {
                 guest_id,

@@ -68,6 +68,7 @@ fn build_test_app_with_guest_limit(max_msg: u32) -> (axum::Router, TempDir) {
         server_secret: Arc::new(TEST_SECRET.to_vec()),
         limiter: RateLimiter::new(),
         tiers,
+        geo: qora_server::geoip::GeoDb::empty(),
     });
     let admin_state = Arc::new(AdminState {
         admin_token: TEST_ADMIN_TOKEN.to_string(),

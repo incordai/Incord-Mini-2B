@@ -21,6 +21,9 @@ pub struct ServerConfig {
     /// Per-tier rate limits and guest quotas.
     #[serde(default)]
     pub tiers: TierConfig,
+    /// Optional offline GeoIP database.
+    #[serde(default)]
+    pub geoip: GeoIpConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -123,6 +126,15 @@ fn default_top_k() -> usize {
 }
 fn default_max_chars() -> usize {
     4000
+}
+
+/// Optional offline GeoIP database configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct GeoIpConfig {
+    /// Path to a MaxMind GeoLite2 .mmdb file (City or Country edition).
+    /// If absent, geolocation is skipped and CDN headers (CF-IPCountry) are
+    /// used when present. The server starts successfully without this file.
+    pub db_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

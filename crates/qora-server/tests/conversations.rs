@@ -60,6 +60,7 @@ fn build_test_app() -> (axum::Router, TempDir) {
         server_secret: Arc::new(TEST_SECRET.to_vec()),
         limiter: RateLimiter::new(),
         tiers: Default::default(),
+        geo: qora_server::geoip::GeoDb::empty(),
     });
     let admin_state = Arc::new(AdminState {
         admin_token: TEST_ADMIN_TOKEN.to_string(),

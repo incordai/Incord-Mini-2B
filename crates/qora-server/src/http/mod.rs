@@ -1,3 +1,4 @@
+pub mod clientinfo;
 pub mod handlers;
 pub mod middleware;
 pub mod router;

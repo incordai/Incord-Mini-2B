@@ -54,4 +54,8 @@ pub struct InferenceRequest {
     pub think: Option<bool>,
     #[serde(default)]
     pub think_budget: Option<u32>,
+    /// If true, include the model's <think>...</think> reasoning in output.
+    /// Default: false (hide thinking, return only the final answer).
+    #[serde(default)]
+    pub show_think: Option<bool>,
 }

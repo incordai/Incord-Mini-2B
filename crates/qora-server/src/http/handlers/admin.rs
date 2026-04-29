@@ -421,6 +421,31 @@ pub async fn list_all_conversations_handler(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// A-guest. GET /v1/admin/guests + GET /v1/admin/guests/{id}/messages
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub async fn list_guests_handler(
+    State(state): State<Arc<AdminFullState>>,
+) -> Result<Json<serde_json::Value>, ServerError> {
+    let summaries = crate::history::guest::list_all_guests(&state.inference.history_db)
+        .map_err(|e| ServerError::Db(e.to_string()))?;
+    let mut data: Vec<_> = summaries.into_values().collect();
+    // Most-recently-active first.
+    data.sort_by(|a, b| b.last_at.cmp(&a.last_at));
+    Ok(Json(json!({ "object": "list", "data": data })))
+}
+
+pub async fn get_guest_messages_handler(
+    State(state): State<Arc<AdminFullState>>,
+    Path(guest_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ServerError> {
+    let msgs =
+        crate::history::guest::list_for_guest(&state.inference.history_db, &guest_id, 1000)
+            .map_err(|e| ServerError::Db(e.to_string()))?;
+    Ok(Json(json!({ "object": "list", "data": msgs })))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // A7. GET /v1/admin/conversations/{id} — full conversation detail (admin override)
 // ─────────────────────────────────────────────────────────────────────────────
 

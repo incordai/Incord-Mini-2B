@@ -63,6 +63,7 @@ fn build_test_app() -> (axum::Router, TempDir) {
         server_secret: Arc::new(TEST_SECRET.to_vec()),
         limiter: RateLimiter::new(),
         tiers: Default::default(),
+        geo: qora_server::geoip::GeoDb::empty(),
     });
     let admin_state = Arc::new(AdminState {
         admin_token: TEST_ADMIN_TOKEN.to_string(),
@@ -495,4 +496,148 @@ async fn admin_conversations_list_and_get() {
     assert_eq!(detail["id"], conv_id);
     assert_eq!(detail["title"], "admin test conv");
     assert!(detail["messages"].is_array());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 8: Admin can list guests and see IP
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn admin_can_list_guests() {
+    let (app, _dir) = build_test_app();
+
+    // Send a chat as a guest with X-Forwarded-For
+    let chat_body = json!({
+        "model": "admin-test-llm",
+        "messages": [{"role": "user", "content": "hello from guest"}],
+        "max_tokens": 2,
+        "temperature": 0.0
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-guest-id", "guest-m21-list")
+                .header("x-forwarded-for", "1.2.3.4")
+                .body(Body::from(chat_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "guest chat should succeed");
+
+    // GET /v1/admin/guests
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/admin/guests")
+                .header("authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["object"], "list");
+    let data = body["data"].as_array().expect("data should be array");
+
+    let guest = data
+        .iter()
+        .find(|g| g["guest_id"] == "guest-m21-list")
+        .expect("guest-m21-list should appear in list");
+    assert!(
+        guest["message_count"].as_u64().unwrap() >= 2,
+        "should have at least 2 messages (user + assistant)"
+    );
+    assert_eq!(
+        guest["last_ip"].as_str().unwrap_or(""),
+        "1.2.3.4",
+        "last_ip should be 1.2.3.4 from X-Forwarded-For"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 9: Admin can view guest messages
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn admin_can_view_guest_messages() {
+    let (app, _dir) = build_test_app();
+
+    // Send a chat as guest
+    let chat_body = json!({
+        "model": "admin-test-llm",
+        "messages": [{"role": "user", "content": "guest message content"}],
+        "max_tokens": 2,
+        "temperature": 0.0
+    });
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("x-guest-id", "guest-m21-msgs")
+                .header("x-forwarded-for", "9.8.7.6")
+                .body(Body::from(chat_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "guest chat should succeed");
+
+    // GET /v1/admin/guests/guest-m21-msgs/messages
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/admin/guests/guest-m21-msgs/messages")
+                .header("authorization", format!("Bearer {TEST_ADMIN_TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["object"], "list");
+    let msgs = body["data"].as_array().expect("data should be array");
+
+    assert!(
+        msgs.len() >= 2,
+        "should have at least 2 messages (user + assistant), got {}",
+        msgs.len()
+    );
+
+    // Verify user message
+    let user_msg = msgs
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("should have a user message");
+    assert_eq!(user_msg["content"], "guest message content");
+    assert_eq!(user_msg["ip"].as_str().unwrap_or(""), "9.8.7.6");
+    assert_eq!(user_msg["guest_id"], "guest-m21-msgs");
+
+    // Verify assistant message
+    let asst_msg = msgs
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("should have an assistant message");
+    assert_eq!(asst_msg["guest_id"], "guest-m21-msgs");
 }

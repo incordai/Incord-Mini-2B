@@ -38,11 +38,15 @@ async fn main() -> anyhow::Result<()> {
         )
     })?;
 
+    // GeoIP database (optional — graceful if absent)
+    let geo = qora_server::geoip::GeoDb::try_load(config.geoip.db_path.as_deref());
+
     let auth = Arc::new(AuthState {
         db,
         server_secret: Arc::new(server_secret),
         limiter: RateLimiter::new(),
         tiers: config.tiers.clone(),
+        geo,
     });
     let admin_state = Arc::new(AdminState { admin_token });
 
