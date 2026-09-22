@@ -52,6 +52,13 @@ pub enum Weight {
     F16(F16Weight),
     Q4(Q4Weight),
     Q8(Q8Weight),
+    /// The inner weight is stored in Hadamard-rotated input space
+    /// (see `crate::rotate`): a matmul weight `[k, n]` holds `Rᵀ·W`, a head /
+    /// embedding `[vocab, hidden]` holds every row times `R`. Every compute
+    /// path rotates the activation with `rotate::forward` before using the
+    /// inner weight (embedding lookup applies `rotate::inverse` after), so
+    /// results equal the unrotated weight's.
+    Rotated(Box<Weight>),
 }
 
 impl Weight {
@@ -60,6 +67,7 @@ impl Weight {
             Weight::F16(w) => w.n,
             Weight::Q4(w) => w.n,
             Weight::Q8(w) => w.n,
+            Weight::Rotated(w) => w.n(),
         }
     }
     pub fn k(&self) -> usize {
@@ -67,6 +75,7 @@ impl Weight {
             Weight::F16(w) => w.k,
             Weight::Q4(w) => w.k,
             Weight::Q8(w) => w.k,
+            Weight::Rotated(w) => w.k(),
         }
     }
     pub fn memory_bytes(&self) -> usize {
@@ -74,7 +83,22 @@ impl Weight {
             Weight::F16(w) => w.data.len() * 2,
             Weight::Q4(w) => w.packed.len() + w.scales.len() * 2,
             Weight::Q8(w) => w.data.len() + w.scales.len() * 2,
+            Weight::Rotated(w) => w.memory_bytes(),
         }
+    }
+
+    /// Storage format id of the underlying data (0 = F16, 1 = Q4, 2 = Q8).
+    pub fn format_id(&self) -> u8 {
+        match self {
+            Weight::F16(_) => 0,
+            Weight::Q4(_) => 1,
+            Weight::Q8(_) => 2,
+            Weight::Rotated(w) => w.format_id(),
+        }
+    }
+
+    pub fn is_rotated(&self) -> bool {
+        matches!(self, Weight::Rotated(_))
     }
 
     /// Write row `i`, columns `c0 .. c0 + dst.len()`, as f32. For quantized
@@ -108,8 +132,24 @@ impl Weight {
                     }
                 }
             }
+            // Raw stored (rotated-space) values; callers rotate the input.
+            Weight::Rotated(w) => w.row_segment_f32(i, c0, dst),
         }
     }
+}
+
+/// `x` rotated into a rotated weight's input space.
+fn rotated(x: &[f32]) -> Vec<f32> {
+    let mut v = x.to_vec();
+    crate::rotate::forward(&mut v);
+    v
+}
+
+/// Every `len`-long row of `x` rotated into rotated-weight input space.
+fn rotated_rows(x: &[f32], len: usize) -> Vec<f32> {
+    let mut v = x.to_vec();
+    v.par_chunks_mut(len).for_each(crate::rotate::forward);
+    v
 }
 
 // ============================================================
@@ -158,6 +198,31 @@ pub enum HybridLayerWeights {
 }
 
 impl HybridLayerWeights {
+    /// Every matmul weight of the layer.
+    pub fn matmul_weights(&self) -> Vec<&Weight> {
+        match self {
+            HybridLayerWeights::DeltaNet(d) => vec![
+                &d.in_proj_qkv,
+                &d.in_proj_a,
+                &d.in_proj_b,
+                &d.in_proj_z,
+                &d.out_proj,
+                &d.gate_proj,
+                &d.up_proj,
+                &d.down_proj,
+            ],
+            HybridLayerWeights::FullAttn(f) => vec![
+                &f.q_proj,
+                &f.k_proj,
+                &f.v_proj,
+                &f.o_proj,
+                &f.gate_proj,
+                &f.up_proj,
+                &f.down_proj,
+            ],
+        }
+    }
+
     pub fn memory_bytes(&self) -> usize {
         match self {
             HybridLayerWeights::DeltaNet(d) => {
@@ -346,11 +411,17 @@ impl ModelWeights {
     }
 
     pub fn format_id(&self) -> u8 {
-        match &self.embed {
-            Weight::F16(_) => 0,
-            Weight::Q4(_) => 1,
-            Weight::Q8(_) => 2,
-        }
+        self.embed.format_id()
+    }
+
+    /// True when any weight is stored in rotated input space.
+    pub fn has_rotated(&self) -> bool {
+        self.embed.is_rotated()
+            || self.lm_head.is_rotated()
+            || self
+                .layers
+                .iter()
+                .any(|l| l.matmul_weights().iter().any(|w| w.is_rotated()))
     }
 }
 
@@ -365,12 +436,16 @@ pub fn gemv(input: &[f32], weight: &Weight) -> Vec<f32> {
         Weight::F16(w) => gemv_f16(input, w),
         Weight::Q4(w) => gemv_q4(input, w),
         Weight::Q8(w) => gemv_q8(input, w),
+        Weight::Rotated(w) => gemv(&rotated(input), w),
     }
 }
 
 /// GEMM: [seq_len, k] @ [k, n] -> [seq_len, n].
 #[inline]
 pub fn gemm(x: &[f32], seq_len: usize, weight: &Weight) -> Vec<f32> {
+    if let Weight::Rotated(w) = weight {
+        return gemm(&rotated_rows(x, w.k()), seq_len, w);
+    }
     if seq_len >= GEMM_TILED_MIN_TOKENS {
         return gemm_tiled(x, seq_len, weight);
     }
@@ -378,6 +453,7 @@ pub fn gemm(x: &[f32], seq_len: usize, weight: &Weight) -> Vec<f32> {
         Weight::F16(w) => gemm_f16(x, seq_len, w),
         Weight::Q4(w) => gemm_q4(x, seq_len, w),
         Weight::Q8(w) => gemm_q8(x, seq_len, w),
+        Weight::Rotated(_) => unreachable!("unwrapped above"),
     }
 }
 
@@ -386,6 +462,8 @@ pub fn gemm(x: &[f32], seq_len: usize, weight: &Weight) -> Vec<f32> {
 pub(crate) fn fused_gate_up_gemv(input: &[f32], gate_w: &Weight, up_w: &Weight) -> Vec<f32> {
     match (gate_w, up_w) {
         (Weight::Q4(gw), Weight::Q4(uw)) => fused_gate_up_q4(input, gw, uw),
+        // Same input, same rotation: rotate once, keep the fused kernel.
+        (Weight::Rotated(gw), Weight::Rotated(uw)) => fused_gate_up_gemv(&rotated(input), gw, uw),
         _ => {
             let gate = gemv(input, gate_w);
             let up = gemv(input, up_w);
@@ -413,6 +491,11 @@ pub fn embed_lookup(weight: &Weight, token_id: usize, hidden: usize) -> Vec<f32>
         }
         Weight::Q4(w) => embed_lookup_q4(w, token_id),
         Weight::Q8(w) => embed_lookup_q8(w, token_id),
+        Weight::Rotated(w) => {
+            let mut row = embed_lookup(w, token_id, hidden);
+            crate::rotate::inverse(&mut row);
+            row
+        }
     }
 }
 
@@ -1165,6 +1248,9 @@ pub fn lm_head_batch(rows: &[f32], n_rows: usize, weight: &Weight) -> Vec<f32> {
     const VOCAB_CHUNK: usize = 256;
     let (vocab, hidden) = (weight.k(), weight.n());
     assert_eq!(rows.len(), n_rows * hidden);
+    if let Weight::Rotated(w) = weight {
+        return lm_head_batch(&rotated_rows(rows, hidden), n_rows, w);
+    }
     let chunks: Vec<Vec<f32>> = (0..vocab.div_ceil(VOCAB_CHUNK))
         .into_par_iter()
         .map(|c| {
@@ -1208,6 +1294,9 @@ fn dot_lanes(a: &[f32], b: &[f32]) -> f32 {
 }
 
 pub fn lm_head_parallel(input: &[f32], embed: &Weight, vocab: usize, hidden: usize) -> Vec<f32> {
+    if let Weight::Rotated(w) = embed {
+        return lm_head_parallel(&rotated(input), w, vocab, hidden);
+    }
     match embed {
         Weight::F16(w) => {
             let mut output = vec![0.0f32; vocab];
@@ -1310,6 +1399,7 @@ pub fn lm_head_parallel(input: &[f32], embed: &Weight, vocab: usize, hidden: usi
                 });
             output
         }
+        Weight::Rotated(_) => unreachable!("unwrapped above"),
     }
 }
 
@@ -2637,6 +2727,72 @@ mod gemm_tiled_tests {
     fn head_batch_q4_matches() {
         let (packed, scales) = quantize_q4(&data(VOCAB * HIDDEN, 5), VOCAB, HIDDEN, Rounding::Mse);
         check_head(&Weight::Q4(Q4Weight { packed, scales, k: VOCAB, n: HIDDEN }));
+    }
+
+    /// A Rotated weight must give the same result as the plain weight on
+    /// every compute path. Both store different f16 values (the rotated
+    /// matrix rounds differently), so each carries its own ~1e-3 f16 noise;
+    /// a wrong rotation would be off by O(1). The bound is absolute because
+    /// outputs near zero come from cancellation.
+    #[test]
+    fn rotated_weight_matches_plain_on_every_path() {
+        let close = |a: &[f32], b: &[f32], what: &str| {
+            assert_eq!(a.len(), b.len());
+            let worst = a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+            assert!(worst <= 1e-2, "{what}: max |diff| {worst}");
+        };
+        // Matmul weights [k=64, n=96] (k has one 64-wide Hadamard block).
+        let (k, n) = (64, 96);
+        let raw = data(k * n, 11);
+        let plain = Weight::F16(F16Weight { data: raw.iter().map(|&v| f16::from_f32(v)).collect(), k, n });
+        let mut rot = raw.clone();
+        crate::rotate::rotate_columns(&mut rot, k, n);
+        let rotw = Weight::Rotated(Box::new(Weight::F16(F16Weight {
+            data: rot.iter().map(|&v| f16::from_f32(v)).collect(),
+            k,
+            n,
+        })));
+        let x = data(k, 12);
+        // Exact f64 result of the unquantized weights: rotated and plain
+        // paths must be equally close to it (proves the gap is f16 noise).
+        let exact: Vec<f32> = (0..n)
+            .map(|j| (0..k).map(|i| x[i] as f64 * raw[i * n + j] as f64).sum::<f64>() as f32)
+            .collect();
+        let err = |v: &[f32]| v.iter().zip(&exact).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        let (e_rot, e_plain) = (err(&gemv(&x, &rotw)), err(&gemv(&x, &plain)));
+        assert!(e_rot <= 5e-3 && e_plain <= 5e-3, "vs exact: rotated {e_rot}, plain {e_plain}");
+        close(&gemv(&x, &rotw), &gemv(&x, &plain), "gemv");
+        let xs = data(37 * k, 13);
+        close(&gemm(&xs, 37, &rotw), &gemm(&xs, 37, &plain), "gemm tiled");
+        close(&gemm(&xs[..3 * k], 3, &rotw), &gemm(&xs[..3 * k], 3, &plain), "gemm short");
+        close(
+            &fused_gate_up_gemv(&x, &rotw, &rotw),
+            &fused_gate_up_gemv(&x, &plain, &plain),
+            "fused gate/up",
+        );
+
+        // Head / embedding [vocab=40, hidden=64], rows rotated.
+        let (vocab, hidden) = (40, 64);
+        let raw = data(vocab * hidden, 14);
+        let plain = Weight::F16(F16Weight { data: raw.iter().map(|&v| f16::from_f32(v)).collect(), k: vocab, n: hidden });
+        let mut rot = raw.clone();
+        crate::rotate::rotate_rows(&mut rot, hidden);
+        let rotw = Weight::Rotated(Box::new(Weight::F16(F16Weight {
+            data: rot.iter().map(|&v| f16::from_f32(v)).collect(),
+            k: vocab,
+            n: hidden,
+        })));
+        let h = data(hidden, 15);
+        close(
+            &lm_head_parallel(&h, &rotw, vocab, hidden),
+            &lm_head_parallel(&h, &plain, vocab, hidden),
+            "head",
+        );
+        let hs = data(3 * hidden, 16);
+        close(&lm_head_batch(&hs, 3, &rotw), &lm_head_batch(&hs, 3, &plain), "head batch");
+        for tok in [0, 7, 39] {
+            close(&embed_lookup(&rotw, tok, hidden), &embed_lookup(&plain, tok, hidden), "embed");
+        }
     }
 
     #[test]

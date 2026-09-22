@@ -24,6 +24,8 @@ Top-1 = % of positions where the candidate's most likely token equals the refere
 | Q8 everywhere (shipped, RTN) | M0 baseline | 2.68 GB | 0.000994 | — | 98.09% | 1.0024 |
 | Q4 everywhere, RTN | M0 baseline | 1.42 GB | 0.224029 | — | 71.84% | 1.2255 |
 | Q4 everywhere, MSE rounding | M1 | 1.42 GB | 0.189946 | 0.993595 | 73.34% | 1.2042 |
+| F16 + rotation (exactness check) | M3 | 5.04 GB | 0.000001 | — | 99.93% | 1.0001 |
+| Q4 everywhere, MSE + rotation | M3 | 1.42 GB | 0.177090 | 0.944713 | 76.00% | 1.1785 |
 
 Reference perplexity on the evaluation text: 22.3615.
 
@@ -38,3 +40,11 @@ Reference perplexity on the evaluation text: 22.3615.
   `absmax / 7`: KL −15%, top-1 +1.5 points, same size and kernels. Plain
   scalar Q4 on this 2B model is still far from Q8 quality; rotation (M3) and
   Hessian-aware rounding (M4) target that gap.
+- **M3** — randomized Hadamard rotation of every matmul weight, the output
+  head and the embedding (`--rotate`). The F16 + rotation model scores
+  KL 0.000001, so the transform is exact on the real model. On Q4 it cuts KL
+  a further 7% (0.190 → 0.177) and lifts top-1 to 76.0%. The gain is
+  smaller than rotation papers report because this Q4 layout already gives
+  every 32 weights of an input row their own scale; rotation is expected to
+  compound with GPTQ (M4). Rotated models run on the CPU path; the GPU path
+  refuses them with a clear error until M2 adds the transform there.

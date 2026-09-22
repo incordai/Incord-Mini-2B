@@ -1030,6 +1030,10 @@ pub fn generate_gpu(
     prompt: &str,
     params: &GenerateParams,
 ) -> Result<(), String> {
+    if weights.has_rotated() {
+        // The GPU forward does not apply the Hadamard input transform yet.
+        return Err("model has rotated weights, not supported on the GPU path yet".into());
+    }
     let result = std::cell::RefCell::new(None);
 
     std::thread::scope(|s| {
