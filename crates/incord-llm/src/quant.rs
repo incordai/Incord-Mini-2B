@@ -135,6 +135,32 @@ fn check_shape(data: &[f32], k: usize, n: usize) {
     assert!(n.is_multiple_of(GROUP), "n={n} not divisible by group size {GROUP}");
 }
 
+/// Quantize one row (`row.len()` a multiple of [`GROUP`]) to Q4, writing
+/// `row.len() / 2` packed bytes and `row.len() / GROUP` scales.
+pub fn quantize_q4_row(row: &[f32], rounding: Rounding, prow: &mut [u8], srow: &mut [f16]) {
+    let mut q = [0i32; GROUP];
+    for (g, (grp, s)) in row.chunks(GROUP).zip(srow.iter_mut()).enumerate() {
+        *s = quantize_group(grp, &Q4, rounding, &mut q);
+        let dst = &mut prow[g * GROUP / 2..(g + 1) * GROUP / 2];
+        for (j, b) in dst.iter_mut().enumerate() {
+            let lo = (q[2 * j] + 8) as u8;
+            let hi = (q[2 * j + 1] + 8) as u8;
+            *b = lo | (hi << 4);
+        }
+    }
+}
+
+/// Quantize one row (`row.len()` a multiple of [`GROUP`]) to Q8.
+pub fn quantize_q8_row(row: &[f32], rounding: Rounding, orow: &mut [i8], srow: &mut [f16]) {
+    let mut q = [0i32; GROUP];
+    for (g, (grp, s)) in row.chunks(GROUP).zip(srow.iter_mut()).enumerate() {
+        *s = quantize_group(grp, &Q8, rounding, &mut q);
+        for (o, &qi) in orow[g * GROUP..(g + 1) * GROUP].iter_mut().zip(&q) {
+            *o = qi as i8;
+        }
+    }
+}
+
 /// Quantize a `[k, n]` matrix to Q4. Returns (packed bytes, scales).
 pub fn quantize_q4(data: &[f32], k: usize, n: usize, rounding: Rounding) -> (Vec<u8>, Vec<f16>) {
     check_shape(data, k, n);
@@ -144,20 +170,8 @@ pub fn quantize_q4(data: &[f32], k: usize, n: usize, rounding: Rounding) -> (Vec
     packed
         .par_chunks_mut(n / 2)
         .zip(scales.par_chunks_mut(gpr))
-        .enumerate()
-        .for_each(|(ki, (prow, srow))| {
-            let mut q = [0i32; GROUP];
-            for g in 0..gpr {
-                let off = ki * n + g * GROUP;
-                srow[g] = quantize_group(&data[off..off + GROUP], &Q4, rounding, &mut q);
-                let dst = &mut prow[g * GROUP / 2..(g + 1) * GROUP / 2];
-                for (j, b) in dst.iter_mut().enumerate() {
-                    let lo = (q[2 * j] + 8) as u8;
-                    let hi = (q[2 * j + 1] + 8) as u8;
-                    *b = lo | (hi << 4);
-                }
-            }
-        });
+        .zip(data.par_chunks(n))
+        .for_each(|((prow, srow), row)| quantize_q4_row(row, rounding, prow, srow));
     (packed, scales)
 }
 
@@ -169,17 +183,8 @@ pub fn quantize_q8(data: &[f32], k: usize, n: usize, rounding: Rounding) -> (Vec
     let mut scales = vec![f16::from_f32(0.0); k * gpr];
     out.par_chunks_mut(n)
         .zip(scales.par_chunks_mut(gpr))
-        .enumerate()
-        .for_each(|(ki, (orow, srow))| {
-            let mut q = [0i32; GROUP];
-            for g in 0..gpr {
-                let off = ki * n + g * GROUP;
-                srow[g] = quantize_group(&data[off..off + GROUP], &Q8, rounding, &mut q);
-                for (o, &qi) in orow[g * GROUP..(g + 1) * GROUP].iter_mut().zip(&q) {
-                    *o = qi as i8;
-                }
-            }
-        });
+        .zip(data.par_chunks(n))
+        .for_each(|((orow, srow), row)| quantize_q8_row(row, rounding, orow, srow));
     (out, scales)
 }
 

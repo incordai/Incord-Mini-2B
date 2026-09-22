@@ -2,7 +2,10 @@ pub mod config;
 pub mod eval;
 pub mod gemv;
 pub mod gemv_batch;
+#[cfg(feature = "quantize")]
+pub mod gptq;
 pub mod generate;
+pub mod plan;
 pub mod quant;
 pub mod rotate;
 pub mod save;

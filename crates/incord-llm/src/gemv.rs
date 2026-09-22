@@ -1907,6 +1907,7 @@ fn prefill_deltanet_layer(
     lw: &DeltaNetLayerWeights,
     state: &mut DeltaNetState,
     config: &IncordConfig,
+    obs: &mut dyn LinearObserver,
 ) {
     let hidden = config.hidden_size;
     let num_qk = config.num_qk_heads;
@@ -1929,6 +1930,7 @@ fn prefill_deltanet_layer(
     }
 
     // ── Step 2: Batch ALL input projections as GEMM ──
+    obs.observe(LinearSite::AttnIn, &x_norm, seq_len);
     let qkv_all = gemm(&x_norm, seq_len, &lw.in_proj_qkv);
     let a_all = gemm(&x_norm, seq_len, &lw.in_proj_a);
     let b_all = gemm(&x_norm, seq_len, &lw.in_proj_b);
@@ -2052,6 +2054,7 @@ fn prefill_deltanet_layer(
     }
 
     // ── Step 5: Output projection as GEMM + residual ──
+    obs.observe(LinearSite::AttnOut, &y_all, seq_len);
     let attn_out = gemm(&y_all, seq_len, &lw.out_proj);
     for j in 0..seq_len * hidden {
         x[j] += attn_out[j];
@@ -2063,6 +2066,7 @@ fn prefill_deltanet_layer(
         let row = rms_norm(&x[t * hidden..(t + 1) * hidden], &lw.post_attn_norm);
         x_norm2[t * hidden..(t + 1) * hidden].copy_from_slice(&row);
     }
+    obs.observe(LinearSite::MlpIn, &x_norm2, seq_len);
     let gate = gemm(&x_norm2, seq_len, &lw.gate_proj);
     let up = gemm(&x_norm2, seq_len, &lw.up_proj);
     let inter_size = lw.gate_proj.n();
@@ -2071,6 +2075,7 @@ fn prefill_deltanet_layer(
         let g = gate[j];
         intermediate[j] = (g / (1.0 + (-g).exp())) * up[j];
     }
+    obs.observe(LinearSite::MlpDown, &intermediate, seq_len);
     let mlp_out = gemm(&intermediate, seq_len, &lw.down_proj);
     for j in 0..seq_len * hidden {
         x[j] += mlp_out[j];
@@ -2127,26 +2132,69 @@ fn prefill_layers(weights: &ModelWeights, token_ids: &[u32], cache: &mut HybridC
     let num_layers = config.num_layers;
     for i in 0..num_layers {
         eprint!("\r  Prefill: layer {}/{num_layers}  ", i + 1);
-        match (&weights.layers[i], &mut cache.entries[i]) {
-            (HybridLayerWeights::DeltaNet(lw), CacheEntry::DeltaNet(state)) => {
-                prefill_deltanet_layer(&mut x, seq_len, lw, state, config);
-            }
-            (HybridLayerWeights::FullAttn(lw), CacheEntry::KvCache(kv)) => {
-                prefill_attn_layer(
-                    &mut x,
-                    seq_len,
-                    lw,
-                    kv,
-                    config,
-                    &weights.rope_cos,
-                    &weights.rope_sin,
-                );
-            }
-            _ => panic!("Layer type mismatch at layer {i}"),
-        }
+        prefill_layer(weights, i, &mut x, seq_len, cache, &mut NoObserver);
     }
     eprint!("\r                              \r");
     x
+}
+
+/// Where a projection reads its input inside a layer. Projections at the
+/// same site share one input matrix (and one GPTQ Hessian).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LinearSite {
+    /// Normed residual into q/k/v (attention) or in_proj_* (DeltaNet).
+    AttnIn,
+    /// Attention output into o_proj / out_proj.
+    AttnOut,
+    /// Normed residual into gate_proj and up_proj.
+    MlpIn,
+    /// SwiGLU output into down_proj.
+    MlpDown,
+}
+
+/// Receives the input matrix `[rows, k]` of every projection site during
+/// prefill (used by calibration, e.g. GPTQ's Hessians).
+pub trait LinearObserver {
+    fn observe(&mut self, site: LinearSite, x: &[f32], rows: usize);
+}
+
+/// Observer that ignores everything (normal inference).
+pub struct NoObserver;
+
+impl LinearObserver for NoObserver {
+    #[inline]
+    fn observe(&mut self, _: LinearSite, _: &[f32], _: usize) {}
+}
+
+/// Run layer `i` over `x: [seq_len, hidden]` in place (residual included),
+/// reporting every projection input to `obs`.
+pub fn prefill_layer(
+    weights: &ModelWeights,
+    i: usize,
+    x: &mut [f32],
+    seq_len: usize,
+    cache: &mut HybridCache,
+    obs: &mut dyn LinearObserver,
+) {
+    let config = &weights.config;
+    match (&weights.layers[i], &mut cache.entries[i]) {
+        (HybridLayerWeights::DeltaNet(lw), CacheEntry::DeltaNet(state)) => {
+            prefill_deltanet_layer(x, seq_len, lw, state, config, obs);
+        }
+        (HybridLayerWeights::FullAttn(lw), CacheEntry::KvCache(kv)) => {
+            prefill_attn_layer(
+                x,
+                seq_len,
+                lw,
+                kv,
+                config,
+                &weights.rope_cos,
+                &weights.rope_sin,
+                obs,
+            );
+        }
+        _ => panic!("Layer type mismatch at layer {i}"),
+    }
 }
 
 /// Prefill with vision embeddings injected at IMAGE_PAD positions.
@@ -2187,23 +2235,7 @@ pub fn prefill_with_vision(
     let num_layers = config.num_layers;
     for i in 0..num_layers {
         eprint!("\r  Prefill: layer {}/{num_layers}  ", i + 1);
-        match (&weights.layers[i], &mut cache.entries[i]) {
-            (HybridLayerWeights::DeltaNet(lw), CacheEntry::DeltaNet(state)) => {
-                prefill_deltanet_layer(&mut x, seq_len, lw, state, config);
-            }
-            (HybridLayerWeights::FullAttn(lw), CacheEntry::KvCache(kv)) => {
-                prefill_attn_layer(
-                    &mut x,
-                    seq_len,
-                    lw,
-                    kv,
-                    config,
-                    &weights.rope_cos,
-                    &weights.rope_sin,
-                );
-            }
-            _ => panic!("Layer type mismatch at layer {i}"),
-        }
+        prefill_layer(weights, i, &mut x, seq_len, cache, &mut NoObserver);
     }
     eprint!("\r                              \r");
 
@@ -2223,6 +2255,7 @@ fn prefill_attn_layer(
     config: &IncordConfig,
     rope_cos: &[f32],
     rope_sin: &[f32],
+    obs: &mut dyn LinearObserver,
 ) {
     let hidden = config.hidden_size;
     let num_heads = config.num_attn_heads;
@@ -2241,6 +2274,7 @@ fn prefill_attn_layer(
     }
 
     // Q projection: output is [seq_len, q_dim] (standard LLaMA) or [seq_len, 2*q_dim] (gated)
+    obs.observe(LinearSite::AttnIn, &x_norm, seq_len);
     let q_gate_all = gemm(&x_norm, seq_len, &lw.q_proj);
     let is_gated = lw.q_proj.n() == 2 * q_dim;
 
@@ -2370,6 +2404,7 @@ fn prefill_attn_layer(
     }
 
     // O projection + residual
+    obs.observe(LinearSite::AttnOut, &attn_output, seq_len);
     let o_out = gemm(&attn_output, seq_len, &lw.o_proj);
     for j in 0..seq_len * hidden {
         x[j] += o_out[j];
@@ -2384,6 +2419,7 @@ fn prefill_attn_layer(
     }
 
     // MLP
+    obs.observe(LinearSite::MlpIn, &x_norm2, seq_len);
     let gate = gemm(&x_norm2, seq_len, &lw.gate_proj);
     let up = gemm(&x_norm2, seq_len, &lw.up_proj);
     let inter_size = lw.gate_proj.n();
@@ -2392,6 +2428,7 @@ fn prefill_attn_layer(
         let g = gate[j];
         intermediate[j] = (g / (1.0 + (-g).exp())) * up[j];
     }
+    obs.observe(LinearSite::MlpDown, &intermediate, seq_len);
     let mlp_out = gemm(&intermediate, seq_len, &lw.down_proj);
 
     for j in 0..seq_len * hidden {

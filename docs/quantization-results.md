@@ -26,6 +26,7 @@ Top-1 = % of positions where the candidate's most likely token equals the refere
 | Q4 everywhere, MSE rounding | M1 | 1.42 GB | 0.189946 | 0.993595 | 73.34% | 1.2042 |
 | F16 + rotation (exactness check) | M3 | 5.04 GB | 0.000001 | — | 99.93% | 1.0001 |
 | Q4 everywhere, MSE + rotation | M3 | 1.42 GB | 0.177090 | 0.944713 | 76.00% | 1.1785 |
+| Q4 everywhere, MSE + rotation + GPTQ | M4 | 1.42 GB | 0.068763 | — | 84.05% | 1.0604 |
 
 Reference perplexity on the evaluation text: 22.3615.
 
@@ -48,3 +49,15 @@ Reference perplexity on the evaluation text: 22.3615.
   every 32 weights of an input row their own scale; rotation is expected to
   compound with GPTQ (M4). Rotated models run on the CPU path; the GPU path
   refuses them with a clear error until M2 adds the transform there.
+- **M4** — `incord-quantize`: sequential, layer-by-layer GPTQ. Calibration
+  text (`eval/calib`, 19 chunks / 9,728 tokens, never the scored text) runs
+  through each layer; `H = XᵀX` is collected per projection input; the
+  layer's 7 weights are quantized with Hessian-aware rounding (act-order,
+  1% damping, 128-row blocks, same MSE group scales); the calibration
+  stream then advances through the *quantized* layer. KL drops 61%
+  (0.177 → 0.069), top-1 rises to 84.05%, perplexity is within 6% of the
+  full-precision model — at the same 1.42 GB and with no kernel change.
+  Runtime ~43 min on the i5-11500. The embedding and head still use plain
+  MSE rounding; mixed precision (M5) addresses them.
+  An end-to-end check (F16 through the tool, no quantization) produced a
+  file byte-identical to the converter's F16 output.
