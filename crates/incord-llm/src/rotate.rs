@@ -15,11 +15,17 @@
 //! - output-head rows (stored `[vocab, hidden]`): `row' = forward(row)`.
 //!
 //! [`inverse`] undoes [`forward`]. The signs depend only on the length and a
-//! fixed seed, so every weight that reads the same activation uses the same
-//! rotation and a rotated file needs no stored rotation data.
+//! seed. The seed is stored in the `.incord` header (format v4) and carried by
+//! every `Weight::Rotated`, so a file always decodes with the seed it was
+//! written with; v3 files predate the header field and used [`DEFAULT_SEED`].
 
-/// Fixed seed of the sign pattern. Changing it invalidates rotated files.
-const SIGN_SEED: u64 = 0x1C0B_D5A1_7E57_2026;
+/// Seed used by the converter unless told otherwise, and implied by v3 files.
+pub const DEFAULT_SEED: u64 = 0x1C0B_D5A1_7E57_2026;
+
+/// Identifier of this rotation scheme in the file header (sign flip +
+/// blockwise normalised Walsh–Hadamard, block = largest power of two
+/// dividing the length, signs from the xorshift below).
+pub const SCHEME_BLOCK_HADAMARD: u8 = 1;
 
 /// Hadamard block length for a vector of length `len`: the largest power of
 /// two dividing it.
@@ -29,8 +35,10 @@ pub fn block_len(len: usize) -> usize {
 }
 
 /// The ±1 sign of every coordinate for vectors of length `len`.
-pub fn signs(len: usize) -> Vec<f32> {
-    let mut s = SIGN_SEED ^ (len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+pub fn signs(len: usize, seed: u64) -> Vec<f32> {
+    // Must stay bit-identical: v3 files decode with DEFAULT_SEED through this.
+    // (A zero state only yields all-positive signs — still orthogonal.)
+    let mut s = seed ^ (len as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     (0..len)
         .map(|_| {
             s ^= s << 13;
@@ -71,8 +79,8 @@ fn hadamard_blocks(x: &mut [f32]) {
 }
 
 /// `x ← x · R`: sign flip, then blockwise normalised Hadamard.
-pub fn forward(x: &mut [f32]) {
-    let s = signs(x.len());
+pub fn forward(x: &mut [f32], seed: u64) {
+    let s = signs(x.len(), seed);
     for (v, si) in x.iter_mut().zip(s) {
         *v *= si;
     }
@@ -80,9 +88,9 @@ pub fn forward(x: &mut [f32]) {
 }
 
 /// Inverse of [`forward`]: blockwise normalised Hadamard, then sign flip.
-pub fn inverse(x: &mut [f32]) {
+pub fn inverse(x: &mut [f32], seed: u64) {
     hadamard_blocks(x);
-    let s = signs(x.len());
+    let s = signs(x.len(), seed);
     for (v, si) in x.iter_mut().zip(s) {
         *v *= si;
     }
@@ -91,9 +99,9 @@ pub fn inverse(x: &mut [f32]) {
 /// `W ← Rᵀ · W` for a row-major `[k, n]` matrix: [`forward`] applied down
 /// every column. Works on whole rows (butterflies between rows), so it is
 /// cache-friendly and vectorises over `n`.
-pub fn rotate_columns(w: &mut [f32], k: usize, n: usize) {
+pub fn rotate_columns(w: &mut [f32], k: usize, n: usize, seed: u64) {
     assert_eq!(w.len(), k * n);
-    let s = signs(k);
+    let s = signs(k, seed);
     for (row, &si) in w.chunks_mut(n).zip(&s) {
         if si < 0.0 {
             row.iter_mut().for_each(|v| *v = -*v);
@@ -123,9 +131,9 @@ pub fn rotate_columns(w: &mut [f32], k: usize, n: usize) {
 
 /// [`forward`] applied to every row of a row-major `[rows, len]` matrix
 /// (used for the output head, stored `[vocab, hidden]`).
-pub fn rotate_rows(w: &mut [f32], len: usize) {
+pub fn rotate_rows(w: &mut [f32], len: usize, seed: u64) {
     assert!(w.len().is_multiple_of(len));
-    let s = signs(len);
+    let s = signs(len, seed);
     let b = block_len(len);
     let norm = 1.0 / (b as f32).sqrt();
     for row in w.chunks_mut(len) {
@@ -167,8 +175,22 @@ mod tests {
         for len in [8, 96, 2048, 6144] {
             let x = data(len, 1);
             let mut y = x.clone();
-            forward(&mut y);
-            inverse(&mut y);
+            forward(&mut y, DEFAULT_SEED);
+            inverse(&mut y, DEFAULT_SEED);
+            close(&y, &x, 1e-5);
+        }
+    }
+
+    /// Any seed gives a valid (invertible) rotation, and different seeds
+    /// give different sign patterns.
+    #[test]
+    fn seeds_are_independent_and_invertible() {
+        assert_ne!(signs(2048, DEFAULT_SEED), signs(2048, 7));
+        for seed in [0, 7, u64::MAX] {
+            let x = data(2048, 9);
+            let mut y = x.clone();
+            forward(&mut y, seed);
+            inverse(&mut y, seed);
             close(&y, &x, 1e-5);
         }
     }
@@ -177,7 +199,7 @@ mod tests {
     fn forward_preserves_norm() {
         let x = data(6144, 2);
         let mut y = x.clone();
-        forward(&mut y);
+        forward(&mut y, DEFAULT_SEED);
         let n = |v: &[f32]| v.iter().map(|a| (*a as f64).powi(2)).sum::<f64>();
         assert!((n(&x) - n(&y)).abs() < 1e-3 * n(&x));
     }
@@ -193,9 +215,9 @@ mod tests {
         };
         let expect = matvec(&x, &w);
         let mut wr = w.clone();
-        rotate_columns(&mut wr, k, n);
+        rotate_columns(&mut wr, k, n, DEFAULT_SEED);
         let mut xr = x.clone();
-        forward(&mut xr);
+        forward(&mut xr, DEFAULT_SEED);
         close(&matvec(&xr, &wr), &expect, 1e-4);
     }
 
@@ -210,9 +232,9 @@ mod tests {
         };
         let expect = logits(&x, &w);
         let mut wr = w.clone();
-        rotate_rows(&mut wr, hidden);
+        rotate_rows(&mut wr, hidden, DEFAULT_SEED);
         let mut xr = x.clone();
-        forward(&mut xr);
+        forward(&mut xr, DEFAULT_SEED);
         close(&logits(&xr, &wr), &expect, 1e-4);
     }
 
@@ -222,10 +244,10 @@ mod tests {
         let (k, n) = (6144 / 64, 3); // 96 rows: 3 blocks of 32
         let w = data(k * n, 7);
         let mut wr = w.clone();
-        rotate_columns(&mut wr, k, n);
+        rotate_columns(&mut wr, k, n, DEFAULT_SEED);
         for j in 0..n {
             let mut col: Vec<f32> = (0..k).map(|i| w[i * n + j]).collect();
-            forward(&mut col);
+            forward(&mut col, DEFAULT_SEED);
             let got: Vec<f32> = (0..k).map(|i| wr[i * n + j]).collect();
             close(&got, &col, 1e-5);
         }
@@ -237,7 +259,7 @@ mod tests {
         let mut x = vec![0.01f32; 2048];
         x[17] = 50.0;
         let before = x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
-        forward(&mut x);
+        forward(&mut x, DEFAULT_SEED);
         let after = x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(after < before / 20.0, "max {before} -> {after}");
     }

@@ -17,10 +17,14 @@ use crate::gemv::*;
 
 const MAGIC: &[u8; 4] = b"QOR4";
 const VERSION: u32 = 2; // v2: vision weights stored as f16 (was f32 in v1)
-/// v3: a weight's format byte may carry [`ROTATED_FLAG`]. Written only when
-/// the file holds rotated weights, so plain files stay readable by v2
-/// loaders while an old loader rejects a rotated file at the header.
+/// v3: a weight's format byte may carry [`ROTATED_FLAG`]; the sign seed is
+/// implicitly `rotate::DEFAULT_SEED`. Read-only legacy: new files use v4.
 pub const VERSION_ROTATED: u32 = 3;
+/// v4: like v3, plus rotation metadata right after the header's format
+/// byte: scheme id (u8, `rotate::SCHEME_BLOCK_HADAMARD`) and sign seed
+/// (u64). Written only when the file holds rotated weights, so plain files
+/// stay v2 and older loaders reject rotated files at the header.
+pub const VERSION_ROTATION_META: u32 = 4;
 /// Set on a weight's per-weight format byte when its data is stored in
 /// Hadamard-rotated input space (`Weight::Rotated`, see `crate::rotate`).
 pub const ROTATED_FLAG: u8 = 0x80;
@@ -137,7 +141,7 @@ fn write_weight(w: &mut impl Write, weight: &Weight) -> io::Result<()> {
     write_u64(w, weight.k() as u64)?;
     write_u64(w, weight.n() as u64)?;
     let (fmt, weight) = match weight {
-        Weight::Rotated(inner) => (inner.format_id() | ROTATED_FLAG, inner.as_ref()),
+        Weight::Rotated(inner, _) => (inner.format_id() | ROTATED_FLAG, inner.as_ref()),
         other => (other.format_id(), other),
     };
     write_u8(w, fmt)?;
@@ -154,7 +158,7 @@ fn write_weight(w: &mut impl Write, weight: &Weight) -> io::Result<()> {
             write_bytes(w, bytes)?;
             write_f16_vec(w, &qw.scales)?;
         }
-        Weight::Rotated(_) => {
+        Weight::Rotated(..) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "nested rotated weight cannot be stored",
@@ -164,15 +168,50 @@ fn write_weight(w: &mut impl Write, weight: &Weight) -> io::Result<()> {
     Ok(())
 }
 
-fn read_weight(r: &mut impl Read, _format_id: u8) -> io::Result<Weight> {
+/// `rot_seed` is the file's rotation seed (None for files without rotation
+/// metadata, where a rotated weight is invalid).
+fn read_weight(r: &mut impl Read, rot_seed: Option<u64>) -> io::Result<Weight> {
     let k = read_u64(r)? as usize;
     let n = read_u64(r)? as usize;
     let per_weight_fmt = read_u8(r)?;
     if per_weight_fmt & ROTATED_FLAG != 0 {
+        let seed = rot_seed.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "rotated weight in a file without rotation metadata",
+            )
+        })?;
         let inner = read_weight_body(r, per_weight_fmt & !ROTATED_FLAG, k, n)?;
-        return Ok(Weight::Rotated(Box::new(inner)));
+        return Ok(Weight::Rotated(Box::new(inner), seed));
     }
     read_weight_body(r, per_weight_fmt, k, n)
+}
+
+/// The single rotation seed shared by every rotated weight that gets
+/// written, None if nothing is rotated. Mixed seeds cannot be described by
+/// the one header field. A tied head is not written, so it is not counted.
+fn model_rotation_seed(weights: &ModelWeights) -> io::Result<Option<u64>> {
+    let head = (!weights.config.tie_word_embeddings).then_some(&weights.lm_head);
+    let mut seeds = std::iter::once(&weights.embed)
+        .chain(head)
+        .chain(weights.layers.iter().flat_map(|l| l.matmul_weights()))
+        .filter_map(Weight::rotation_seed);
+    let Some(first) = seeds.next() else {
+        return Ok(None);
+    };
+    if seeds.any(|s| s != first) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "rotated weights use different seeds; one file holds one seed",
+        ));
+    }
+    Ok(Some(first))
+}
+
+/// Rotation metadata that follows the header's format byte in v4 files.
+pub fn write_rotation_meta(w: &mut impl Write, seed: u64) -> io::Result<()> {
+    write_u8(w, crate::rotate::SCHEME_BLOCK_HADAMARD)?;
+    write_u64(w, seed)
 }
 
 fn read_weight_body(r: &mut impl Read, per_weight_fmt: u8, k: usize, n: usize) -> io::Result<Weight> {
@@ -220,9 +259,13 @@ pub fn save_model(weights: &ModelWeights, path: &Path) -> io::Result<()> {
 
     // Header
     w.write_all(MAGIC)?;
-    let version = if weights.has_rotated() { VERSION_ROTATED } else { VERSION };
+    let rot_seed = model_rotation_seed(weights)?;
+    let version = if rot_seed.is_some() { VERSION_ROTATION_META } else { VERSION };
     write_u32(&mut w, version)?;
     write_u8(&mut w, format_id)?;
+    if let Some(seed) = rot_seed {
+        write_rotation_meta(&mut w, seed)?;
+    }
 
     // Config
     write_u32(&mut w, config.vocab_size as u32)?;
@@ -355,13 +398,27 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
         }
     };
     let version = read_u32(&mut r)?;
-    if !(1..=VERSION_ROTATED).contains(&version) {
+    if !(1..=VERSION_ROTATION_META).contains(&version) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Unsupported version {version} (expected 1..={VERSION_ROTATED})"),
+            format!("Unsupported version {version} (expected 1..={VERSION_ROTATION_META})"),
         ));
     }
     let format_id = read_u8(&mut r)?;
+    let rot_seed = match version {
+        VERSION_ROTATED => Some(crate::rotate::DEFAULT_SEED),
+        VERSION_ROTATION_META => {
+            let scheme = read_u8(&mut r)?;
+            if scheme != crate::rotate::SCHEME_BLOCK_HADAMARD {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Unknown rotation scheme {scheme}"),
+                ));
+            }
+            Some(read_u64(&mut r)?)
+        }
+        _ => None,
+    };
 
     // Config
     let vocab_size = read_u32(&mut r)? as usize;
@@ -441,33 +498,33 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
         match lt {
             LayerType::DeltaNet => {
                 layers.push(HybridLayerWeights::DeltaNet(DeltaNetLayerWeights {
-                    in_proj_qkv: read_weight(&mut r, format_id)?,
-                    in_proj_a: read_weight(&mut r, format_id)?,
-                    in_proj_b: read_weight(&mut r, format_id)?,
-                    in_proj_z: read_weight(&mut r, format_id)?,
-                    out_proj: read_weight(&mut r, format_id)?,
+                    in_proj_qkv: read_weight(&mut r, rot_seed)?,
+                    in_proj_a: read_weight(&mut r, rot_seed)?,
+                    in_proj_b: read_weight(&mut r, rot_seed)?,
+                    in_proj_z: read_weight(&mut r, rot_seed)?,
+                    out_proj: read_weight(&mut r, rot_seed)?,
                     conv1d_weight: read_f32_vec(&mut r)?,
                     a_log: read_f32_vec(&mut r)?,
                     dt_bias: read_f32_vec(&mut r)?,
                     attn_norm_weight: read_f16_vec(&mut r)?,
-                    gate_proj: read_weight(&mut r, format_id)?,
-                    up_proj: read_weight(&mut r, format_id)?,
-                    down_proj: read_weight(&mut r, format_id)?,
+                    gate_proj: read_weight(&mut r, rot_seed)?,
+                    up_proj: read_weight(&mut r, rot_seed)?,
+                    down_proj: read_weight(&mut r, rot_seed)?,
                     input_norm: read_f16_vec(&mut r)?,
                     post_attn_norm: read_f16_vec(&mut r)?,
                 }));
             }
             LayerType::FullAttn => {
                 layers.push(HybridLayerWeights::FullAttn(FullAttnLayerWeights {
-                    q_proj: read_weight(&mut r, format_id)?,
-                    k_proj: read_weight(&mut r, format_id)?,
-                    v_proj: read_weight(&mut r, format_id)?,
-                    o_proj: read_weight(&mut r, format_id)?,
+                    q_proj: read_weight(&mut r, rot_seed)?,
+                    k_proj: read_weight(&mut r, rot_seed)?,
+                    v_proj: read_weight(&mut r, rot_seed)?,
+                    o_proj: read_weight(&mut r, rot_seed)?,
                     q_norm: read_f16_vec(&mut r)?,
                     k_norm: read_f16_vec(&mut r)?,
-                    gate_proj: read_weight(&mut r, format_id)?,
-                    up_proj: read_weight(&mut r, format_id)?,
-                    down_proj: read_weight(&mut r, format_id)?,
+                    gate_proj: read_weight(&mut r, rot_seed)?,
+                    up_proj: read_weight(&mut r, rot_seed)?,
+                    down_proj: read_weight(&mut r, rot_seed)?,
                     input_norm: read_f16_vec(&mut r)?,
                     post_attn_norm: read_f16_vec(&mut r)?,
                 }));
@@ -476,9 +533,9 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
     }
 
     // Global
-    let embed = read_weight(&mut r, format_id)?;
+    let embed = read_weight(&mut r, rot_seed)?;
     let lm_head = if !tie_word_embeddings {
-        read_weight(&mut r, format_id)?
+        read_weight(&mut r, rot_seed)?
     } else {
         embed.clone()
     };
@@ -566,26 +623,30 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
 mod tests {
     use super::*;
 
-    fn roundtrip(weight: &Weight) -> Weight {
+    fn roundtrip(weight: &Weight, seed: Option<u64>) -> Weight {
         let mut buf = Vec::new();
         write_weight(&mut buf, weight).unwrap();
-        read_weight(&mut buf.as_slice(), 0).unwrap()
+        read_weight(&mut buf.as_slice(), seed).unwrap()
+    }
+
+    fn q4(k: usize, n: usize) -> Weight {
+        let (packed, scales) = crate::quant::quantize_q4(
+            &(0..k * n).map(|i| (i % 17) as f32 * 0.01 - 0.08).collect::<Vec<_>>(),
+            k,
+            n,
+            crate::quant::Rounding::Mse,
+        );
+        Weight::Q4(Q4Weight { packed, scales, k, n })
     }
 
     #[test]
     fn rotated_weight_survives_save_and_load() {
-        let (packed, scales) = crate::quant::quantize_q4(
-            &(0..64 * 32).map(|i| (i % 17) as f32 * 0.01 - 0.08).collect::<Vec<_>>(),
-            64,
-            32,
-            crate::quant::Rounding::Mse,
-        );
-        let w = Weight::Rotated(Box::new(Weight::Q4(Q4Weight { packed, scales, k: 64, n: 32 })));
-        let back = roundtrip(&w);
-        assert!(back.is_rotated());
+        let w = Weight::Rotated(Box::new(q4(64, 32)), 7);
+        let back = roundtrip(&w, Some(7));
+        assert_eq!(back.rotation_seed(), Some(7));
         assert_eq!((back.k(), back.n(), back.format_id()), (64, 32, 1));
         match (&w, &back) {
-            (Weight::Rotated(a), Weight::Rotated(b)) => match (a.as_ref(), b.as_ref()) {
+            (Weight::Rotated(a, _), Weight::Rotated(b, _)) => match (a.as_ref(), b.as_ref()) {
                 (Weight::Q4(a), Weight::Q4(b)) => {
                     assert_eq!(a.packed, b.packed);
                     assert_eq!(a.scales, b.scales);
@@ -602,6 +663,47 @@ mod tests {
         let mut buf = Vec::new();
         write_weight(&mut buf, &w).unwrap();
         assert_eq!(buf[16], 0, "format byte must stay 0 for plain F16");
-        assert!(!roundtrip(&w).is_rotated());
+        assert!(!roundtrip(&w, None).is_rotated());
+    }
+
+    #[test]
+    fn rotated_weight_without_metadata_is_rejected() {
+        let mut buf = Vec::new();
+        write_weight(&mut buf, &Weight::Rotated(Box::new(q4(32, 32)), 7)).unwrap();
+        assert!(read_weight(&mut buf.as_slice(), None).is_err());
+    }
+
+    /// Whole-model round trip: the seed must come back from the v4 header,
+    /// and a plain model must still be written as v2.
+    #[test]
+    fn model_rotation_seed_survives_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = crate::gemv::mock::tiny_weights();
+        // Untied like the real model, so the head is written on its own.
+        w.config.tie_word_embeddings = false;
+        let plain_path = dir.path().join("plain.incord");
+        save_model(&w, &plain_path).unwrap();
+        let header = std::fs::read(&plain_path).unwrap();
+        assert_eq!(u32::from_le_bytes(header[4..8].try_into().unwrap()), VERSION);
+
+        let seed = 0xDEAD_BEEF_u64;
+        w.lm_head = Weight::Rotated(Box::new(w.lm_head.clone()), seed);
+        let rot_path = dir.path().join("rot.incord");
+        save_model(&w, &rot_path).unwrap();
+        let header = std::fs::read(&rot_path).unwrap();
+        assert_eq!(u32::from_le_bytes(header[4..8].try_into().unwrap()), VERSION_ROTATION_META);
+        let back = load_model(&rot_path).unwrap();
+        assert_eq!(back.lm_head.rotation_seed(), Some(seed));
+        assert!(!back.embed.is_rotated());
+    }
+
+    #[test]
+    fn mixed_seeds_cannot_be_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut w = crate::gemv::mock::tiny_weights();
+        w.config.tie_word_embeddings = false;
+        w.lm_head = Weight::Rotated(Box::new(w.lm_head.clone()), 1);
+        w.embed = Weight::Rotated(Box::new(w.embed.clone()), 2);
+        assert!(save_model(&w, &dir.path().join("x.incord")).is_err());
     }
 }

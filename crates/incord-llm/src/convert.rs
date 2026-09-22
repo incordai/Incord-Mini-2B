@@ -23,7 +23,8 @@ use std::sync::OnceLock;
 use half::f16;
 use incord::plan::{Class, Fmt, Plan};
 use incord::quant::Rounding;
-use incord::save::{ROTATED_FLAG, VERSION_ROTATED};
+use incord::rotate::DEFAULT_SEED;
+use incord::save::{ROTATED_FLAG, VERSION_ROTATION_META, write_rotation_meta};
 use memmap2::Mmap;
 
 /// Quantization options, set once from the command line.
@@ -166,11 +167,15 @@ fn main() {
 
     // Header
     w.write_all(b"QOR4").unwrap();
-    // Version 2: f16 vision. Rotated weights need VERSION_ROTATED so older
-    // loaders reject the file instead of misreading it.
-    let version: u32 = if opts().rotate { VERSION_ROTATED } else { 2 };
+    // Version 2: f16 vision. Rotated weights need VERSION_ROTATION_META (the
+    // rotation scheme and sign seed follow the format byte) so older loaders
+    // reject the file instead of misreading it.
+    let version: u32 = if opts().rotate { VERSION_ROTATION_META } else { 2 };
     w.write_all(&version.to_le_bytes()).unwrap();
     w.write_all(&[format_id]).unwrap();
+    if opts().rotate {
+        write_rotation_meta(&mut w, DEFAULT_SEED).unwrap();
+    }
 
     // Config
     write_u32(&mut w, config.vocab_size as u32);
@@ -669,7 +674,7 @@ fn write_tensor_weight(
     // W' = Rᵀ·W, so the engine computes (x·R)·W' = x·W.
     let rotate = opts().rotate && shape.len() == 2;
     if rotate {
-        incord::rotate::rotate_columns(&mut f32_data, k, n);
+        incord::rotate::rotate_columns(&mut f32_data, k, n, DEFAULT_SEED);
     }
 
     // Write per-weight format byte so loader knows
@@ -729,7 +734,7 @@ fn write_embedding_weight(
     // Rows (one per token) are rotated along hidden: the head dots rotated
     // rows with rotated activations, the lookup un-rotates the row it reads.
     let flag = if opts().rotate {
-        incord::rotate::rotate_rows(&mut f32_data, n);
+        incord::rotate::rotate_rows(&mut f32_data, n, DEFAULT_SEED);
         ROTATED_FLAG
     } else {
         0

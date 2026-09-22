@@ -31,6 +31,7 @@ use incord::gemv::{
 };
 use incord::gptq::{GptqConfig, Hessian, RowQuantizer, gptq};
 use incord::plan::{Class, Fmt, Plan};
+use incord::rotate::DEFAULT_SEED;
 use incord::quant::{
     GROUP, Rounding, dequantize_q4, dequantize_q8, quantize_q4, quantize_q4_row, quantize_q8,
     quantize_q8_row,
@@ -113,7 +114,7 @@ impl LinearObserver for Collector {
         if self.rotate {
             // Rotated weights see rotated inputs: accumulate H of x·R.
             let mut xr = x.to_vec();
-            xr.chunks_mut(k).for_each(incord::rotate::forward);
+            xr.chunks_mut(k).for_each(|row| incord::rotate::forward(row, DEFAULT_SEED));
             h.add(&xr, rows);
         } else {
             h.add(x, rows);
@@ -158,7 +159,7 @@ fn f16_data(w: &Weight, what: &str) -> Result<(Vec<f32>, usize, usize), String> 
 }
 
 fn wrap(w: Weight, rotated: bool) -> Weight {
-    if rotated { Weight::Rotated(Box::new(w)) } else { w }
+    if rotated { Weight::Rotated(Box::new(w), DEFAULT_SEED) } else { w }
 }
 
 /// GPTQ-quantize one matmul weight `[k, n]` to `fmt` with the Hessian of
@@ -169,7 +170,7 @@ fn quantize_matmul(w: &Weight, h: &Hessian, fmt: Fmt, o: &Opts, what: &str) -> R
         return Ok(w.clone()); // F16 by plan, or too narrow for groups (as in the converter)
     }
     if o.rotate {
-        incord::rotate::rotate_columns(&mut data, k, n);
+        incord::rotate::rotate_columns(&mut data, k, n, DEFAULT_SEED);
     }
     let q = match fmt {
         Fmt::Q4 => {
@@ -191,7 +192,7 @@ fn quantize_matmul(w: &Weight, h: &Hessian, fmt: Fmt, o: &Opts, what: &str) -> R
 fn quantize_table(w: &Weight, fmt: Fmt, o: &Opts, what: &str) -> Result<Weight, String> {
     let (mut data, k, n) = f16_data(w, what)?;
     if o.rotate {
-        incord::rotate::rotate_rows(&mut data, n);
+        incord::rotate::rotate_rows(&mut data, n, DEFAULT_SEED);
     }
     let q = match fmt {
         Fmt::F16 => Weight::F16(F16Weight {
