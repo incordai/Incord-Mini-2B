@@ -1,0 +1,155 @@
+[package]
+name = "incord"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "incord"
+path = "src/main.rs"
+required-features = ["server"]
+
+[[bin]]
+name = "incord-convert"
+path = "src/convert.rs"
+required-features = ["server"]
+
+[[bin]]
+name = "incord-server"
+path = "src/bin/incord_server.rs"
+required-features = ["server"]
+
+[[bin]]
+name = "load_test"
+path = "tests/load/load_test.rs"
+required-features = ["server"]
+
+[dependencies]
+# === INFERENCE-ONLY DEPS (always compiled) ===
+# These are what downstream consumers like qora-server actually need:
+# loading weights, running prefill/decode, tokenizing input.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+half = "2"
+rayon = "1"
+memmap2 = "0.9"
+image = "0.25"
+async-trait = "0.1"
+anyhow = "1"
+tracing = "0.1"
+
+# === SERVER-ONLY DEPS (gated behind `server` feature) ===
+# These power qor4b's standalone HTTP server binary. Downstream consumers
+# (like qora-server, which has its own HTTP/auth stack) opt out via
+# `default-features = false`, dropping ~30+ crates from the dep tree.
+tokio = { version = "1", features = ["full"], optional = true }
+axum = { version = "0.8", optional = true }
+axum-server = { version = "0.7", features = ["tls-rustls"], optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", features = ["trace", "cors", "limit", "timeout"], optional = true }
+rustls = { version = "0.23", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+futures = { version = "0.3", optional = true }
+bytes = { version = "1", optional = true }
+uuid = { version = "1", features = ["v4", "serde"], optional = true }
+toml = { version = "0.8", optional = true }
+thiserror = { version = "1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"], optional = true }
+
+# Auth + DB — only qor4b's own M2 server uses these.
+redb = { version = "2", optional = true }
+bincode = { version = "2", features = ["serde"], optional = true }
+argon2 = { version = "0.5", optional = true }
+chrono = { version = "0.4", features = ["serde"], optional = true }
+rand_core = { version = "0.6", features = ["std"], optional = true }
+sha2 = { version = "0.10", optional = true }
+hmac = { version = "0.12", optional = true }
+hex = { version = "0.4", optional = true }
+
+# HTTP utilities (image fetch via reqwest is only used by the server path).
+base64 = { version = "0.22", optional = true }
+urlencoding = { version = "2", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
+
+# Metrics — qora-server has its own prometheus instance.
+prometheus = { version = "0.13", optional = true }
+once_cell = { version = "1", optional = true }
+parking_lot = { version = "0.12", optional = true }
+
+[dependencies.cortex]
+git = "https://github.com/qora-protocol/cortex"
+default-features = false
+features = ["ndarray"]
+optional = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[features]
+# Default keeps the standalone server intact so `cargo build` in qor4b/
+# still produces working binaries. Downstream consumers like qora-server
+# that don't need them set `default-features = false`.
+default = ["server"]
+
+# Bundle of every dep needed for qor4b's own HTTP server, conversion CLI,
+# load test, etc. Disabling this feature reduces the dep tree to just the
+# inference math + tokenizer.
+server = [
+  "dep:tokio", "dep:axum", "dep:axum-server", "dep:tower", "dep:tower-http",
+  "dep:rustls", "dep:rustls-pemfile", "dep:futures", "dep:bytes",
+  "dep:uuid", "dep:toml", "dep:thiserror", "dep:tracing-subscriber",
+  "dep:redb", "dep:bincode", "dep:argon2", "dep:chrono",
+  "dep:rand_core", "dep:sha2", "dep:hmac", "dep:hex",
+  "dep:base64", "dep:urlencoding", "dep:reqwest",
+  "dep:prometheus", "dep:once_cell", "dep:parking_lot",
+]
+
+gpu = ["dep:cortex", "cortex/wgpu", "cortex/autotune", "cortex/fusion", "cortex/std"]
+gpu-metal = ["dep:cortex", "cortex/metal", "cortex/autotune", "cortex/fusion", "cortex/std"]
+mock-weights = []
+
+[[bench]]
+name = "decode_throughput"
+harness = false
+required-features = ["mock-weights"]
+
+[[test]]
+name = "http_basic"
+path = "tests/integration/http_basic.rs"
+required-features = ["server"]
+
+[[test]]
+name = "auth_flow"
+path = "tests/integration/auth_flow.rs"
+required-features = ["server"]
+
+[[test]]
+name = "chat_completions"
+path = "tests/integration/chat_completions.rs"
+required-features = ["mock-weights", "server"]
+
+[[test]]
+name = "gemv_batch_full_model"
+path = "tests/integration/gemv_batch_full_model.rs"
+
+[[test]]
+name = "cancellation"
+path = "tests/integration/cancellation.rs"
+required-features = ["mock-weights", "server"]
+
+[[test]]
+name = "slot_pool_concurrency"
+path = "tests/integration/slot_pool_concurrency.rs"
+required-features = ["mock-weights", "server"]
+
+[[test]]
+name = "vision"
+path = "tests/integration/vision.rs"
+required-features = ["mock-weights", "server"]
+
+[[test]]
+name = "metrics"
+path = "tests/integration/metrics.rs"
+required-features = ["mock-weights", "server"]

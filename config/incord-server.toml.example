@@ -1,0 +1,62 @@
+[server]
+bind = "0.0.0.0:443"
+tls_cert = "/etc/incord/certs/fullchain.pem"
+tls_key = "/etc/incord/certs/privkey.pem"
+
+[scheduler]
+slot_count = 64
+max_queue = 1000
+max_context = 8192
+request_timeout_secs = 90
+
+[auth]
+admin_token_env = "INCORD_ADMIN_TOKEN"
+db_path = "/var/lib/incord/auth.redb"
+
+[limits.default]
+rpm = 60
+tpm = 60000
+
+[observability]
+prometheus_bind = "127.0.0.1:9090"
+log_level = "info"
+log_format = "json"
+
+# Models are loaded eagerly at startup. Each [[models]] entry registers
+# a model in the runtime registry. The 'id' field is what clients use
+# in the request 'model' field.
+
+[[models]]
+id = "incord-mini-2b"             # rename freely; this is your customer-facing model id
+kind = "chat"
+path = "/var/lib/incord/llm/model.incord"
+tokenizer = "/var/lib/incord/llm/tokenizer.json"
+description = "Incord-Mini-2B multimodal LLM (text + vision)"
+
+[[models]]
+id = "incord-tts"
+kind = "tts"
+path = "/var/lib/incord/tts/model.incord-tts"
+tokenizer = "/var/lib/incord/tts/tokenizer.json"
+description = "Text-to-speech with voice cloning (10 languages, 25 voices)"
+
+[[models]]
+id = "incord-stt"
+kind = "stt"
+path = "/var/lib/incord/stt/model.incord-stt-small"
+description = "Speech-to-text (Whisper-based, multi-language)"
+
+[[models]]
+id = "incord-embed"
+kind = "embedding"
+path = "/var/lib/incord/rag/embed.bin"
+description = "Sentence embedding (2048-dim, multilingual)"
+
+[[models]]
+id = "incord-rerank"
+kind = "rerank"
+path = "/var/lib/incord/rag/rerank.bin"
+description = "Cross-encoder reranker"
+
+[loading]
+mode = "eager"   # "eager" loads all at startup; "lazy" on first request

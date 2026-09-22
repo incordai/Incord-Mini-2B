@@ -12,7 +12,7 @@ curl -sS "$QORA_URL/v1/chat/completions" \
     -H "Authorization: Bearer $QORA_KEY" \
     -H "Content-Type: application/json" \
     -d "{
-        \"model\": \"qora-4b\",
+        \"model\": \"incord-mini-2b\",
         \"messages\": [{
             \"role\": \"user\",
             \"content\": [

@@ -22,4 +22,4 @@ export QORA_URL=https://api.example.com
 - **openai-node/** — Node with the official `openai` SDK
   - `chat.mjs`, `chat_stream.mjs`
 
-All examples target `qora-4b`. The QORA API is wire-compatible with OpenAI's `/v1/chat/completions`, so the standard SDKs work unchanged — just point them at your QORA URL.
+All examples target `incord-mini-2b` (also aliased as `incord`). The Incord API is wire-compatible with OpenAI's `/v1/chat/completions`, so standard SDKs work unchanged — just point them at your Incord URL.

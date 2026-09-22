@@ -11,7 +11,7 @@ const client = new OpenAI({
 });
 
 const resp = await client.chat.completions.create({
-    model: "qora-4b",
+    model: "incord-mini-2b",
     messages: [{ role: "user", content: "Hello!" }],
     max_tokens: 200,
 });

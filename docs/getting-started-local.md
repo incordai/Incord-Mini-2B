@@ -1,24 +1,24 @@
 # Getting Started — Local End-to-End Test
 
-This guide walks through running the full stack locally: qora-server backend + admin UI + chat UI, with API key creation and a test chat.
+This guide walks through running the full stack locally: incord-server backend + admin UI + chat UI, with API key creation and a test chat.
 
 ## 1. Build and start the backend
 
 In one terminal:
 
 ```bash
-cd D:\Burn-AI\QOR4B
-cargo build --release --workspace --bin qora-server
+cd D:\Burn-AI\Incord-Mini-2B
+cargo build --release --workspace --bin incord-server
 ```
 
 Set required environment variables:
 
 ```powershell
-$env:QORA_SERVER_SECRET = "dev-secret-replace-in-prod-1234567890abcdef"
-$env:QORA_ADMIN_TOKEN   = "dev-admin-token"
+$env:INCORD_SERVER_SECRET = "<GENERATE_RANDOM_SECRET_HEX>"
+$env:INCORD_ADMIN_TOKEN   = "dev-admin-token"
 ```
 
-Edit (or create) a local config `qora-server.toml`:
+Edit (or create) a local config `incord-server.toml`:
 
 ```toml
 [server]
@@ -31,7 +31,7 @@ max_context = 8192
 request_timeout_secs = 90
 
 [auth]
-admin_token_env = "QORA_ADMIN_TOKEN"
+admin_token_env = "INCORD_ADMIN_TOKEN"
 db_path = "./local-auth.redb"
 
 [limits.default]
@@ -44,19 +44,19 @@ log_level = "info"
 log_format = "json"
 
 [[models]]
-id = "qora-llm"
+id = "incord-mini-2b"
 kind = "chat"
-path = "D:/Burn-AI/QOR4B/model/model.qor4b"
-tokenizer = "D:/Burn-AI/QOR4B/model/tokenizer.json"
+path = "D:/Burn-AI/Incord-Mini-2B/model/model.incord"
+tokenizer = "D:/Burn-AI/Incord-Mini-2B/model/tokenizer.json"
 description = "Local LLM for testing"
 ```
 
-(Adjust paths to wherever your `model.qor4b` and `tokenizer.json` actually live.)
+(Adjust paths to wherever your `model.incord` and `tokenizer.json` actually live.)
 
 Start the server:
 
 ```powershell
-.\target\release\qora-server.exe qora-server.toml
+.\target\release\incord-server.exe incord-server.toml
 ```
 
 You should see logs about loading the model and binding to 127.0.0.1:8080.
@@ -68,7 +68,7 @@ curl http://localhost:8080/health
 # {"status":"ok"}
 
 curl http://localhost:8080/v1/models
-# {"object":"list","data":[{"id":"qora-llm",...}]}
+# {"object":"list","data":[{"id":"incord-mini-2b",...}]}
 ```
 
 ## 2. Start the admin UI
@@ -84,7 +84,7 @@ npm run dev
 Open http://localhost:5173. You'll see the login screen.
 
 - Backend URL: `http://localhost:8080`
-- Admin token: `dev-admin-token` (matches what you set in `QORA_ADMIN_TOKEN`)
+- Admin token: `dev-admin-token` (matches what you set in `INCORD_ADMIN_TOKEN`)
 
 Click LOGIN. The dashboard loads.
 
@@ -97,7 +97,7 @@ In the admin UI:
 3. Fill in: user_id = `test-user`, name = `chat-test`, rpm_limit = 60, tpm_limit = 60000.
 4. Submit.
 
-A modal appears with the raw key (looks like `qora_<64 hex chars>`). **Copy it now** — it's never shown again. We'll need it in the next step.
+A modal appears with the raw key (looks like `incord_<64 hex chars>`). **Copy it now** — it's never shown again. We'll need it in the next step.
 
 ## 4. Start the chat UI
 
@@ -115,7 +115,7 @@ In the chat UI:
 
 1. Open Settings → Preferences (or the dev panel).
 2. Set **Backend URL** to `http://localhost:8080` (if it isn't already the default).
-3. Set **API Key** to the `qora_…` key you copied from the admin UI.
+3. Set **API Key** to the `incord_…` key you copied from the admin UI.
 4. Save.
 
 ## 5. Send a test message
@@ -125,20 +125,20 @@ Type a message in the chat input and send. You should see the LLM respond.
 If it errors:
 - 401: API key is wrong. Re-paste from admin.
 - Connection refused: backend isn't running, or the URL is wrong.
-- Unknown model: the chat UI is sending a model id that isn't in the registry. Check the model dropdown — set it to `qora-llm`.
+- Unknown model: the chat UI is sending a model id that isn't in the registry. Check the model dropdown — set it to `incord-mini-2b`.
 
 ## 6. Test other endpoints (optional)
 
 From a terminal, with the user key from step 3:
 
 ```bash
-KEY=qora_<your-key>
+KEY=incord_<your-key>
 
 # Embedding
 curl -X POST http://localhost:8080/v1/embeddings \
   -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"qora-embed","input":["hello world"]}'
+  -d '{"model":"incord-embed","input":["hello world"]}'
 
 # (Add models to your config first if you want to test TTS / STT / Rerank)
 ```

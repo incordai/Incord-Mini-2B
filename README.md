@@ -1,6 +1,6 @@
-# QORA — Multi-Model Multi-Modality AI Platform
+# INCORD — Multi-Model Multi-Modality AI Platform
 
-Pure-Rust API server fronting an entire QORA model family. **One binary** serves text + vision (LLM), text-to-speech, speech-to-text, embeddings, and reranking — all with an OpenAI-compatible API plus a unified `/v1/inference` endpoint.
+Pure-Rust API server fronting an entire INCORD model family. **One binary** serves text + vision (LLM), text-to-speech, speech-to-text, embeddings, and reranking — all with an OpenAI-compatible API plus a unified `/v1/inference` endpoint.
 
 No Python. No CUDA. No external ML runtime. Single binary + model weight files = portable, sellable AI infrastructure.
 
@@ -10,28 +10,28 @@ No Python. No CUDA. No external ML runtime. Single binary + model weight files =
 
 | Capability | Engine | Model formats supported |
 |---|---|---|
-| Chat / completion (text + vision) | `LlmEngine` | `.qor4b` family — works for QOR2B, QOR3B, QOR4B, QOR9B, QOR27B and any future size |
-| Text-to-speech (voice cloning, 25 voices, 10 languages) | `QoraTtsEngine` | `.qora-tts` |
-| Speech-to-text (Whisper-based, multi-language) | `QoraSttEngine` | `.qora-stt-small` |
+| Chat / completion (text + vision) | `LlmEngine` | `.incord` / Incord-Mini-2B family |
+| Text-to-speech (voice cloning, 25 voices, 10 languages) | `INCORDTtsEngine` | `.INCORD-tts` |
+| Speech-to-text (Whisper-based, multi-language) | `INCORDSttEngine` | `.INCORD-stt-small` |
 | Sentence embedding (2048-dim, multilingual) | `QorEmbeddingEngine` | qor-rag embedding model |
 | Reranking | `QorRerankEngine` | qor-rag reranker model |
 
-**Model size is config-driven, never hardcoded.** Swap from 4B to 9B to 27B by changing one TOML entry — no code change, no recompile.
+**Model size is config-driven, never hardcoded.** Swap models by changing one TOML entry — no code change, no recompile.
 
 ---
 
 ## Repository structure
 
 ```
-D:\Burn-AI\QOR4B\                   ← workspace root
+D:\Burn-AI\Incord-Mini-2B\          ← workspace root
 ├── Cargo.toml                       ← workspace manifest
 ├── crates\
-│   ├── qora-llm\                    ← LLM inference engine (workspace member)
+│   ├── incord-llm\                  ← LLM inference engine (workspace member)
 │   │   ├── src\                     ← gemv kernels, attention, vision, tokenizer
 │   │   ├── tests\                   ← unit + integration tests
 │   │   ├── benches\                 ← criterion micro-benchmarks
 │   │   └── README.md                ← LLM-specific docs (formerly the root README)
-│   └── qora-server\                 ← HTTP API server (workspace member)
+│   └── incord-server\               ← HTTP API server
 │       ├── src\
 │       │   ├── api\                 ← unified InferenceRequest, OpenAI types
 │       │   ├── auth\                ← redb-backed API keys, Argon2 + HMAC, rate limit
@@ -46,14 +46,14 @@ D:\Burn-AI\QOR4B\                   ← workspace root
 │       │   ├── metrics.rs           ← Prometheus instrumentation
 │       │   ├── registry.rs          ← runtime model lookup table
 │       │   ├── usage\               ← per-request usage tracking
-│       │   └── bin\qora_server.rs   ← the executable entry point
+│       │   └── bin\INCORD_server.rs ← the executable entry point
 │       └── tests\                   ← integration tests
 ├── model\                           ← weight files (configured paths in TOML)
-│   ├── model.qor4b                  ← LLM weights (~3 GB for 4B, larger for 9B/27B)
+│   ├── model.incord                 ← LLM weights (~2.55 GB for Incord-Mini-2B)
 │   └── tokenizer.json
 ├── config\
-│   ├── qora-server.toml.example     ← canonical config template
-│   └── qora-server.service          ← systemd unit
+│   ├── INCORD-server.toml.example     ← canonical config template
+│   └── INCORD-server.service          ← systemd unit
 ├── docs\
 │   ├── api.md                       ← endpoint reference (auth, schemas, errors)
 │   ├── deployment.md                ← operator guide (TLS, backup, ops)
@@ -64,18 +64,18 @@ D:\Burn-AI\QOR4B\                   ← workspace root
     └── soak_24h.sh                  ← memory-drift soak test
 ```
 
-### External Rust crates (path-deps from qora-server)
+### External Rust crates (path-deps from INCORD-server)
 
 The TTS / STT / RAG engine code lives outside this repo and is pulled in as Cargo path-deps — no source code is duplicated:
 
 | External crate | Source location | Used by |
 |---|---|---|
-| `qora-tts` | `D:\Burn-AI\QORA-TTS\` | `qora-server::engines::tts::QoraTtsEngine` |
-| `qora-stt-small` | `D:\Burn-AI\QORA-STT-Small\` | `qora-server::engines::stt::QoraSttEngine` |
-| `qor-rag` | `C:\Projects\AI\qor-main\qor-rs\crates\qor-rag\` | `qora-server::engines::rag::Qor*Engine` |
-| `qora-simd` | `C:\Projects\AI\qor-main\qor-rs\crates\qora-simd\` | transitive dep of qor-rag |
+| `INCORD-tts` | `D:\Burn-AI\INCORD-TTS\` | `INCORD-server::engines::tts::INCORDTtsEngine` |
+| `INCORD-stt-small` | `D:\Burn-AI\INCORD-STT-Small\` | `INCORD-server::engines::stt::INCORDSttEngine` |
+| `qor-rag` | `C:\Projects\AI\qor-main\qor-rs\crates\qor-rag\` | `INCORD-server::engines::rag::Qor*Engine` |
+| `INCORD-simd` | `C:\Projects\AI\qor-main\qor-rs\crates\INCORD-simd\` | transitive dep of qor-rag |
 
-These crates are **already compiled into `qora-server.exe` at build time** — at runtime, the server is a single binary. The .exe binaries that ship with each external crate (`qora-tts.exe`, `qora-stt-small.exe`) are **standalone CLI tools** and are NOT used by the server.
+These crates are **already compiled into `INCORD-server.exe` at build time** — at runtime, the server is a single binary. The .exe binaries that ship with each external crate (`INCORD-tts.exe`, `INCORD-stt-small.exe`) are **standalone CLI tools** and are NOT used by the server.
 
 ### Frontend projects (separate from this repo)
 
@@ -87,7 +87,7 @@ C:\Projects\Chat\fruntend\
 └── admin\                ← Vite project for local dev (port 5173)
 ```
 
-Each frontend project is independent: `cd <dir> && npm install && npm run dev`. They both talk to the qora-server HTTP API.
+Each frontend project is independent: `cd <dir> && npm install && npm run dev`. They both talk to the INCORD-server HTTP API.
 
 ---
 
@@ -95,7 +95,7 @@ Each frontend project is independent: `cd <dir> && npm install && npm run dev`. 
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                       qora-server  (single binary)                    │
+│                       INCORD-server  (single binary)                    │
 │                                                                       │
 │  HTTP Layer                                                           │
 │  ├── /v1/inference          ← unified, dispatched by `task` field     │
@@ -115,9 +115,9 @@ Each frontend project is independent: `cd <dir> && npm install && npm run dev`. 
 │       │                                                               │
 │       ▼                                                               │
 │  Concrete Engines                                                     │
-│  ├── LlmEngine          ──→  qora-llm crate (in this repo)            │
-│  ├── QoraTtsEngine      ──→  qora-tts crate (D:\Burn-AI\QORA-TTS\)    │
-│  ├── QoraSttEngine      ──→  qora-stt-small (D:\Burn-AI\QORA-STT-Small\)│
+│  ├── LlmEngine          ──→  INCORD-llm crate (in this repo)            │
+│  ├── INCORDTtsEngine      ──→  INCORD-tts crate (D:\Burn-AI\INCORD-TTS\)    │
+│  ├── INCORDSttEngine      ──→  INCORD-stt-small (D:\Burn-AI\INCORD-STT-Small\)│
 │  ├── QorEmbeddingEngine ──→  qor-rag (C:\Projects\AI\qor-main\...\)   │
 │  └── QorRerankEngine    ──→  qor-rag (same)                            │
 └──────────────────────────────────────────────────────────────────────┘
@@ -131,14 +131,14 @@ Three scenarios:
 
 ### 1. Different size of an existing model class (e.g. swap QOR4B → QOR9B)
 
-Just update `qora-server.toml`:
+Just update `INCORD-server.toml`:
 
 ```toml
 [[models]]
-id = "qora-llm"                                     # keep id stable for clients
+id = "INCORD-llm"                                     # keep id stable for clients
 kind = "chat"
-path = "/var/lib/qora/llm/model.qor9b"              # ← new weight file
-tokenizer = "/var/lib/qora/llm/tokenizer.json"
+path = "/var/lib/INCORD/llm/model.qor9b"              # ← new weight file
+tokenizer = "/var/lib/INCORD/llm/tokenizer.json"
 ```
 
 Restart the server. **No code change. No recompile.** This is the value of the registry approach.
@@ -149,29 +149,29 @@ Add multiple `[[models]]` entries with different `id` fields:
 
 ```toml
 [[models]]
-id = "qora-fast"
+id = "INCORD-fast"
 kind = "chat"
-path = "/var/lib/qora/4b/model.qor4b"
-tokenizer = "/var/lib/qora/4b/tokenizer.json"
+path = "/var/lib/INCORD/4b/model.qor4b"
+tokenizer = "/var/lib/INCORD/4b/tokenizer.json"
 
 [[models]]
-id = "qora-large"
+id = "INCORD-large"
 kind = "chat"
-path = "/var/lib/qora/27b/model.qor27b"
-tokenizer = "/var/lib/qora/27b/tokenizer.json"
+path = "/var/lib/INCORD/27b/model.qor27b"
+tokenizer = "/var/lib/INCORD/27b/tokenizer.json"
 ```
 
-Clients then send `"model": "qora-fast"` or `"model": "qora-large"` in the request. The Registry routes to the right engine.
+Clients then send `"model": "INCORD-fast"` or `"model": "INCORD-large"` in the request. The Registry routes to the right engine.
 
 ### 3. New model class (e.g. image generation, video gen)
 
 Bigger work — requires:
 
-- A new trait (`ImageGenEngine`) in `crates/qora-server/src/engine/`
+- A new trait (`ImageGenEngine`) in `crates/INCORD-server/src/engine/`
 - A new variant in the `Task` enum
 - A new field in `Registry`
 - A new arm in the `/v1/inference` task dispatch
-- A wrapper crate in `crates/qora-server/src/engines/`
+- A wrapper crate in `crates/INCORD-server/src/engines/`
 - An external crate (or path-dep) doing the actual inference
 
 The trait hierarchy is designed for this — adding a new task type is additive, doesn't break existing engines.
@@ -182,32 +182,32 @@ The trait hierarchy is designed for this — adding a new task type is additive,
 
 ### Prerequisites
 - Rust toolchain (edition 2024, latest stable)
-- The QORA-TTS, QORA-STT-Small, qor-rag, qora-simd source trees at the paths Cargo.toml expects
+- The INCORD-TTS, INCORD-STT-Small, qor-rag, INCORD-simd source trees at the paths Cargo.toml expects
 
 ### Build the server
 
 ```bash
 cd D:\Burn-AI\QOR4B
-cargo build --release --workspace --bin qora-server
+cargo build --release --workspace --bin INCORD-server
 ```
 
-Build artifacts at `target\release\qora-server.exe`.
+Build artifacts at `target\release\INCORD-server.exe`.
 
 ### Run locally (development)
 
 1. Set required environment variables:
 
 ```bash
-$env:QORA_SERVER_SECRET = "any-32-byte-random-hex"
-$env:QORA_ADMIN_TOKEN   = "any-admin-secret"
+$env:INCORD_SERVER_SECRET = "any-32-byte-random-hex"
+$env:INCORD_ADMIN_TOKEN   = "any-admin-secret"
 ```
 
-2. Edit `config\qora-server.toml.example` → save as `qora-server.toml` with paths pointing to your local model files.
+2. Edit `config\INCORD-server.toml.example` → save as `INCORD-server.toml` with paths pointing to your local model files.
 
 3. Run:
 
 ```bash
-.\target\release\qora-server.exe qora-server.toml
+.\target\release\INCORD-server.exe INCORD-server.toml
 ```
 
 Server boots, loads all configured models eagerly, listens on the configured bind address.
@@ -230,7 +230,7 @@ npm install
 npm run dev
 ```
 
-In the admin login screen, enter `http://localhost:8080` (or wherever qora-server is listening) and the `QORA_ADMIN_TOKEN` you set above.
+In the admin login screen, enter `http://localhost:8080` (or wherever INCORD-server is listening) and the `INCORD_ADMIN_TOKEN` you set above.
 
 ---
 
@@ -238,12 +238,12 @@ In the admin login screen, enter `http://localhost:8080` (or wherever qora-serve
 
 For deployment to a Linux box (e.g. EPYC server):
 
-1. Build for Linux: `cargo build --release --workspace --bin qora-server` (or cross-compile)
+1. Build for Linux: `cargo build --release --workspace --bin INCORD-server` (or cross-compile)
 2. Copy binary + model weight files to the server
 3. Run the install script: `sudo ./scripts/install.sh`
-4. Edit `/etc/qora/qora-server.toml` with model paths
-5. Set secrets in `/etc/qora/qora.env`
-6. `systemctl enable --now qora-server`
+4. Edit `/etc/INCORD/INCORD-server.toml` with model paths
+5. Set secrets in `/etc/INCORD/INCORD.env`
+6. `systemctl enable --now INCORD-server`
 7. Validate with `docs/production-load-test.md` runbook
 
 Full deployment guide: [`docs/deployment.md`](docs/deployment.md).
@@ -274,9 +274,9 @@ Full schemas + curl examples: [`docs/api.md`](docs/api.md). Drop-in OpenAI SDK e
 
 ---
 
-## Configuration (qora-server.toml)
+## Configuration (INCORD-server.toml)
 
-Complete schema in [`config/qora-server.toml.example`](config/qora-server.toml.example). Key sections:
+Complete schema in [`config/INCORD-server.toml.example`](config/INCORD-server.toml.example). Key sections:
 
 ```toml
 [server]            # bind address + optional TLS cert/key paths
@@ -300,12 +300,12 @@ description = "..."
 ## Architectural Decisions (worth remembering)
 
 ### Why a Cargo workspace with path-deps?
-- `qora-llm` is a workspace member because we modified it heavily during development.
+- `INCORD-llm` is a workspace member because we modified it heavily during development.
 - TTS / STT / RAG are external crates because they're already complete — we just consume their public APIs.
 - For deployment, only the compiled binary + model weight files matter. Source layout is a developer ergonomics question.
 
 ### Why `redb` instead of SQLite?
-- QORA's promise is "pure Rust, single binary, no C deps." sqlx + libsqlite3-sys breaks that.
+- INCORD's promise is "pure Rust, single binary, no C deps." sqlx + libsqlite3-sys breaks that.
 - `redb` is a pure-Rust embedded ACID DB used in production by Iroh and others.
 - API keys, usage records, and chat history all live in one redb file with separate logical tables.
 
@@ -352,10 +352,10 @@ description = "..."
 | How do I add a new model size? | This README, "Adding a new model" |
 | What's the API surface? | [`docs/api.md`](docs/api.md) |
 | How do I deploy? | [`docs/deployment.md`](docs/deployment.md) |
-| What's the multi-model design rationale? | [`docs/superpowers/specs/2026-04-26-qora-multimodel-design.md`](docs/superpowers/specs/2026-04-26-qora-multimodel-design.md) |
+| What's the multi-model design rationale? | [`docs/superpowers/specs/2026-04-26-INCORD-multimodel-design.md`](docs/superpowers/specs/2026-04-26-INCORD-multimodel-design.md) |
 | Why was there an earlier (now-removed) v1.0.0 tag? | The original tag was a single-model slice. We expanded scope; the real v1.0.0 covers multi-model. |
-| What's in qora-llm specifically? | [`crates/qora-llm/README.md`](crates/qora-llm/README.md) |
-| How does chat history retrieval work? | `crates/qora-server/src/history/retrieve.rs` (cosine similarity over stored embeddings) |
+| What's in INCORD-llm specifically? | [`crates/INCORD-llm/README.md`](crates/INCORD-llm/README.md) |
+| How does chat history retrieval work? | `crates/INCORD-server/src/history/retrieve.rs` (cosine similarity over stored embeddings) |
 | Where are API keys stored? | redb at `auth.db_path` — never plaintext, only HMAC index + Argon2 hash |
 
 ---

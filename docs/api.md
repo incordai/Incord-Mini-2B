@@ -27,16 +27,16 @@ List available models.
   "object": "list",
   "data": [
     {
-      "id": "qora-llm",
+      "id": "incord-mini-2b",
       "object": "model",
       "created": 1700000000,
-      "owned_by": "qora"
+      "owned_by": "incord"
     },
     {
-      "id": "qora-tts",
+      "id": "incord",
       "object": "model",
       "created": 1700000000,
-      "owned_by": "qora"
+      "owned_by": "incord"
     }
   ]
 }
@@ -186,8 +186,9 @@ QORA-specific extensions (additive to OpenAI schema; ignored by standard clients
 
 | Parameter | Type | Default | Notes |
 |-----------|------|---------|-------|
+| `reasoning_effort` | string | none | Reasoning effort level: `"low"` (512 tokens), `"medium"` (2048 tokens), `"high"` (8192 tokens). Standard OpenAI parameter for reasoning models. |
 | `think` | bool | `true` | Enable extended chain-of-thought |
-| `think_budget` | int | 1024 | Max thinking tokens |
+| `think_budget` | int | 1024 | Max thinking tokens (overrides `reasoning_effort` preset if specified) |
 | `show_think` | bool | `false` | Include thinking tokens in output |
 
 #### curl example
@@ -197,7 +198,7 @@ curl -sS "$QORA_URL/v1/chat/completions" \
     -H "Authorization: Bearer $QORA_KEY" \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "qora-llm",
+        "model": "incord-mini-2b",
         "messages": [{"role": "user", "content": "Hello!"}],
         "max_tokens": 200
     }'
