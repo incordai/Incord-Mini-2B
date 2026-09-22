@@ -3,8 +3,8 @@
 /backup/
 /test_frames/
 *.exe
-*.qor4b
-model.qor4b
+*.incord
+model.incord
 *.py
 *.png
 

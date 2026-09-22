@@ -1,12 +1,12 @@
-# QORA Multi-User Server — Master Implementation Plan
+# Incord Multi-User Server — Master Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Ship a complete OpenAI-compatible HTTP API server for QORA-4B, capable of 100–150 concurrent users on one EPYC 9354 / 256 GB DDR5 server, as one cohesive v1 release.
+**Goal:** Ship a complete OpenAI-compatible HTTP API server for Incord-Mini-2B, capable of 100–150 concurrent users on one EPYC 9354 / 256 GB DDR5 server, as one cohesive v1 release.
 
-**Spec:** `docs/superpowers/specs/2026-04-25-qora-multiuser-server-design.md`
+**Spec:** `docs/superpowers/specs/2026-04-25-incord-multiuser-server-design.md`
 
-**Architecture:** axum HTTP front + SQLite-backed auth/billing + 64-slot continuous-batching scheduler over `Arc<ModelWeights>` + new batched kernels in `gemv_batch.rs`. Existing QORA core (`gemv.rs`, `simd.rs`, `vision.rs`, `tokenizer.rs`, `generate.rs`) stays unchanged; server is added as a new binary target sharing the existing library.
+**Architecture:** axum HTTP front + SQLite-backed auth/billing + 64-slot continuous-batching scheduler over `Arc<ModelWeights>` + new batched kernels in `gemv_batch.rs`. Existing Incord core (`gemv.rs`, `simd.rs`, `vision.rs`, `tokenizer.rs`, `generate.rs`) stays unchanged; server is added as a new binary target sharing the existing library.
 
 **Tech Stack:**
 - Rust 2024 edition (existing)
@@ -39,12 +39,12 @@ HTTP  Auth  Sess  Kernel  Slot  Vision  Obs+Deploy
 
 | # | Module | Plan file | Est. duration | Status |
 |---|---|---|---|---|
-| M1 | HTTP foundation + OpenAI types + config + binary | `2026-04-25-qora-m1-http-foundation.md` | Week 1 | pending |
-| M2 | Auth, API keys, rate limiting, usage tracking | `2026-04-25-qora-m2-auth-billing.md` | Week 2 | pending |
-| M3 | Session + scheduler + serial-parallel decode (single-slot path) | `2026-04-25-qora-m3-session-serial.md` | Weeks 3–4 | pending |
-| M4 | Batched kernels (`gemv_batch.rs`) — DeltaNet batch, FullAttn batch, batched embed/lm_head, f16 KV | `2026-04-25-qora-m4-batched-kernels.md` | Weeks 5–8 | pending |
-| M5 | Slot pool with continuous batching, prefill+decode mixing, scheduling policy | `2026-04-25-qora-m5-slot-pool.md` | Weeks 9–10 | pending |
-| M6 | Vision endpoint + observability + deployment + load-test passes | `2026-04-25-qora-m6-vision-ops-launch.md` | Weeks 11–12 | pending |
+| M1 | HTTP foundation + OpenAI types + config + binary | `2026-04-25-incord-m1-http-foundation.md` | Week 1 | pending |
+| M2 | Auth, API keys, rate limiting, usage tracking | `2026-04-25-incord-m2-auth-billing.md` | Week 2 | pending |
+| M3 | Session + scheduler + serial-parallel decode (single-slot path) | `2026-04-25-incord-m3-session-serial.md` | Weeks 3–4 | pending |
+| M4 | Batched kernels (`gemv_batch.rs`) — DeltaNet batch, FullAttn batch, batched embed/lm_head, f16 KV | `2026-04-25-incord-m4-batched-kernels.md` | Weeks 5–8 | pending |
+| M5 | Slot pool with continuous batching, prefill+decode mixing, scheduling policy | `2026-04-25-incord-m5-slot-pool.md` | Weeks 9–10 | pending |
+| M6 | Vision endpoint + observability + deployment + load-test passes | `2026-04-25-incord-m6-vision-ops-launch.md` | Weeks 11–12 | pending |
 
 ---
 
@@ -67,7 +67,7 @@ src/
   gpu_loader.rs              [unchanged]
   gpu_inference.rs           [unchanged]
   bin/
-    qora_server.rs           [NEW — server main entry point]
+    incord_server.rs           [NEW — server main entry point]
   server/
     mod.rs                   [NEW — module root]
     config.rs                [NEW — TOML config loading]
@@ -128,9 +128,9 @@ tests/
     soak_24h.rs              [NEW]
 
 config/
-  qora-server.toml.example   [NEW]
+  incord-server.toml.example   [NEW]
   prometheus.yml.example     [NEW]
-  qora-server.service        [NEW — systemd unit]
+  incord-server.service        [NEW — systemd unit]
 
 docs/
   api.md                     [NEW — endpoint documentation]
@@ -165,7 +165,7 @@ Every task ends with a commit. Commits are atomic — one logical change per com
 
 ### Branching
 
-Work on a `feature/qora-server` branch off main. Each module gets a sub-branch (`feature/qora-server-m1-http`, etc.) merged back to `feature/qora-server` when complete. Final v1 launch merges `feature/qora-server` to `main`.
+Work on a `feature/incord-server` branch off main. Each module gets a sub-branch (`feature/incord-server-m1-http`, etc.) merged back to `feature/incord-server` when complete. Final v1 launch merges `feature/incord-server` to `main`.
 
 ---
 
@@ -192,7 +192,7 @@ Each module plan opens with:
 
 ---
 
-## Final Launch Checklist (gate to merging `feature/qora-server` → `main`)
+## Final Launch Checklist (gate to merging `feature/incord-server` → `main`)
 
 - [ ] All module acceptance tests pass on a clean checkout
 - [ ] `cargo clippy --all-targets -- -D warnings` clean

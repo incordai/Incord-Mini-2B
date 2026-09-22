@@ -14,7 +14,7 @@ pub struct ChatRequest {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub stream: bool,
-    /// QORA-specific extensions
+    /// Incord-specific extensions
     pub think: Option<bool>,
     pub think_budget: Option<u32>,
     /// If true, include the model's <think>...</think> reasoning in the

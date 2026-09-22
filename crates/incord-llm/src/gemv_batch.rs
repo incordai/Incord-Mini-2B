@@ -1,4 +1,4 @@
-//! Batched forward pass for QORA-4B hybrid architecture.
+//! Batched forward pass for Incord-Mini-2B hybrid architecture.
 //!
 //! Wraps existing kernels in `gemv.rs` so that one forward step processes
 //! N concurrent slots together, reading the model weights only once per step.
@@ -27,7 +27,7 @@ impl std::fmt::Debug for SlotInferenceState {
 }
 
 impl SlotInferenceState {
-    pub fn new(config: &crate::config::Qor4bConfig) -> Self {
+    pub fn new(config: &crate::config::IncordConfig) -> Self {
         Self {
             cache: HybridCache::new(config),
             rope_pos: 0,
@@ -184,7 +184,7 @@ pub fn forward_deltanet_decode_batch(
     n: usize,
     lw: &DeltaNetLayerWeights,
     states: &mut [&mut DeltaNetState],
-    config: &crate::config::Qor4bConfig,
+    config: &crate::config::IncordConfig,
 ) -> Vec<f32> {
     debug_assert_eq!(x_batch.len(), n * config.hidden_size);
     debug_assert_eq!(states.len(), n);
@@ -323,7 +323,7 @@ pub fn forward_fullattn_decode_batch(
     rope_positions: &[usize],
     rope_cos: &[f32],
     rope_sin: &[f32],
-    config: &crate::config::Qor4bConfig,
+    config: &crate::config::IncordConfig,
 ) -> Vec<f32> {
     debug_assert_eq!(rope_positions.len(), n);
     debug_assert_eq!(kvs.len(), n);

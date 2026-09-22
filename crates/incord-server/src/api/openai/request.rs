@@ -32,7 +32,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub user: Option<String>,
 
-    // QORA-specific extensions
+    // Incord-specific extensions
     #[serde(default)]
     pub think_budget: Option<u32>,
 

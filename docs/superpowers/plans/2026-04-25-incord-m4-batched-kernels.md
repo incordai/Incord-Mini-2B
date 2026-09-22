@@ -4,7 +4,7 @@
 
 **Goal:** Implement `forward_decode_batch(weights, slots: &mut [&mut SlotInferenceState]) -> Vec<Vec<f32>>` so a single forward pass amortizes the 3.5 GB weight read across N concurrent users. This is the throughput-defining work — moving the server from ~10 concurrent users (parallel-independent decodes) to ~150 (continuous batching). Every change in this module must preserve the **bitwise N=1 invariant**: with one slot, batch output equals existing single-slot `forward_decode` output exactly.
 
-**Prerequisites:** M3 merged. Branch `feature/qora-server-m4-kernels` from `feature/qora-server`.
+**Prerequisites:** M3 merged. Branch `feature/incord-server-m4-kernels` from `feature/incord-server`.
 
 **Architecture:**
 - New file `src/gemv_batch.rs` — does NOT modify existing `gemv.rs`. Existing kernels are reused; batched versions wrap them.
@@ -30,7 +30,7 @@
 Create `src/gemv_batch.rs`:
 
 ```rust
-//! Batched forward pass for QORA-4B hybrid architecture.
+//! Batched forward pass for Incord-Mini-2B hybrid architecture.
 //!
 //! Wraps existing kernels in `gemv.rs` so that one forward step processes
 //! N concurrent slots together, reading the model weights only once per step.
@@ -49,7 +49,7 @@ pub struct SlotInferenceState {
 }
 
 impl SlotInferenceState {
-    pub fn new(config: &crate::config::Qor4bConfig) -> Self {
+    pub fn new(config: &crate::config::IncordConfig) -> Self {
         Self {
             cache: HybridCache::new(config),
             rope_pos: 0,
@@ -360,7 +360,7 @@ DeltaNet has no KV cache — only fixed-size recurrent state. Each slot's state 
 - [ ] **Step 1: Implement**
 
 ```rust
-use crate::config::{Qor4bConfig, LayerType};
+use crate::config::{IncordConfig, LayerType};
 use crate::gemv::{
     DeltaNetLayerWeights, DeltaNetState,
     forward_deltanet_decode,  // existing single-slot
@@ -373,7 +373,7 @@ pub fn forward_deltanet_decode_batch(
     n: usize,
     lw: &DeltaNetLayerWeights,
     states: &mut [&mut DeltaNetState],
-    config: &Qor4bConfig,
+    config: &IncordConfig,
 ) -> Vec<f32> {
     debug_assert_eq!(x_batch.len(), n * config.hidden_size);
     debug_assert_eq!(states.len(), n);
@@ -534,7 +534,7 @@ pub fn forward_fullattn_decode_batch(
     rope_positions: &[usize],   // one per slot
     rope_cos: &[f32],
     rope_sin: &[f32],
-    config: &Qor4bConfig,
+    config: &IncordConfig,
 ) -> Vec<f32> {
     debug_assert_eq!(rope_positions.len(), n);
 
@@ -690,7 +690,7 @@ pub fn batched_lm_head(
 }
 ```
 
-> **Note**: QORA uses tied embeddings (lm_head = embed transposed) per existing `lm_head_parallel`. The function reuses `weights.embed` for lm_head. If config flags untied embeddings in the future, accept a separate `lm_head` weight.
+> **Note**: Incord uses tied embeddings (lm_head = embed transposed) per existing `lm_head_parallel`. The function reuses `weights.embed` for lm_head. If config flags untied embeddings in the future, accept a separate `lm_head` weight.
 
 - [ ] **Step 2: Test**
 
@@ -821,8 +821,8 @@ Create `benches/decode_throughput.rs`:
 
 ```rust
 use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
-use qor4b::gemv::{forward_decode, mock::tiny_weights};
-use qor4b::gemv_batch::{forward_decode_batch, SlotInferenceState};
+use incord::gemv::{forward_decode, mock::tiny_weights};
+use incord::gemv_batch::{forward_decode_batch, SlotInferenceState};
 
 fn bench_throughput(c: &mut Criterion) {
     let w = tiny_weights();
@@ -895,11 +895,11 @@ path = "tests/integration/gemv_batch_full_model.rs"
 #[test]
 #[ignore]
 fn full_model_n1_invariant() {
-    use qor4b::gemv::{forward_decode, HybridCache};
-    use qor4b::gemv_batch::{forward_decode_batch, SlotInferenceState};
+    use incord::gemv::{forward_decode, HybridCache};
+    use incord::gemv_batch::{forward_decode_batch, SlotInferenceState};
 
-    let path = std::env::var("QORA_MODEL_PATH").unwrap_or_else(|_| "model/model.qor4b".into());
-    let weights = std::sync::Arc::new(qor4b::save::load_model(&std::path::PathBuf::from(path)).unwrap());
+    let path = std::env::var("INCORD_MODEL_PATH").unwrap_or_else(|_| "model/model.incord".into());
+    let weights = std::sync::Arc::new(incord::save::load_model(&std::path::PathBuf::from(path)).unwrap());
 
     let token_id = 1u32;
 
@@ -929,7 +929,7 @@ fn full_model_n1_invariant() {
 - [ ] **Step 2: Run**
 
 ```bash
-QORA_MODEL_PATH=model/model.qor4b cargo test --release --test gemv_batch_full_model -- --ignored
+INCORD_MODEL_PATH=model/model.incord cargo test --release --test gemv_batch_full_model -- --ignored
 ```
 
 Expected: passes within 0.05 max_diff and argmax matches. (Tighter tolerance than mock because real weights are well-conditioned.)
@@ -949,7 +949,7 @@ git commit -m "test(kernels): full-model invariant test (--ignored, requires mod
 
 ```bash
 cargo test --lib gemv_batch --features mock-weights
-QORA_MODEL_PATH=model/model.qor4b cargo test --release --test gemv_batch_full_model -- --ignored
+INCORD_MODEL_PATH=model/model.incord cargo test --release --test gemv_batch_full_model -- --ignored
 cargo bench --bench decode_throughput --features mock-weights
 ```
 
@@ -968,9 +968,9 @@ git commit --allow-empty -m "milestone: M4 batched kernels complete
 
 Acceptance: cargo test --test gemv_batch_full_model -- --ignored — pass"
 
-git checkout feature/qora-server
-git merge --no-ff feature/qora-server-m4-kernels
-git checkout feature/qora-server-m4-kernels
+git checkout feature/incord-server
+git merge --no-ff feature/incord-server-m4-kernels
+git checkout feature/incord-server-m4-kernels
 ```
 
 M4 complete. Proceed to M5 (slot pool / continuous batching).

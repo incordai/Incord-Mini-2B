@@ -1,4 +1,4 @@
-//! Tokenizer and chat template for QORA-4B.
+//! Tokenizer and chat template for Incord-Mini-2B.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,13 +15,11 @@ pub const VISION_END: u32 = 0;
 pub const IMAGE_PAD: u32 = 0;
 pub const VIDEO_PAD: u32 = 0;
 
-pub type IncordTokenizer = QoraTokenizer;
-
-pub struct QoraTokenizer {
+pub struct IncordTokenizer {
     inner: tokenizers::Tokenizer,
 }
 
-impl QoraTokenizer {
+impl IncordTokenizer {
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
         let inner = tokenizers::Tokenizer::from_file(path)
             .map_err(|e| format!("Failed to load tokenizer: {e}"))?;
@@ -37,7 +35,7 @@ impl QoraTokenizer {
         self.inner.decode(ids, true).unwrap_or_default()
     }
 
-    /// Build a full chat prompt for QORA-4B (text only).
+    /// Build a full chat prompt for Incord-Mini-2B (text only).
     pub fn format_chat(&self, user_message: &str, think: bool, max_tokens: usize) -> Vec<u32> {
         let today = current_date_string();
         let system_content = build_system_prompt(&today, think, max_tokens);
@@ -65,7 +63,7 @@ impl QoraTokenizer {
         tokens
     }
 
-    /// Build a chat prompt with image for QORA-4B.
+    /// Build a chat prompt with image for Incord-Mini-2B.
     /// `num_vision_tokens` is the number of merged vision tokens from the encoder.
     /// Format: <|im_start|>system\n...<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|>×N<|vision_end|>\n{text}<|im_end|>\n<|im_start|>assistant\n
     pub fn format_chat_with_image(
@@ -103,7 +101,7 @@ impl QoraTokenizer {
         tokens
     }
 
-    /// Build a chat prompt with video for QORA-4B.
+    /// Build a chat prompt with video for Incord-Mini-2B.
     /// `num_vision_tokens` is the total number of merged vision tokens from the video encoder.
     /// Format: <|im_start|>system\n...<|im_end|>\n<|im_start|>user\nVideo 1: <|vision_start|><|video_pad|>×N<|vision_end|>\n{text}<|im_end|>\n<|im_start|>assistant\n
     pub fn format_chat_with_video(

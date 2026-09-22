@@ -21,7 +21,7 @@ pub enum Task {
 
 /// Base capabilities of any model engine.
 pub trait ModelEngine: Send + Sync + 'static {
-    /// Identifier matching the request's `model` field (e.g. "qora-4b").
+    /// Identifier matching the request's `model` field (e.g. "incord-mini-2b").
     fn id(&self) -> &str;
 
     /// Task this engine performs.

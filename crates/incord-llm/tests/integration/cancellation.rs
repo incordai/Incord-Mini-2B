@@ -27,7 +27,7 @@ async fn client_drop_frees_slot() {
             .post(server.url("/v1/chat/completions"))
             .bearer_auth(&key)
             .json(&json!({
-                "model":"qora-4b",
+                "model":"incord-mini-2b",
                 "messages":[{"role":"user","content":"hi"}],
                 "stream":true,
                 "max_tokens":1000
@@ -57,7 +57,7 @@ async fn client_drop_frees_slot() {
             .post(server.url("/v1/chat/completions"))
             .bearer_auth(&key)
             .json(&json!({
-                "model":"qora-4b",
+                "model":"incord-mini-2b",
                 "messages":[{"role":"user","content":format!("hi {i}")}],
                 "max_tokens":2,
                 "temperature":0.0

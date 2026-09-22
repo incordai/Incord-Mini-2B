@@ -1,12 +1,12 @@
 //! Full-model invariant tests for the batched decode pipeline.
 //!
 //! These tests are #[ignore] by default because they require:
-//!   - The real QORA-4B model file (~3.5 GB)
+//!   - The real Incord-Mini-2B model file (~3.5 GB)
 //!   - Several seconds of model load time
 //!
 //! Run with:
 //!
-//!   QORA_MODEL_PATH=model/model.qor4b cargo test --release \
+//!   INCORD_MODEL_PATH=model/model.incord cargo test --release \
 //!     --test gemv_batch_full_model -- --ignored
 
 use std::path::PathBuf;
@@ -18,8 +18,8 @@ fn full_model_n1_invariant() {
     use incord::gemv_batch::{SlotInferenceState, forward_decode_batch};
 
     let path: PathBuf = std::env::var("INCORD_MODEL_PATH")
-        .or_else(|_| std::env::var("QORA_MODEL_PATH"))
-        .unwrap_or_else(|_| "model/model.qor4b".into())
+        .or_else(|_| std::env::var("INCORD_MODEL_PATH"))
+        .unwrap_or_else(|_| "model/model.incord".into())
         .into();
 
     eprintln!("loading model from {}...", path.display());
@@ -101,8 +101,8 @@ fn full_model_n2_independent_decodes() {
     use incord::gemv_batch::{SlotInferenceState, forward_decode_batch};
 
     let path: PathBuf = std::env::var("INCORD_MODEL_PATH")
-        .or_else(|_| std::env::var("QORA_MODEL_PATH"))
-        .unwrap_or_else(|_| "model/model.qor4b".into())
+        .or_else(|_| std::env::var("INCORD_MODEL_PATH"))
+        .unwrap_or_else(|_| "model/model.incord".into())
         .into();
 
     let weights =

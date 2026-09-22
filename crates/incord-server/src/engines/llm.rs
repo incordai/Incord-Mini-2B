@@ -1,11 +1,11 @@
-//! Concrete ChatEngine wrapping the existing QORA LLM inference.
+//! Concrete ChatEngine wrapping the existing Incord LLM inference.
 
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use qor4b::gemv::{HybridCache, ModelWeights, forward_decode, prefill, prefill_with_vision};
-use qor4b::tokenizer::{QoraTokenizer, THINK_END, THINK_START};
+use incord::gemv::{HybridCache, ModelWeights, forward_decode, prefill, prefill_with_vision};
+use incord::tokenizer::{IncordTokenizer, THINK_END, THINK_START};
 
 use crate::engine::chat::{ChatEngine, ChatEvent, ChatRequest, FinishReason};
 use crate::engine::{ModelEngine, Task};
@@ -106,7 +106,7 @@ fn sample_token(
 pub struct LlmEngine {
     pub id: String,
     pub weights: Arc<ModelWeights>,
-    pub tokenizer: Arc<QoraTokenizer>,
+    pub tokenizer: Arc<IncordTokenizer>,
     pub description: String,
 }
 
@@ -114,7 +114,7 @@ impl LlmEngine {
     pub fn new(
         id: impl Into<String>,
         weights: Arc<ModelWeights>,
-        tokenizer: Arc<QoraTokenizer>,
+        tokenizer: Arc<IncordTokenizer>,
         description: impl Into<String>,
     ) -> Self {
         Self {
@@ -158,7 +158,7 @@ impl ChatEngine for LlmEngine {
             let rgb = img.to_rgb8();
             let h = rgb.height() as usize;
             let w = rgb.width() as usize;
-            let (pixels, h2, w2) = qor4b::vision::pixels_from_rgb_bytes(rgb.as_raw(), w, h);
+            let (pixels, h2, w2) = incord::vision::pixels_from_rgb_bytes(rgb.as_raw(), w, h);
             let (embeds, num_tokens) = vision.encode_image(&pixels, h2, w2);
             Ok((embeds, num_tokens))
         })
@@ -206,7 +206,7 @@ impl ChatEngine for LlmEngine {
             // The format_chat prompt already contains `<think>\n` as a prefix when
             // `think: true`, so generation starts INSIDE the think block. We must
             // suppress from the very first sampled token until THINK_END is emitted.
-            // (Reference: qora-llm's generate.rs line 141, `in_think_block = params.think`.)
+            // (Reference: incord-llm's generate.rs line 141, `in_think_block = params.think`.)
             let think_mode = req.think.unwrap_or(true);
             let show_think = req.show_think.unwrap_or(false);
             let mut suppress = think_mode && !show_think;

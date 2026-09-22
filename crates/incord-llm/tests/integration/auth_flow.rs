@@ -18,7 +18,7 @@ async fn admin_can_create_key() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["raw_key"].as_str().unwrap().starts_with("qora_"));
+    assert!(body["raw_key"].as_str().unwrap().starts_with("incord_"));
 }
 
 #[tokio::test]

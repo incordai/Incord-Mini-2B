@@ -28,16 +28,16 @@ jobs:
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
-        run: tar czf qor4b-${{ matrix.suffix }}.tar.gz -C target/release qor4b convert
+        run: tar czf incord-${{ matrix.suffix }}.tar.gz -C target/release incord convert
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path target\release\qor4b.exe,target\release\convert.exe -DestinationPath qor4b-${{ matrix.suffix }}.zip
+        run: Compress-Archive -Path target\release\incord.exe,target\release\convert.exe -DestinationPath incord-${{ matrix.suffix }}.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: qor4b-${{ matrix.suffix }}
+          name: incord-${{ matrix.suffix }}
           path: |
             *.tar.gz
             *.zip
@@ -73,16 +73,16 @@ jobs:
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
-        run: tar czf qor4b-gpu-${{ matrix.suffix }}.tar.gz -C target/release qor4b convert
+        run: tar czf incord-gpu-${{ matrix.suffix }}.tar.gz -C target/release incord convert
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path target\release\qor4b.exe,target\release\convert.exe -DestinationPath qor4b-gpu-${{ matrix.suffix }}.zip
+        run: Compress-Archive -Path target\release\incord.exe,target\release\convert.exe -DestinationPath incord-gpu-${{ matrix.suffix }}.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: qor4b-gpu-${{ matrix.suffix }}
+          name: incord-gpu-${{ matrix.suffix }}
           path: |
             *.tar.gz
             *.zip

@@ -16,36 +16,36 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use qor4b::gemv::mock::tiny_weights;
-use qor4b::tokenizer::QoraTokenizer;
-use qora_server::auth::admin::AdminState;
-use qora_server::auth::middleware::AuthState;
-use qora_server::auth::ratelimit::RateLimiter;
-use qora_server::db;
-use qora_server::engines::llm::LlmEngine;
-use qora_server::http::handlers::inference::InferenceState;
-use qora_server::http::router::build_router;
-use qora_server::registry::Registry;
+use incord::gemv::mock::tiny_weights;
+use incord::tokenizer::IncordTokenizer;
+use incord_server::auth::admin::AdminState;
+use incord_server::auth::middleware::AuthState;
+use incord_server::auth::ratelimit::RateLimiter;
+use incord_server::db;
+use incord_server::engines::llm::LlmEngine;
+use incord_server::http::handlers::inference::InferenceState;
+use incord_server::http::router::build_router;
+use incord_server::registry::Registry;
 
 const TEST_ADMIN_TOKEN: &str = "test-admin-m18";
 const TEST_SECRET: &[u8] = b"test-admin-secret-m18";
 
-fn build_test_tokenizer() -> Arc<QoraTokenizer> {
+fn build_test_tokenizer() -> Arc<IncordTokenizer> {
     let candidates = [
         concat!(env!("CARGO_MANIFEST_DIR"), "/../../model/tokenizer.json"),
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../qora-llm/model/tokenizer.json"
+            "/../incord-llm/model/tokenizer.json"
         ),
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../qora-llm/tests/fixtures/tokenizer.json"
+            "/../incord-llm/tests/fixtures/tokenizer.json"
         ),
     ];
     for path in candidates {
         let p = std::path::Path::new(path);
         if p.exists() {
-            if let Ok(t) = QoraTokenizer::from_file(p) {
+            if let Ok(t) = IncordTokenizer::from_file(p) {
                 return Arc::new(t);
             }
         }
@@ -63,7 +63,7 @@ fn build_test_app() -> (axum::Router, TempDir) {
         server_secret: Arc::new(TEST_SECRET.to_vec()),
         limiter: RateLimiter::new(),
         tiers: Default::default(),
-        geo: qora_server::geoip::GeoDb::empty(),
+        geo: incord_server::geoip::GeoDb::empty(),
     });
     let admin_state = Arc::new(AdminState {
         admin_token: TEST_ADMIN_TOKEN.to_string(),
@@ -401,8 +401,8 @@ async fn export_csv_correct_headers() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert!(
-        cd.contains("qora-usage-"),
-        "content-disposition should contain qora-usage-, got: {cd}"
+        cd.contains("incord-usage-"),
+        "content-disposition should contain incord-usage-, got: {cd}"
     );
     assert!(
         cd.contains(".csv"),

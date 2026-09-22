@@ -29,7 +29,7 @@ pub async fn list_models(State(state): State<Arc<InferenceState>>) -> Json<Model
             id: engine.id().to_string(),
             object: "model",
             created: 1_700_000_000,
-            owned_by: "qora".to_string(),
+            owned_by: "incord".to_string(),
             description: engine.description().to_string(),
             task: format!("{:?}", engine.task()).to_lowercase(),
         })
@@ -46,7 +46,7 @@ pub async fn list_models(State(state): State<Arc<InferenceState>>) -> Json<Model
                 id: crate::router::AUTO_MODEL_ID.to_string(),
                 object: "model",
                 created: 1_700_000_000,
-                owned_by: "qora".to_string(),
+                owned_by: "incord".to_string(),
                 description:
                     "Auto — small model for chitchat, big model for reasoning."
                         .to_string(),

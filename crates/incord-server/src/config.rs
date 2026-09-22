@@ -204,8 +204,8 @@ max_context = 8192
 request_timeout_secs = 90
 
 [auth]
-admin_token_env = "QORA_ADMIN_TOKEN"
-db_path = "/var/lib/qora/auth.redb"
+admin_token_env = "INCORD_ADMIN_TOKEN"
+db_path = "/var/lib/incord/auth.redb"
 
 [limits.default]
 rpm = 60
@@ -217,40 +217,40 @@ log_level = "info"
 log_format = "json"
 
 [[models]]
-id = "qora-llm"
+id = "incord-llm"
 kind = "chat"
-path = "/var/lib/qora/llm/model.qor4b"
-tokenizer = "/var/lib/qora/llm/tokenizer.json"
+path = "/var/lib/incord/llm/model.incord"
+tokenizer = "/var/lib/incord/llm/tokenizer.json"
 description = "Default LLM"
 
 [[models]]
-id = "qora-tts"
+id = "incord-tts"
 kind = "tts"
-path = "/var/lib/qora/tts/model.qora-tts"
-tokenizer = "/var/lib/qora/tts/tokenizer.json"
+path = "/var/lib/incord/tts/model.incord-tts"
+tokenizer = "/var/lib/incord/tts/tokenizer.json"
 description = "TTS engine"
 
 [[models]]
-id = "qora-stt"
+id = "incord-stt"
 kind = "stt"
-path = "/var/lib/qora/stt/model.qora-stt-small"
+path = "/var/lib/incord/stt/model.incord-stt-small"
 
 [[models]]
-id = "qora-embed"
+id = "incord-embed"
 kind = "embedding"
-path = "/var/lib/qora/rag/embed.bin"
+path = "/var/lib/incord/rag/embed.bin"
 
 [[models]]
-id = "qora-rerank"
+id = "incord-rerank"
 kind = "rerank"
-path = "/var/lib/qora/rag/rerank.bin"
+path = "/var/lib/incord/rag/rerank.bin"
 "#
         )
         .unwrap();
 
         let cfg = ServerConfig::load_from_path(tmp.path()).unwrap();
         assert_eq!(cfg.models.len(), 5);
-        assert_eq!(cfg.models[0].id, "qora-llm");
+        assert_eq!(cfg.models[0].id, "incord-llm");
         assert_eq!(cfg.models[0].kind, ModelKind::Chat);
         assert_eq!(cfg.models[1].kind, ModelKind::Tts);
         assert_eq!(cfg.models[2].kind, ModelKind::Stt);
@@ -274,8 +274,8 @@ max_context = 8192
 request_timeout_secs = 90
 
 [auth]
-admin_token_env = "QORA_ADMIN_TOKEN"
-db_path = "/var/lib/qora/auth.redb"
+admin_token_env = "INCORD_ADMIN_TOKEN"
+db_path = "/var/lib/incord/auth.redb"
 
 [limits.default]
 rpm = 60
@@ -308,8 +308,8 @@ max_context = 8192
 request_timeout_secs = 90
 
 [auth]
-admin_token_env = "QORA_ADMIN_TOKEN"
-db_path = "/var/lib/qora/auth.redb"
+admin_token_env = "INCORD_ADMIN_TOKEN"
+db_path = "/var/lib/incord/auth.redb"
 
 [limits.default]
 rpm = 60

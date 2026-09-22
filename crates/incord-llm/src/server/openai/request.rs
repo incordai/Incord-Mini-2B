@@ -32,7 +32,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub user: Option<String>,
 
-    // QORA-specific extensions
+    // Incord-specific extensions
     #[serde(default)]
     pub think_budget: Option<u32>,
 
@@ -137,13 +137,13 @@ mod tests {
     #[test]
     fn parses_simple_text_message() {
         let json = r#"{
-            "model": "qora-4b",
+            "model": "incord-mini-2b",
             "messages": [
                 {"role": "user", "content": "hi"}
             ]
         }"#;
         let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.model, "qora-4b");
+        assert_eq!(req.model, "incord-mini-2b");
         assert_eq!(req.messages.len(), 1);
         assert!(matches!(req.messages[0].content, MessageContent::Text(_)));
     }
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn parses_vision_content_parts() {
         let json = r#"{
-            "model": "qora-4b",
+            "model": "incord-mini-2b",
             "messages": [{
                 "role": "user",
                 "content": [
@@ -184,29 +184,29 @@ mod tests {
 
     #[test]
     fn parses_reasoning_effort_levels() {
-        let json_low = r#"{"model": "qora-4b", "messages": [], "reasoning_effort": "low"}"#;
+        let json_low = r#"{"model": "incord-mini-2b", "messages": [], "reasoning_effort": "low"}"#;
         let req_low: ChatCompletionRequest = serde_json::from_str(json_low).unwrap();
         assert_eq!(req_low.reasoning_effort, Some(ReasoningEffort::Low));
         assert_eq!(req_low.effective_think_budget(), Some(512));
 
-        let json_med = r#"{"model": "qora-4b", "messages": [], "reasoning_effort": "medium"}"#;
+        let json_med = r#"{"model": "incord-mini-2b", "messages": [], "reasoning_effort": "medium"}"#;
         let req_med: ChatCompletionRequest = serde_json::from_str(json_med).unwrap();
         assert_eq!(req_med.reasoning_effort, Some(ReasoningEffort::Medium));
         assert_eq!(req_med.effective_think_budget(), Some(2048));
 
-        let json_high = r#"{"model": "qora-4b", "messages": [], "reasoning_effort": "high"}"#;
+        let json_high = r#"{"model": "incord-mini-2b", "messages": [], "reasoning_effort": "high"}"#;
         let req_high: ChatCompletionRequest = serde_json::from_str(json_high).unwrap();
         assert_eq!(req_high.reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(req_high.effective_think_budget(), Some(8192));
 
         // Explicit think_budget overrides reasoning_effort
-        let json_override = r#"{"model": "qora-4b", "messages": [], "reasoning_effort": "high", "think_budget": 1500}"#;
+        let json_override = r#"{"model": "incord-mini-2b", "messages": [], "reasoning_effort": "high", "think_budget": 1500}"#;
         let req_override: ChatCompletionRequest = serde_json::from_str(json_override).unwrap();
         assert_eq!(req_override.reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(req_override.effective_think_budget(), Some(1500));
 
         // Default with no effort or think_budget gives None
-        let json_none = r#"{"model": "qora-4b", "messages": []}"#;
+        let json_none = r#"{"model": "incord-mini-2b", "messages": []}"#;
         let req_none: ChatCompletionRequest = serde_json::from_str(json_none).unwrap();
         assert_eq!(req_none.reasoning_effort, None);
         assert_eq!(req_none.effective_think_budget(), None);

@@ -1,4 +1,4 @@
-//! Fast GEMV/GEMM for QORA-4B hybrid architecture (Gated DeltaNet + Full Attention).
+//! Fast GEMV/GEMM for Incord-Mini-2B hybrid architecture (Gated DeltaNet + Full Attention).
 //!
 //! Supports two weight formats:
 //! - **F16**: Half precision. Better quality.
@@ -8,7 +8,7 @@
 //!   scale = absmax / 7, q = round(val/scale) + 8, packed 2 per byte.
 //!   Dequant: val = (q - 8) * scale
 
-use crate::config::{LayerType, Qor4bConfig};
+use crate::config::{LayerType, IncordConfig};
 use half::f16;
 use rayon::prelude::*;
 
@@ -172,7 +172,7 @@ pub struct DeltaNetState {
 }
 
 impl DeltaNetState {
-    pub fn new(config: &Qor4bConfig) -> Self {
+    pub fn new(config: &IncordConfig) -> Self {
         let num_v = config.num_v_heads; // 32
         let k_hd = config.deltanet_head_dim; // 128
         let v_hd = config.deltanet_head_dim; // 128 (same dim)
@@ -209,7 +209,7 @@ pub enum CacheEntry {
 }
 
 impl HybridCache {
-    pub fn new(config: &Qor4bConfig) -> Self {
+    pub fn new(config: &IncordConfig) -> Self {
         let mut entries = Vec::with_capacity(config.num_layers);
         for lt in &config.layer_types {
             match lt {
@@ -279,7 +279,7 @@ pub struct SystemPromptCache {
 // Model weights
 // ============================================================
 
-/// All model weights for QOR4B inference.
+/// All model weights for Incord inference.
 pub struct ModelWeights {
     pub layers: Vec<HybridLayerWeights>,
     pub embed: Weight,
@@ -289,7 +289,7 @@ pub struct ModelWeights {
     pub final_norm: Vec<f16>,
     pub rope_cos: Vec<f32>, // [max_pos, rope_dim/2] (32 entries per position)
     pub rope_sin: Vec<f32>,
-    pub config: Qor4bConfig,
+    pub config: IncordConfig,
     pub format_name: &'static str,
     pub vision: Option<crate::vision::VisionEncoder>,
 }
@@ -997,7 +997,7 @@ fn per_head_rms_norm(x: &mut [f32], num_heads: usize, head_dim: usize, gamma: &[
 }
 
 /// Apply partial RoPE (only first rotary_dim dimensions of each head).
-/// QORA-4B uses split-half pairing: pair (i, i + half) for i in 0..half, where half = rotary_dim/2.
+/// Incord-Mini-2B uses split-half pairing: pair (i, i + half) for i in 0..half, where half = rotary_dim/2.
 /// cos/sin tables have `half` entries per position (since each pair shares the same frequency).
 /// rotary_dim = total dims rotated per head (e.g. 64 = 256 * 0.25).
 #[inline]
@@ -1193,7 +1193,7 @@ pub(crate) fn deltanet_step(
     z_t: &[f32],
     lw: &DeltaNetLayerWeights,
     state: &mut DeltaNetState,
-    config: &Qor4bConfig,
+    config: &IncordConfig,
 ) -> Vec<f32> {
     let num_qk = config.num_qk_heads; // 16
     let num_v = config.num_v_heads; // 32
@@ -1374,7 +1374,7 @@ pub(crate) fn forward_deltanet_decode(
     x: &[f32],
     lw: &DeltaNetLayerWeights,
     state: &mut DeltaNetState,
-    config: &Qor4bConfig,
+    config: &IncordConfig,
 ) -> Vec<f32> {
     let hidden = config.hidden_size;
 
@@ -1440,7 +1440,7 @@ pub(crate) fn attn_step_into(
     rope_cos: &[f32],
     rope_sin: &[f32],
     lw: &FullAttnLayerWeights,
-    config: &Qor4bConfig,
+    config: &IncordConfig,
     out_row: &mut [f32], // [num_attn_heads * attn_head_dim]
 ) {
     let num_heads = config.num_attn_heads;
@@ -1564,7 +1564,7 @@ pub(crate) fn forward_attn_decode(
     x: &[f32],
     lw: &FullAttnLayerWeights,
     kv: &mut KvCacheEntry,
-    config: &Qor4bConfig,
+    config: &IncordConfig,
     rope_cos: &[f32],
     rope_sin: &[f32],
 ) -> Vec<f32> {
@@ -1675,7 +1675,7 @@ fn prefill_deltanet_layer(
     seq_len: usize,
     lw: &DeltaNetLayerWeights,
     state: &mut DeltaNetState,
-    config: &Qor4bConfig,
+    config: &IncordConfig,
 ) {
     let hidden = config.hidden_size;
     let num_qk = config.num_qk_heads;
@@ -1963,7 +1963,7 @@ fn prefill_attn_layer(
     seq_len: usize,
     lw: &FullAttnLayerWeights,
     kv: &mut KvCacheEntry,
-    config: &Qor4bConfig,
+    config: &IncordConfig,
     rope_cos: &[f32],
     rope_sin: &[f32],
 ) {
@@ -2152,12 +2152,12 @@ pub mod mock {
     //! Allocates zero-filled F16 weights at every projection.
 
     use super::*;
-    use crate::config::{LayerType, Qor4bConfig};
+    use crate::config::{LayerType, IncordConfig};
     use half::f16;
 
-    /// Build a tiny config with the same fields as Qor4bConfig::default_4b
+    /// Build a tiny config with the same fields as IncordConfig::default_4b
     /// but with small dimensions (suitable for unit-test speed).
-    pub fn tiny_config() -> Qor4bConfig {
+    pub fn tiny_config() -> IncordConfig {
         let layer_types = vec![
             LayerType::DeltaNet,
             LayerType::DeltaNet,
@@ -2165,7 +2165,7 @@ pub mod mock {
             LayerType::FullAttn,
         ];
 
-        Qor4bConfig {
+        IncordConfig {
             // 248_070 covers all real tokenizer IDs (max special token = 248_069).
             // The embedding table is vocab * hidden = 248_070 * 64 * 2B ≈ 31 MB —
             // acceptable for integration tests that exercise the real tokenizer.

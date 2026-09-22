@@ -1,4 +1,4 @@
-//! Vision encoder for QORA-4B (ViT + merger).
+//! Vision encoder for Incord-Mini-2B (ViT + merger).
 //!
 //! Architecture:
 //! - Patch embedding: Conv3d(3, 1024, kernel=[2,16,16]), temporal_patch_size=2
@@ -73,7 +73,7 @@ impl VisionEncoder {
     }
 }
 
-/// QORA-4B vision normalization constants.
+/// Incord-Mini-2B vision normalization constants.
 const MEAN: [f32; 3] = [0.5, 0.5, 0.5];
 const STD: [f32; 3] = [0.5, 0.5, 0.5];
 

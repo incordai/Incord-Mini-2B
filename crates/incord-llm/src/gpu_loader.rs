@@ -1,4 +1,4 @@
-//! GPU weight loading for QOR4B.
+//! GPU weight loading for Incord.
 //!
 //! Converts CPU ModelWeights (Q4 or F16) into Cortex GPU tensors.
 //! Q4 weights are uploaded as packed quantized tensors with on-the-fly
@@ -11,7 +11,7 @@ use cortex::tensor::quantization::{
 use cortex::tensor::{DType, TensorData};
 use half::f16;
 
-use crate::config::Qor4bConfig;
+use crate::config::IncordConfig;
 use crate::gemv::{
     DeltaNetLayerWeights, FullAttnLayerWeights, HybridLayerWeights, ModelWeights, Weight,
 };
@@ -28,7 +28,7 @@ pub struct GpuModel<B: Backend> {
     pub final_norm_gamma: Tensor<B, 1>,
     pub rope_cos: Tensor<B, 2>,
     pub rope_sin: Tensor<B, 2>,
-    pub config: Qor4bConfig,
+    pub config: IncordConfig,
 }
 
 pub enum GpuHybridLayer<B: Backend> {
@@ -236,7 +236,7 @@ pub fn load_model_gpu<B: Backend>(weights: &ModelWeights, device: &B::Device) ->
 
 fn load_deltanet_layer<B: Backend>(
     d: &DeltaNetLayerWeights,
-    config: &Qor4bConfig,
+    config: &IncordConfig,
     device: &B::Device,
 ) -> GpuDeltaNetLayer<B> {
     let qkv_dim = config.deltanet_qkv_dim();

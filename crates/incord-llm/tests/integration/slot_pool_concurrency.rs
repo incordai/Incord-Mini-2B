@@ -35,7 +35,7 @@ async fn sixty_four_concurrent_requests_all_complete() {
                 .post(&url)
                 .bearer_auth(&key)
                 .json(&json!({
-                    "model":"qora-4b",
+                    "model":"incord-mini-2b",
                     "messages":[{"role":"user","content":format!("hi {i}")}],
                     "max_tokens":2,
                     "temperature":0.0
@@ -84,7 +84,7 @@ async fn sequential_requests_after_burst_work() {
                 .post(&u)
                 .bearer_auth(&k)
                 .json(&json!({
-                    "model":"qora-4b",
+                    "model":"incord-mini-2b",
                     "messages":[{"role":"user","content":format!("hi {i}")}],
                     "max_tokens":2,
                     "temperature":0.0
@@ -108,7 +108,7 @@ async fn sequential_requests_after_burst_work() {
             .post(&url)
             .bearer_auth(&key)
             .json(&json!({
-                "model":"qora-4b",
+                "model":"incord-mini-2b",
                 "messages":[{"role":"user","content":format!("seq {i}")}],
                 "max_tokens":2,
                 "temperature":0.0

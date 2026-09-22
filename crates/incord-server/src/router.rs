@@ -1,8 +1,8 @@
 //! Smart model routing.
 //!
 //! Given a chat request, decides which concrete chat model to dispatch to.
-//! The "auto" model id (`qora-auto`) triggers this router; explicit model
-//! ids (`qora-llm`, `qora-llm-mini`) bypass it.
+//! The "auto" model id (`incord-auto`) triggers this router; explicit model
+//! ids (`incord-llm`, `incord-llm-mini`) bypass it.
 //!
 //! Strategy: heuristic on the user's latest message. Cheap to compute (no
 //! ML in the router itself — the router IS the ML pre-filter), and good
@@ -19,7 +19,7 @@ use crate::engine::chat::ChatMessage;
 
 /// The well-known "auto-router" model id. When a request specifies this id,
 /// the inference handler runs `route(...)` to pick a concrete model.
-pub const AUTO_MODEL_ID: &str = "qora-auto";
+pub const AUTO_MODEL_ID: &str = "incord-auto";
 
 /// Substrings that strongly suggest the user wants a thoughtful answer.
 /// Lowercased — the matcher lowercases the message first.
@@ -135,14 +135,14 @@ pub fn resolve_auto_model<'a>(
     available_chat_ids: &'a [String],
 ) -> Option<&'a str> {
     let prefer_for = |size: RoutedSize| match size {
-        // The mini model has "mini" in its id; the big one is the bare "qora-llm" or contains a size like "4b"/"9b".
+        // The mini model has "mini" in its id; the big one is the bare "incord-llm" or contains a size like "4b"/"9b".
         RoutedSize::Small => available_chat_ids.iter().find(|id| {
             let l = id.to_lowercase();
             l.contains("mini") || l.contains("0.6") || l.contains("0.8") || l.contains("08b") || l.contains("06b")
         }),
         RoutedSize::Big => available_chat_ids.iter().find(|id| {
             let l = id.to_lowercase();
-            l.contains("9b") || l.contains("4b") || l == "qora-llm"
+            l.contains("9b") || l.contains("4b") || l == "incord-llm"
         }),
     };
 
@@ -220,8 +220,8 @@ mod tests {
 
     #[test]
     fn resolve_falls_back_when_preferred_missing() {
-        let only_big = vec!["qora-llm".to_string()];
+        let only_big = vec!["incord-llm".to_string()];
         // Asks for small but only big is loaded → falls back to big.
-        assert_eq!(resolve_auto_model(RoutedSize::Small, &only_big), Some("qora-llm"));
+        assert_eq!(resolve_auto_model(RoutedSize::Small, &only_big), Some("incord-llm"));
     }
 }

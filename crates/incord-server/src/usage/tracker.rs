@@ -145,7 +145,7 @@ mod tests {
             tenant_id: tenant.into(),
             user_id: user.into(),
             key_id: "k1".into(),
-            model: "qora-4b".into(),
+            model: "incord-mini-2b".into(),
             input_tokens: 10,
             output_tokens: 20,
             started_at: 1,

@@ -1,8 +1,8 @@
-//! Concrete TtsEngine wrapping the qora-tts crate.
+//! Concrete TtsEngine wrapping the incord-tts crate.
 //!
 //! Integration approach: lib linkage (not subprocess).
-//! We added `[lib]` to D:/Burn-AI/QORA-TTS/Cargo.toml and add it as a path dep.
-//! The qora-tts library exposes all modules publicly via lib.rs.
+//! The TTS engine crate (separate repo) exposes a `[lib]` target used here.
+//! The incord-tts library exposes all modules publicly via lib.rs.
 //!
 //! Voice model: This 1.7B model has an EMPTY spk_id map — it does NOT use built-in
 //! speaker IDs.  Instead it requires a reference WAV for voice cloning.
@@ -19,18 +19,18 @@ use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use qora_tts::audio_features::MelConfig;
-use qora_tts::code_predictor::CodePredictorWeights;
-use qora_tts::decoder::SpeechDecoderWeights;
-use qora_tts::generate_new::{TTSParams, generate_speech};
-use qora_tts::speaker_encoder::{SpeakerEncoderWeights, extract_speaker_embedding};
-use qora_tts::talker::TalkerWeights;
-use qora_tts::tokenizer::TTSTokenizer;
+use incord_tts::audio_features::MelConfig;
+use incord_tts::code_predictor::CodePredictorWeights;
+use incord_tts::decoder::SpeechDecoderWeights;
+use incord_tts::generate_new::{TTSParams, generate_speech};
+use incord_tts::speaker_encoder::{SpeakerEncoderWeights, extract_speaker_embedding};
+use incord_tts::talker::TalkerWeights;
+use incord_tts::tokenizer::TTSTokenizer;
 
 use crate::engine::tts::{TtsEngine, TtsOutput, TtsRequest};
 use crate::engine::{ModelEngine, Task};
 
-/// QORA-TTS sample rate (fixed by the model architecture).
+/// Incord-TTS sample rate (fixed by the model architecture).
 const SAMPLE_RATE: u32 = 24_000;
 
 /// Default voice name (must exist in voices/ directory).
@@ -70,23 +70,23 @@ unsafe impl Sync for TtsModelHandle {}
 // Engine struct
 // ---------------------------------------------------------------------------
 
-/// Wrapper around the qora-tts crate's synthesis API.
+/// Wrapper around the incord-tts crate's synthesis API.
 ///
 /// On creation (`load`), reads model weights and tokenizer from disk.
 /// On `synthesize`, runs inference on a Tokio blocking thread (TTS is heavy CPU).
-pub struct QoraTtsEngine {
+pub struct IncordTtsEngine {
     pub id: String,
     pub description: String,
     pub model: Arc<TtsModelHandle>,
 }
 
-impl QoraTtsEngine {
+impl IncordTtsEngine {
     /// Load the TTS model from `model_dir`.
     ///
-    /// Expected layout (mirrors the QORA-TTS project):
+    /// Expected layout (mirrors the Incord-TTS project):
     /// ```text
     /// model_dir/
-    ///   model.qora-tts      -- binary weights (talker + predictor + decoder + speaker_encoder)
+    ///   model.incord-tts      -- binary weights (talker + predictor + decoder + speaker_encoder)
     ///   tokenizer.json      -- HuggingFace tokenizer
     ///   config.json         -- language id maps (spk_id is empty for this model)
     ///   voices/             -- reference WAV files: luna.wav, ryan.wav, etc.
@@ -99,14 +99,14 @@ impl QoraTtsEngine {
         let id = id.into();
         let description = description.into();
 
-        let model_path = model_dir.join("model.qora-tts");
+        let model_path = model_dir.join("model.incord-tts");
         if !model_path.exists() {
             anyhow::bail!("TTS model binary not found at {}", model_path.display());
         }
 
-        tracing::info!(path = ?model_path, "loading qora-tts weights...");
+        tracing::info!(path = ?model_path, "loading incord-tts weights...");
         let (talker, predictor, decoder, speaker_encoder_opt) =
-            qora_tts::save::load_model(&model_path)
+            incord_tts::save::load_model(&model_path)
                 .map_err(|e| anyhow::anyhow!("load_model failed: {e}"))?;
 
         if speaker_encoder_opt.is_none() {
@@ -127,7 +127,7 @@ impl QoraTtsEngine {
         // Load config for language + speaker id maps.
         let config_path = model_dir.join("config.json");
         let (language_map, speaker_map) = if config_path.exists() {
-            let cfg = qora_tts::config::QoraTTSConfig::from_file(&config_path)
+            let cfg = incord_tts::config::IncordTTSConfig::from_file(&config_path)
                 .map_err(|e| anyhow::anyhow!("loading config.json: {e}"))?;
             (cfg.talker_config.codec_language_id, cfg.talker_config.spk_id)
         } else {
@@ -181,7 +181,7 @@ impl QoraTtsEngine {
 // Trait impls
 // ---------------------------------------------------------------------------
 
-impl ModelEngine for QoraTtsEngine {
+impl ModelEngine for IncordTtsEngine {
     fn id(&self) -> &str {
         &self.id
     }
@@ -196,7 +196,7 @@ impl ModelEngine for QoraTtsEngine {
 }
 
 #[async_trait]
-impl TtsEngine for QoraTtsEngine {
+impl TtsEngine for IncordTtsEngine {
     async fn synthesize(&self, req: TtsRequest) -> anyhow::Result<TtsOutput> {
         let model = self.model.clone();
         let voice = req.voice.unwrap_or_else(|| DEFAULT_VOICE.to_string());
@@ -255,13 +255,13 @@ impl TtsEngine for QoraTtsEngine {
                     );
                 }
 
-                let (ref_audio, _sr) = qora_tts::wav::read_wav(&voice_path).map_err(|e| {
+                let (ref_audio, _sr) = incord_tts::wav::read_wav(&voice_path).map_err(|e| {
                     anyhow::anyhow!("reading voice WAV {}: {e}", voice_path.display())
                 })?;
 
                 let mel_config = MelConfig::speaker_encoder();
                 let mel_spec =
-                    qora_tts::audio_features::extract_mel_spectrogram(&ref_audio, &mel_config);
+                    incord_tts::audio_features::extract_mel_spectrogram(&ref_audio, &mel_config);
 
                 Some(extract_speaker_embedding(&mel_spec, encoder, 128))
             } else {
@@ -309,7 +309,7 @@ impl TtsEngine for QoraTtsEngine {
 
 /// Encode f32 samples ([-1.0, 1.0], mono, `sample_rate` Hz) to 16-bit PCM WAV bytes.
 ///
-/// Mirrors `qora_tts::wav::write_wav` but writes into a Vec<u8> rather than a file.
+/// Mirrors `incord_tts::wav::write_wav` but writes into a Vec<u8> rather than a file.
 fn encode_wav_f32(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let num_samples = samples.len() as u32;
     let num_channels: u16 = 1;

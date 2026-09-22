@@ -78,7 +78,7 @@ mod tests {
             id: "chatcmpl-1".into(),
             object: "chat.completion",
             created: 1_700_000_000,
-            model: "qora-4b".into(),
+            model: "incord-mini-2b".into(),
             choices: vec![Choice {
                 index: 0,
                 message: ResponseMessage {

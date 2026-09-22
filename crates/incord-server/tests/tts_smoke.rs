@@ -1,7 +1,7 @@
 //! Smoke test for TTS dispatch via /v1/inference and /v1/audio/speech.
 //!
-//! The heavy-weight path (actual synthesis) requires the real QORA-TTS model directory
-//! at D:/Burn-AI/QORA-TTS/model/1.7B — skipped gracefully when absent.
+//! The heavy-weight path (actual synthesis) requires a real TTS model directory,
+//! given by `INCORD_TTS_MODEL_DIR` — skipped gracefully when unset or absent.
 //!
 //! The lightweight path (registry wiring, routing, request parsing) runs always.
 
@@ -14,13 +14,13 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use qora_server::auth::admin::AdminState;
-use qora_server::auth::middleware::AuthState;
-use qora_server::auth::ratelimit::RateLimiter;
-use qora_server::db;
-use qora_server::http::handlers::inference::InferenceState;
-use qora_server::http::router::build_router;
-use qora_server::registry::Registry;
+use incord_server::auth::admin::AdminState;
+use incord_server::auth::middleware::AuthState;
+use incord_server::auth::ratelimit::RateLimiter;
+use incord_server::db;
+use incord_server::http::handlers::inference::InferenceState;
+use incord_server::http::router::build_router;
+use incord_server::registry::Registry;
 
 const TEST_ADMIN_TOKEN: &str = "test-admin-tts";
 const TEST_SECRET: &[u8] = b"test-tts-secret";
@@ -33,7 +33,7 @@ fn build_empty_app() -> (axum::Router, TempDir) {
         server_secret: Arc::new(TEST_SECRET.to_vec()),
         limiter: RateLimiter::new(),
         tiers: Default::default(),
-        geo: qora_server::geoip::GeoDb::empty(),
+        geo: incord_server::geoip::GeoDb::empty(),
     });
     let admin_state = Arc::new(AdminState {
         admin_token: TEST_ADMIN_TOKEN.to_string(),
@@ -169,10 +169,14 @@ async fn tts_missing_input_field_returns_400() {
 
 /// Full round-trip: load real model → synthesize short text → verify WAV output.
 ///
-/// Skipped automatically when the QORA-TTS model directory is not present.
+/// Skipped automatically when `INCORD_TTS_MODEL_DIR` is unset or not present.
 #[tokio::test]
 async fn tts_synthesizes_short_text() {
-    let tts_model_dir = std::path::PathBuf::from("D:/Burn-AI/QORA-TTS/model/1.7B");
+    let Ok(dir) = std::env::var("INCORD_TTS_MODEL_DIR") else {
+        eprintln!("skipping tts_synthesizes_short_text: INCORD_TTS_MODEL_DIR not set");
+        return;
+    };
+    let tts_model_dir = std::path::PathBuf::from(dir);
     if !tts_model_dir.exists() {
         eprintln!(
             "skipping tts_synthesizes_short_text: model not at {}",
@@ -181,10 +185,10 @@ async fn tts_synthesizes_short_text() {
         return;
     }
 
-    use qora_server::engine::tts::{TtsEngine, TtsRequest};
-    use qora_server::engines::tts::QoraTtsEngine;
+    use incord_server::engine::tts::{TtsEngine, TtsRequest};
+    use incord_server::engines::tts::IncordTtsEngine;
 
-    let engine = match QoraTtsEngine::load("test-tts", tts_model_dir, "Test TTS") {
+    let engine = match IncordTtsEngine::load("test-tts", tts_model_dir, "Test TTS") {
         Ok(e) => e,
         Err(err) => {
             eprintln!("skipping: TTS engine load failed: {err}");

@@ -33,7 +33,7 @@ async fn vision_request_without_vision_weights_returns_500() {
         .post(server.url("/v1/chat/completions"))
         .bearer_auth(&key)
         .json(&json!({
-            "model":"qora-4b",
+            "model":"incord-mini-2b",
             "messages":[{
                 "role":"user",
                 "content":[
@@ -73,7 +73,7 @@ async fn vision_request_with_invalid_data_url_returns_400() {
         .post(server.url("/v1/chat/completions"))
         .bearer_auth(&key)
         .json(&json!({
-            "model":"qora-4b",
+            "model":"incord-mini-2b",
             "messages":[{
                 "role":"user",
                 "content":[
@@ -108,7 +108,7 @@ async fn vision_request_with_unsupported_scheme_returns_400() {
         .post(server.url("/v1/chat/completions"))
         .bearer_auth(&key)
         .json(&json!({
-            "model":"qora-4b",
+            "model":"incord-mini-2b",
             "messages":[{
                 "role":"user",
                 "content":[

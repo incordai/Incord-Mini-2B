@@ -18,10 +18,10 @@ async fn metrics_endpoint_returns_prometheus_text() {
     let body = resp.text().await.unwrap();
     // Verify at least one of our custom metrics appears
     assert!(
-        body.contains("qora_requests_total")
-            || body.contains("qora_active_slots")
-            || body.contains("qora_queue_depth"),
-        "expected qora_* metric in body: {body}"
+        body.contains("incord_requests_total")
+            || body.contains("incord_active_slots")
+            || body.contains("incord_queue_depth"),
+        "expected incord_* metric in body: {body}"
     );
 }
 

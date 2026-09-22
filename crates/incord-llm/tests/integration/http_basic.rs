@@ -21,7 +21,7 @@ async fn models_endpoint_lists_incord_models() {
     assert_eq!(body["object"], "list");
     assert_eq!(body["data"][0]["id"], "incord-mini-2b");
     assert_eq!(body["data"][1]["id"], "incord");
-    assert_eq!(body["data"][2]["id"], "qora-4b");
+    assert_eq!(body["data"][2]["id"], "incord-mini-2b");
 }
 
 #[tokio::test]

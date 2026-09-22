@@ -16,7 +16,7 @@ use crate::db::{
     tenant_str_prefix, ID_BY_HMAC, KEYS_BY_ID,
 };
 
-pub const KEY_PREFIX: &str = "qora_";
+pub const KEY_PREFIX: &str = "incord_";
 pub const HMAC_LEN: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -337,9 +337,9 @@ mod tests {
     #[test]
     fn hmac_is_deterministic_and_distinct() {
         let s = secret();
-        let a = hmac_index(&s, "qora_a");
-        let b = hmac_index(&s, "qora_a");
-        let c = hmac_index(&s, "qora_b");
+        let a = hmac_index(&s, "incord_a");
+        let b = hmac_index(&s, "incord_a");
+        let c = hmac_index(&s, "incord_b");
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
@@ -349,7 +349,7 @@ mod tests {
         let raw = generate_raw_key();
         let hash = hash_key_argon2(&raw).unwrap();
         assert!(verify_argon2(&raw, &hash));
-        assert!(!verify_argon2("qora_wrong", &hash));
+        assert!(!verify_argon2("incord_wrong", &hash));
     }
 
     #[test]
@@ -385,7 +385,7 @@ mod tests {
         let db = fresh_db();
         let s = secret();
         let _ = create_key(&db, &s, DEFAULT_TENANT, "user1", "t", 60, 60_000).unwrap();
-        let found = lookup_by_raw(&db, &s, DEFAULT_TENANT, "qora_unknown").unwrap();
+        let found = lookup_by_raw(&db, &s, DEFAULT_TENANT, "incord_unknown").unwrap();
         assert!(found.is_none());
     }
 

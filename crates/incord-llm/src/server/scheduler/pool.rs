@@ -1,4 +1,4 @@
-use crate::config::Qor4bConfig;
+use crate::config::IncordConfig;
 use crate::gemv_batch::SlotInferenceState;
 use crate::server::scheduler::queue::PendingRequest;
 use crate::server::scheduler::slot::{Slot, SlotPhase};
@@ -19,7 +19,7 @@ impl SlotPool {
 
     /// Admit a pending request into the first free slot.
     /// Returns true if admitted, false if no free slot.
-    pub fn admit(&self, req: PendingRequest, config: &Qor4bConfig) -> bool {
+    pub fn admit(&self, req: PendingRequest, config: &IncordConfig) -> bool {
         let mut slots = self.slots.lock().unwrap();
         for slot in slots.iter_mut() {
             if slot.is_free() {
@@ -64,7 +64,7 @@ mod tests {
                 id: Uuid::new_v4(),
                 key_id: "k".into(),
                 user_id: "u".into(),
-                model_name: "qora-4b".into(),
+                model_name: "incord-mini-2b".into(),
                 cache: HybridCache::new(&w.config),
                 prompt_tokens: vec![1],
                 generated_tokens: Vec::new(),

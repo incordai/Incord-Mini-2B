@@ -4,7 +4,7 @@
 
 **Goal:** Add vision endpoint (image + video), Prometheus metrics, deployment artifacts (systemd unit, config example, install script), production load testing, and the launch checklist. End state: a complete v1 ready to deploy on the EPYC server, document, and start selling.
 
-**Prerequisites:** M5 merged. Branch `feature/qora-server-m6-launch` from `feature/qora-server`.
+**Prerequisites:** M5 merged. Branch `feature/incord-server-m6-launch` from `feature/incord-server`.
 
 **Architecture:**
 - Vision: parse OpenAI image_url (data URL or http(s) URL), decode to RGB bytes, run existing `vision::encode_image` on a dedicated semaphore-limited thread, inject embeddings into prefill via existing `prefill_with_vision`.
@@ -122,7 +122,7 @@ git commit -m "feat(vision): parse OpenAI image_url (data and http schemes)"
 
 **Files:**
 - Modify: `src/server/http/handlers/chat.rs`
-- Modify: `src/bin/qora_server.rs`
+- Modify: `src/bin/incord_server.rs`
 
 The chat handler currently ignores `ContentPart::ImageUrl`. Wire vision encoding into the request flow.
 
@@ -203,7 +203,7 @@ let vision_embeds = tokio::task::spawn_blocking(move || {
     let (h, w) = (rgb.height() as usize, rgb.width() as usize);
     // Convert to the f32 pixel layout the existing encoder expects (see vision.rs::load_image).
     // The function exposed by vision.rs may need a minor adapter taking bytes directly.
-    let pixels = qor4b::vision::pixels_from_rgb_bytes(rgb.as_raw(), w, h);
+    let pixels = incord::vision::pixels_from_rgb_bytes(rgb.as_raw(), w, h);
     let (embeds, num_tokens) = vision.encode_image(&pixels, h, w);
     Ok::<_, anyhow::Error>((embeds, num_tokens))
 }).await.map_err(|e| ServerError::Internal(format!("vision task: {e}")))?
@@ -233,7 +233,7 @@ cargo check --all-targets
 
 ```bash
 git add src/server/http/handlers/chat.rs src/server/scheduler/queue.rs \
-        src/server/scheduler/batcher.rs src/bin/qora_server.rs
+        src/server/scheduler/batcher.rs src/bin/incord_server.rs
 git commit -m "feat(vision): wire image input through chat → vision encoder → prefill_with_vision"
 ```
 
@@ -286,7 +286,7 @@ async fn image_completion_returns_text() {
         .post(server.url("/v1/chat/completions"))
         .bearer_auth(&key)
         .json(&json!({
-            "model":"qora-4b",
+            "model":"incord-mini-2b",
             "messages":[{
                 "role":"user",
                 "content":[
@@ -348,27 +348,27 @@ use prometheus::{
 };
 
 pub static REQUESTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
-    register_counter_vec!("qora_requests_total", "Total requests", &["endpoint", "status"]).unwrap()
+    register_counter_vec!("incord_requests_total", "Total requests", &["endpoint", "status"]).unwrap()
 });
 
 pub static TOKENS_EMITTED: Lazy<Counter> = Lazy::new(|| {
-    register_counter!("qora_tokens_emitted_total", "Total output tokens emitted").unwrap()
+    register_counter!("incord_tokens_emitted_total", "Total output tokens emitted").unwrap()
 });
 
 pub static REQUEST_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
-        "qora_request_duration_seconds", "Request duration",
+        "incord_request_duration_seconds", "Request duration",
         &["endpoint"],
         vec![0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]
     ).unwrap()
 });
 
 pub static ACTIVE_SLOTS: Lazy<Gauge> = Lazy::new(|| {
-    register_gauge!("qora_active_slots", "Currently active slots").unwrap()
+    register_gauge!("incord_active_slots", "Currently active slots").unwrap()
 });
 
 pub static QUEUE_DEPTH: Lazy<Gauge> = Lazy::new(|| {
-    register_gauge!("qora_queue_depth", "Pending requests in queue").unwrap()
+    register_gauge!("incord_queue_depth", "Pending requests in queue").unwrap()
 });
 
 pub fn render_metrics() -> String {
@@ -420,7 +420,7 @@ async fn metrics_endpoint_returns_prometheus_text() {
     let resp = reqwest::get(server.url("/metrics")).await.unwrap();
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
-    assert!(body.contains("qora_requests_total"));
+    assert!(body.contains("incord_requests_total"));
 }
 ```
 
@@ -445,25 +445,25 @@ git commit -m "feat(metrics): Prometheus instrumentation + /metrics endpoint"
 ## Task 5: systemd unit + install script
 
 **Files:**
-- Create: `config/qora-server.service`
+- Create: `config/incord-server.service`
 - Create: `scripts/install.sh`
 - Create: `docs/deployment.md`
 
 - [ ] **Step 1: systemd unit**
 
 ```ini
-# config/qora-server.service
+# config/incord-server.service
 [Unit]
-Description=QORA-4B API server
+Description=Incord-Mini-2B API server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=qora
-Group=qora
-EnvironmentFile=-/etc/qora/qora.env
-ExecStart=/usr/local/bin/qora-server /etc/qora/qora-server.toml
+User=incord
+Group=incord
+EnvironmentFile=-/etc/incord/incord.env
+ExecStart=/usr/local/bin/incord-server /etc/incord/incord-server.toml
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -472,7 +472,7 @@ LimitNOFILE=65536
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/qora
+ReadWritePaths=/var/lib/incord
 
 [Install]
 WantedBy=multi-user.target
@@ -485,35 +485,35 @@ WantedBy=multi-user.target
 # scripts/install.sh
 set -euo pipefail
 
-# Idempotent install for QORA API server on Ubuntu 24.04.
+# Idempotent install for Incord API server on Ubuntu 24.04.
 # Run as root.
 [ "$(id -u)" = 0 ] || { echo "must run as root"; exit 1; }
 
-useradd --system --no-create-home --shell /usr/sbin/nologin qora || true
-mkdir -p /etc/qora /var/lib/qora /var/log/qora
-chown -R qora:qora /var/lib/qora /var/log/qora
+useradd --system --no-create-home --shell /usr/sbin/nologin incord || true
+mkdir -p /etc/incord /var/lib/incord /var/log/incord
+chown -R incord:incord /var/lib/incord /var/log/incord
 
 # Binary
-install -o root -g root -m 0755 target/release/qora-server /usr/local/bin/qora-server
+install -o root -g root -m 0755 target/release/incord-server /usr/local/bin/incord-server
 
 # Config
-[ -f /etc/qora/qora-server.toml ] || install -o root -g qora -m 0640 \
-  config/qora-server.toml.example /etc/qora/qora-server.toml
+[ -f /etc/incord/incord-server.toml ] || install -o root -g incord -m 0640 \
+  config/incord-server.toml.example /etc/incord/incord-server.toml
 
 # Systemd
-install -o root -g root -m 0644 config/qora-server.service /etc/systemd/system/
+install -o root -g root -m 0644 config/incord-server.service /etc/systemd/system/
 systemctl daemon-reload
 
-echo "Installed. Edit /etc/qora/qora-server.toml, set QORA_ADMIN_TOKEN in /etc/qora/qora.env, then:"
-echo "  systemctl enable --now qora-server"
-echo "  journalctl -u qora-server -f"
+echo "Installed. Edit /etc/incord/incord-server.toml, set INCORD_ADMIN_TOKEN in /etc/incord/incord.env, then:"
+echo "  systemctl enable --now incord-server"
+echo "  journalctl -u incord-server -f"
 ```
 
 - [ ] **Step 3: Deployment doc**
 
 Create `docs/deployment.md` covering:
 - Hardware requirements (EPYC 9354 / 256 GB DDR5 / no GPU)
-- Required files (`model.qor4b`, `tokenizer.json`)
+- Required files (`model.incord`, `tokenizer.json`)
 - TLS cert procurement (Let's Encrypt)
 - Backup procedure (sqlite WAL + nightly cp to second SSD)
 - Admin token rotation
@@ -525,7 +525,7 @@ Create `docs/deployment.md` covering:
 - [ ] **Step 4: Commit**
 
 ```bash
-git add config/qora-server.service scripts/install.sh docs/deployment.md
+git add config/incord-server.service scripts/install.sh docs/deployment.md
 git commit -m "feat(ops): systemd unit, install script, deployment docs"
 ```
 
@@ -559,7 +559,7 @@ async fn main() {
     let mut concurrency = 100usize;
     let mut duration_secs = 60u64;
     let mut url = "http://127.0.0.1:8080".to_string();
-    let mut key = "qora_test".to_string();
+    let mut key = "incord_test".to_string();
     let mut max_tokens = 200u32;
 
     let args: Vec<String> = std::env::args().collect();
@@ -596,7 +596,7 @@ async fn main() {
                 let res = client.post(format!("{url}/v1/chat/completions"))
                     .bearer_auth(&key)
                     .json(&json!({
-                        "model":"qora-4b",
+                        "model":"incord-mini-2b",
                         "messages":[{"role":"user","content":"explain entropy briefly"}],
                         "max_tokens":max_tokens,
                         "stream":false
@@ -634,7 +634,7 @@ Add `parking_lot = "0.12"` if not already.
 ```bash
 cargo build --release --bin load_test
 # Against running server:
-./target/release/load_test --concurrency 50 --duration 30 --key qora_yourkey
+./target/release/load_test --concurrency 50 --duration 30 --key incord_yourkey
 ```
 
 - [ ] **Step 4: Commit**
@@ -658,16 +658,16 @@ git commit -m "test(load): load test binary measuring p50/p95/p99 latency"
 # scripts/soak_24h.sh — 24-hour soak test
 set -euo pipefail
 URL=${URL:-http://127.0.0.1:8080}
-KEY=${KEY:-qora_test}
+KEY=${KEY:-incord_test}
 CONCURRENCY=${CONCURRENCY:-100}
 DURATION=$((24*3600))
 
-LOGFILE=/var/log/qora/soak_$(date +%Y%m%d_%H%M).log
+LOGFILE=/var/log/incord/soak_$(date +%Y%m%d_%H%M).log
 mkdir -p "$(dirname $LOGFILE)"
 
 # Memory monitor
 ( while sleep 60; do
-    rss=$(ps -o rss= -p $(pgrep -f qora-server))
+    rss=$(ps -o rss= -p $(pgrep -f incord-server))
     echo "$(date -Iseconds) RSS=${rss}KB" >> "$LOGFILE.mem"
 done ) &
 MON=$!
@@ -715,13 +715,13 @@ Each example shows: how to set base_url, how to send a chat completion (stream +
 ```bash
 #!/usr/bin/env bash
 # docs/examples/curl/chat.sh
-QORA_KEY=${QORA_KEY:-qora_yourkey}
-QORA_URL=${QORA_URL:-https://api.example.com}
-curl -sS "$QORA_URL/v1/chat/completions" \
-  -H "Authorization: Bearer $QORA_KEY" \
+INCORD_KEY=${INCORD_KEY:-incord_yourkey}
+INCORD_URL=${INCORD_URL:-https://api.example.com}
+curl -sS "$INCORD_URL/v1/chat/completions" \
+  -H "Authorization: Bearer $INCORD_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"qora-4b",
+    "model":"incord-mini-2b",
     "messages":[{"role":"user","content":"Hello"}],
     "max_tokens":200
   }'
@@ -734,11 +734,11 @@ curl -sS "$QORA_URL/v1/chat/completions" \
 import os
 from openai import OpenAI
 client = OpenAI(
-    api_key=os.environ["QORA_KEY"],
-    base_url=os.environ.get("QORA_URL", "https://api.example.com/v1"),
+    api_key=os.environ["INCORD_KEY"],
+    base_url=os.environ.get("INCORD_URL", "https://api.example.com/v1"),
 )
 resp = client.chat.completions.create(
-    model="qora-4b",
+    model="incord-mini-2b",
     messages=[{"role": "user", "content": "Hello"}],
     max_tokens=200,
 )
@@ -751,11 +751,11 @@ print(resp.choices[0].message.content)
 // docs/examples/openai-node/chat.mjs
 import OpenAI from "openai";
 const client = new OpenAI({
-  apiKey: process.env.QORA_KEY,
-  baseURL: process.env.QORA_URL ?? "https://api.example.com/v1",
+  apiKey: process.env.INCORD_KEY,
+  baseURL: process.env.INCORD_URL ?? "https://api.example.com/v1",
 });
 const resp = await client.chat.completions.create({
-  model: "qora-4b",
+  model: "incord-mini-2b",
   messages: [{ role: "user", content: "Hello" }],
   max_tokens: 200,
 });
@@ -778,11 +778,11 @@ This is run manually, not in CI.
 - [ ] **Step 1: Deploy a build to the EPYC server**
 
 ```bash
-cargo build --release --bin qora-server
-scp target/release/qora-server qora@epyc:/tmp/
-scp model/model.qor4b qora@epyc:/var/lib/qora/    # 3 GB transfer
-scp model/tokenizer.json qora@epyc:/var/lib/qora/
-ssh root@epyc 'bash scripts/install.sh && systemctl enable --now qora-server'
+cargo build --release --bin incord-server
+scp target/release/incord-server incord@epyc:/tmp/
+scp model/model.incord incord@epyc:/var/lib/incord/    # 3 GB transfer
+scp model/tokenizer.json incord@epyc:/var/lib/incord/
+ssh root@epyc 'bash scripts/install.sh && systemctl enable --now incord-server'
 ```
 
 - [ ] **Step 2: Run load tests at increasing concurrency**
@@ -792,7 +792,7 @@ ssh root@epyc 'bash scripts/install.sh && systemctl enable --now qora-server'
 for c in 10 50 100 150 200 300; do
   echo "=== concurrency $c ==="
   ./target/release/load_test --concurrency $c --duration 300 \
-    --url https://api.example.com --key qora_loadtest --max-tokens 500
+    --url https://api.example.com --key incord_loadtest --max-tokens 500
 done
 ```
 
@@ -824,7 +824,7 @@ git commit -m "test(load): production load + 24h soak results — meets v1 SLO"
 
 ## Task 10: Final launch checklist
 
-Walk the master plan's launch checklist. Each item must be checked off before merging `feature/qora-server` → `main`.
+Walk the master plan's launch checklist. Each item must be checked off before merging `feature/incord-server` → `main`.
 
 - [ ] All M1–M6 acceptance tests pass on a clean checkout
 - [ ] `cargo clippy --all-targets -- -D warnings` clean
@@ -844,15 +844,15 @@ When all green:
 
 ```bash
 git checkout main
-git merge --no-ff feature/qora-server
-git tag -a v1.0.0 -m "QORA Multi-User API Server v1.0.0 — first sellable release"
+git merge --no-ff feature/incord-server
+git tag -a v1.0.0 -m "Incord Multi-User API Server v1.0.0 — first sellable release"
 git push origin main --tags
 ```
 
 Deploy:
 
 ```bash
-ssh epyc 'systemctl restart qora-server && journalctl -u qora-server -f'
+ssh epyc 'systemctl restart incord-server && journalctl -u incord-server -f'
 ```
 
 Open the gates. Start selling.
@@ -875,12 +875,12 @@ git commit --allow-empty -m "milestone: M6 vision + ops + launch complete
 
 Acceptance: all launch checklist items green"
 
-git checkout feature/qora-server
-git merge --no-ff feature/qora-server-m6-launch
+git checkout feature/incord-server
+git merge --no-ff feature/incord-server-m6-launch
 # After final v1 verification:
 git checkout main
-git merge --no-ff feature/qora-server
+git merge --no-ff feature/incord-server
 git tag v1.0.0
 ```
 
-V1 ships. Next steps (post-launch): Stripe billing integration, multi-server load balancer (when traffic justifies), QORA model improvements (separate roadmap).
+V1 ships. Next steps (post-launch): Stripe billing integration, multi-server load balancer (when traffic justifies), Incord model improvements (separate roadmap).

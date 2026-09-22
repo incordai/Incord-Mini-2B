@@ -29,14 +29,14 @@ If the LLM 150-concurrent target does not meet SLO, do not launch — profile an
 
 On the EPYC server:
 
-1. Service installed via `scripts/install.sh` and started: `systemctl status qora-server`
+1. Service installed via `scripts/install.sh` and started: `systemctl status incord-server`
 2. All model files in place per the `[[models]]` config entries:
-   - `model.qor4b` + `tokenizer.json` (LLM)
-   - `model.qora-tts` + `tokenizer.json` (TTS)
-   - `model.qora-stt-small` (STT)
+   - `model.incord` + `tokenizer.json` (LLM)
+   - `model.incord-tts` + `tokenizer.json` (TTS)
+   - `model.incord-stt-small` (STT)
    - `embed.bin` (Embedding)
    - `rerank.bin` (Rerank)
-3. `QORA_SERVER_SECRET` and `QORA_ADMIN_TOKEN` set in `/etc/qora/qora.env`
+3. `INCORD_SERVER_SECRET` and `INCORD_ADMIN_TOKEN` set in `/etc/incord/incord.env`
 4. `/health` returns 200 from another machine
 5. `target/release/load_test` binary built (or copied from another build host)
 6. `GET /v1/models` lists all five engine IDs
@@ -44,7 +44,7 @@ On the EPYC server:
 ## Step 1 — Create a load-test API key
 
 ```bash
-ADMIN_TOKEN=$(grep QORA_ADMIN_TOKEN /etc/qora/qora.env | cut -d= -f2)
+ADMIN_TOKEN=$(grep INCORD_ADMIN_TOKEN /etc/incord/incord.env | cut -d= -f2)
 
 curl -sS https://api.your-domain.com/v1/admin/keys \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -72,7 +72,7 @@ for c in 10 50 100 150 200 300; do
         --url "$URL" \
         --key "$KEY" \
         --endpoint /v1/chat/completions \
-        --model qora-llm \
+        --model incord-llm \
         --concurrency $c \
         --duration 300 \
         --max-tokens 500 \
@@ -119,10 +119,10 @@ KEY=$(cat /tmp/loadtest.key)
     --url "$URL" \
     --key "$KEY" \
     --endpoint /v1/audio/speech \
-    --model qora-tts \
+    --model incord-tts \
     --concurrency 8 \
     --duration 180 \
-    --tts-input "The quick brown fox jumps over the lazy dog. QORA delivers fast, natural speech synthesis." \
+    --tts-input "The quick brown fox jumps over the lazy dog. Incord delivers fast, natural speech synthesis." \
     | tee /tmp/loadtest_tts.log
 
 # STT — transcribe a 30-second clip at up to 8 concurrent requests
@@ -130,7 +130,7 @@ KEY=$(cat /tmp/loadtest.key)
     --url "$URL" \
     --key "$KEY" \
     --endpoint /v1/audio/transcriptions \
-    --model qora-stt \
+    --model incord-stt \
     --concurrency 8 \
     --duration 180 \
     --audio-file /tmp/loadtest_30s.wav \
@@ -141,7 +141,7 @@ KEY=$(cat /tmp/loadtest.key)
     --url "$URL" \
     --key "$KEY" \
     --endpoint /v1/embeddings \
-    --model qora-embed \
+    --model incord-embed \
     --concurrency 32 \
     --duration 180 \
     --embed-batch 8 \
@@ -152,7 +152,7 @@ KEY=$(cat /tmp/loadtest.key)
     --url "$URL" \
     --key "$KEY" \
     --endpoint /v1/rerank \
-    --model qora-rerank \
+    --model incord-rerank \
     --concurrency 16 \
     --duration 180 \
     --rerank-docs 20 \
@@ -178,12 +178,12 @@ URL=https://api.your-domain.com KEY=$(cat /tmp/loadtest.key) \
     ./scripts/soak_24h.sh
 ```
 
-This runs for 24 hours. Monitor `/var/log/qora/soak_*.log` and `*.mem`. The script will print PASS/FAIL based on RSS drift.
+This runs for 24 hours. Monitor `/var/log/incord/soak_*.log` and `*.mem`. The script will print PASS/FAIL based on RSS drift.
 
 While the soak runs, periodically:
-- Check `journalctl -u qora-server --since "1 hour ago" | grep -i panic` — should be empty
-- Check Prometheus `qora_active_slots` — should oscillate around the working set, not climb monotonically
-- Check `qora_errors_total` — should stay near zero (or grow only with deliberate 429s if you're saturating limits)
+- Check `journalctl -u incord-server --since "1 hour ago" | grep -i panic` — should be empty
+- Check Prometheus `incord_active_slots` — should oscillate around the working set, not climb monotonically
+- Check `incord_errors_total` — should stay near zero (or grow only with deliberate 429s if you're saturating limits)
 
 ## Step 6 — Capture baseline numbers
 
@@ -193,9 +193,9 @@ After the ramp + soak pass, record the actual numbers in `docs/load-test-results
 # Load Test — <DATE>
 
 Hardware: AMD EPYC 9354 32C/64T, 256 GB DDR5, 2× 4 TB NVMe SSD
-QORA-server: <git SHA>
+Incord-server: <git SHA>
 slot_count: <value from config>
-Models loaded: qora-llm, qora-tts, qora-stt, qora-embed, qora-rerank
+Models loaded: incord-llm, incord-tts, incord-stt, incord-embed, incord-rerank
 
 ## LLM ramp results
 
@@ -236,7 +236,7 @@ After tests:
 ```bash
 # Revoke the load-test key
 KEY_ID=$(jq -r .id /tmp/loadtest-key.json)
-ADMIN_TOKEN=$(grep QORA_ADMIN_TOKEN /etc/qora/qora.env | cut -d= -f2)
+ADMIN_TOKEN=$(grep INCORD_ADMIN_TOKEN /etc/incord/incord.env | cut -d= -f2)
 curl -X DELETE "https://api.your-domain.com/v1/admin/keys/$KEY_ID" \
     -H "Authorization: Bearer $ADMIN_TOKEN"
 
@@ -249,5 +249,5 @@ rm /tmp/loadtest.key /tmp/loadtest-key.json
 - The load test sets `temperature: 0.0` so LLM completions are deterministic (greedy). Keep this — non-deterministic generations make latency comparisons noisier.
 - `--max-tokens 500` sized to roughly match the median customer request. Adjust if your traffic pattern differs.
 - The numbers above are targets, not guarantees. Real-world performance depends on prompt distribution, context lengths, concurrent vision encodes (which serialize on the vision_semaphore), and the number of non-LLM requests happening concurrently.
-- Non-LLM engines (TTS, STT, Embed, Rerank) each have their own concurrency semaphore. If you see queuing at the SLO limits, raise the semaphore permit counts in `crates/qora-server/src/bin/qora_server.rs` and rebuild.
+- Non-LLM engines (TTS, STT, Embed, Rerank) each have their own concurrency semaphore. If you see queuing at the SLO limits, raise the semaphore permit counts in `crates/incord-server/src/bin/incord_server.rs` and rebuild.
 - If you scale beyond 150 LLM-concurrent on a single node, you've outgrown one box — add a second EPYC behind a load balancer rather than chasing single-node optimizations past this point.

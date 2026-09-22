@@ -1,22 +1,22 @@
-# QORA Multi-Model + Multi-Modality API Server (pre-launch v1)
+# Incord Multi-Model + Multi-Modality API Server (pre-launch v1)
 
 **Status**: Approved (replaces single-model design)
 **Date**: 2026-04-26
-**Replaces**: `2026-04-25-qora-multiuser-server-design.md` (single-model v1, never shipped)
+**Replaces**: `2026-04-25-incord-multiuser-server-design.md` (single-model v1, never shipped)
 **Versioning note**: this IS v1. The earlier `v1.0.0` tag was premature — removed. The actual v1.0.0 ships when this expanded scope is complete and validated on the EPYC server.
 
 ## Goal
 
-Ship one HTTP API server that fronts the entire QORA model family, exposing a flexible API where adding a new model is config-only (no server code changes).
+Ship one HTTP API server that fronts the entire Incord model family, exposing a flexible API where adding a new model is config-only (no server code changes).
 
 ## Models in scope
 
 | Family | Existing crate | Format | Modality |
 |---|---|---|---|
-| **QOR2B / 3B / 4B / 8B / 27B** | this repo (`src/`) | `.qor4b`-family | text + vision (LLM) |
-| **QORA-TTS 1.7B** | `D:/Burn-AI/QORA-TTS/` (has its own .exe + lib) | `.qora-tts` | text → audio (TTS, voice cloning, 25 voices, 10 lang) |
-| **QORA-STT-Small** | `D:/Burn-AI/QORA-STT-Small/` (Whisper-based crate) | `.qora-stt-small` | audio → text (STT, multi-lang) |
-| **QOR-RAG (Qwen3-VL-2B)** | `C:/Projects/AI/qor-main/qor-rs/crates/qor-rag/` | `.qor-rag-family` | embedding + reranking |
+| **QOR2B / 3B / 4B / 8B / 27B** | this repo (`src/`) | `.incord`-family | text + vision (LLM) |
+| **TTS 1.7B** | separate repo (has its own .exe + lib) | `.incord-tts` | text → audio (TTS, voice cloning, 25 voices, 10 lang) |
+| **STT-Small** | separate repo (Whisper-based crate) | `.incord-stt-small` | audio → text (STT, multi-lang) |
+| **RAG (Qwen3-VL-2B)** | separate repo | `.qor-rag-family` | embedding + reranking |
 
 All four are existing **pure-Rust** crates with their own inference engines. The server's job is to wrap them behind a common trait, route requests, and handle HTTP/auth/billing/metrics.
 
@@ -34,25 +34,25 @@ All four are existing **pure-Rust** crates with their own inference engines. The
 Convert the current crate into a Cargo workspace:
 
 ```
-QOR4B/                          (workspace root, will rename to "qora" eventually)
+Incord-Mini-2B/                 (workspace root)
 ├── Cargo.toml                  (workspace manifest)
 ├── crates/
-│   ├── qora-llm/               (current src/* — text + vision LLM)
-│   ├── qora-tts/               (path-dep to D:/Burn-AI/QORA-TTS)
-│   ├── qora-stt/               (path-dep to D:/Burn-AI/QORA-STT-Small)
-│   ├── qora-rag/               (path-dep to C:/Projects/AI/qor-main/qor-rs/crates/qor-rag)
-│   └── qora-server/            (HTTP layer + auth + scheduler + engine trait + registry)
+│   ├── incord-llm/               (current src/* — text + vision LLM)
+│   ├── incord-tts/               (dep on the TTS engine crate)
+│   ├── incord-stt/               (dep on the STT engine crate)
+│   ├── incord-rag/               (dep on the RAG engine crate)
+│   └── incord-server/            (HTTP layer + auth + scheduler + engine trait + registry)
 ├── config/                     (TOML examples)
 ├── docs/                       (specs + plans + API + deployment)
 └── tests/                      (integration)
 ```
 
-The current `src/` becomes `crates/qora-llm/src/`. The CLI binary `qor4b` stays in qora-llm.
+The current `src/` becomes `crates/incord-llm/src/`. The CLI binary `incord` stays in incord-llm.
 
 ### Trait hierarchy
 
 ```rust
-// crates/qora-server/src/engine/mod.rs
+// crates/incord-server/src/engine/mod.rs
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Task {
@@ -114,41 +114,41 @@ Server config:
 
 ```toml
 [[models]]
-id = "qora-4b"
+id = "incord-mini-2b"
 kind = "chat"
-path = "/var/lib/qora/models/qora-4b/model.qor4b"
-tokenizer = "/var/lib/qora/models/qora-4b/tokenizer.json"
+path = "/var/lib/incord/models/incord-mini-2b/model.incord"
+tokenizer = "/var/lib/incord/models/incord-mini-2b/tokenizer.json"
 
 [[models]]
-id = "qora-27b"
+id = "incord-27b"
 kind = "chat"
-path = "/var/lib/qora/models/qora-27b/model.qor27b"
-tokenizer = "/var/lib/qora/models/qora-27b/tokenizer.json"
+path = "/var/lib/incord/models/incord-27b/model.qor27b"
+tokenizer = "/var/lib/incord/models/incord-27b/tokenizer.json"
 
 [[models]]
-id = "qora-tts-1.7b"
+id = "incord-tts-1.7b"
 kind = "tts"
-path = "/var/lib/qora/models/qora-tts/model.qora-tts"
-tokenizer = "/var/lib/qora/models/qora-tts/tokenizer.json"
-voices_dir = "/var/lib/qora/models/qora-tts/voices"
+path = "/var/lib/incord/models/incord-tts/model.incord-tts"
+tokenizer = "/var/lib/incord/models/incord-tts/tokenizer.json"
+voices_dir = "/var/lib/incord/models/incord-tts/voices"
 
 [[models]]
-id = "qora-stt-small"
+id = "incord-stt-small"
 kind = "stt"
-path = "/var/lib/qora/models/qora-stt/model.qora-stt-small"
-tokenizer = "/var/lib/qora/models/qora-stt/tokenizer.json"
+path = "/var/lib/incord/models/incord-stt/model.incord-stt-small"
+tokenizer = "/var/lib/incord/models/incord-stt/tokenizer.json"
 
 [[models]]
-id = "qora-embed-2b"
+id = "incord-embed-2b"
 kind = "embedding"
-path = "/var/lib/qora/models/qora-rag/embed-model.bin"
-tokenizer = "/var/lib/qora/models/qora-rag/embed-tokenizer.json"
+path = "/var/lib/incord/models/incord-rag/embed-model.bin"
+tokenizer = "/var/lib/incord/models/incord-rag/embed-tokenizer.json"
 
 [[models]]
-id = "qora-rerank-2b"
+id = "incord-rerank-2b"
 kind = "rerank"
-path = "/var/lib/qora/models/qora-rag/rerank-model.bin"
-tokenizer = "/var/lib/qora/models/qora-rag/rerank-tokenizer.json"
+path = "/var/lib/incord/models/incord-rag/rerank-model.bin"
+tokenizer = "/var/lib/incord/models/incord-rag/rerank-tokenizer.json"
 ```
 
 Loading is **eager** by default (boot loads all models, ~30-90 s). **Lazy** mode optional via `[loading] mode = "lazy"`.
@@ -175,11 +175,11 @@ DELETE /v1/admin/keys/{id}                  — admin, unchanged
 
 ```json
 POST /v1/inference
-Authorization: Bearer qora_<key>
+Authorization: Bearer incord_<key>
 
 {
   "task": "chat" | "tts" | "stt" | "embedding" | "rerank",
-  "model": "qora-4b" | "qora-tts-1.7b" | ...,
+  "model": "incord-mini-2b" | "incord-tts-1.7b" | ...,
 
   // chat
   "messages": [...],
@@ -226,12 +226,12 @@ The scheduler module gains a `Strategy` enum so each engine declares its schedul
 
 | # | Module | Estimated effort |
 |---|---|---|
-| M7  | Workspace restructure (move src/ → crates/qora-llm/) | 2 days |
+| M7  | Workspace restructure (move src/ → crates/incord-llm/) | 2 days |
 | M8  | ModelEngine + ChatEngine traits + LlmEngine wrapper around existing inference | 1 week |
 | M9  | Model registry + TOML loader + endpoint dispatch | 3 days |
 | M10 | Unified `/v1/inference` + OpenAI aliases | 4 days |
-| M11 | TtsEngine wrapper around qora-tts | 1.5 weeks |
-| M12 | SttEngine wrapper around qora-stt (audio decode for MP3/Opus via symphonia) | 1.5 weeks |
+| M11 | TtsEngine wrapper around incord-tts | 1.5 weeks |
+| M12 | SttEngine wrapper around incord-stt (audio decode for MP3/Opus via symphonia) | 1.5 weeks |
 | M13 | EmbeddingEngine + RerankEngine wrappers around qor-rag | 1 week |
 | M14 | Per-engine scheduling (worker pools for non-batched engines) | 1 week |
 | M15 | Multi-LLM (load 27B alongside 4B; per-model rate limits + pricing) | 1 week |
@@ -245,11 +245,11 @@ This is on top of the M1-M6 work already done (which becomes the LLM engine insi
 
 - [ ] Workspace builds clean: `cargo build --release --workspace`
 - [ ] LLM regression: chat_completions integration tests pass via the new LlmEngine path (no behavior change vs M1-M6)
-- [ ] Multi-LLM: server with QOR4B and QOR27B both registered serves both via `/v1/chat/completions`
-- [ ] TTS smoke: `POST /v1/audio/speech {model:qora-tts-1.7b, input:"hello", voice:"luna"}` returns valid 24kHz WAV
-- [ ] STT smoke: `POST /v1/audio/transcriptions {model:qora-stt-small, file:<wav>}` returns transcribed text
-- [ ] Embedding smoke: `POST /v1/embeddings {model:qora-embed-2b, input:["hello"]}` returns vector
-- [ ] Rerank smoke: `POST /v1/rerank {model:qora-rerank-2b, query:"foo", documents:["bar","baz"]}` returns scores
+- [ ] Multi-LLM: server with two LLM sizes both registered serves both via `/v1/chat/completions`
+- [ ] TTS smoke: `POST /v1/audio/speech {model:incord-tts-1.7b, input:"hello", voice:"luna"}` returns valid 24kHz WAV
+- [ ] STT smoke: `POST /v1/audio/transcriptions {model:incord-stt-small, file:<wav>}` returns transcribed text
+- [ ] Embedding smoke: `POST /v1/embeddings {model:incord-embed-2b, input:["hello"]}` returns vector
+- [ ] Rerank smoke: `POST /v1/rerank {model:incord-rerank-2b, query:"foo", documents:["bar","baz"]}` returns scores
 - [ ] Unified endpoint: `POST /v1/inference {task:tts,...}` works identically to OpenAI alias
 - [ ] OpenAI Python SDK works against `/v1/chat/completions`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/embeddings`
 - [ ] Production load test on EPYC: mixed traffic across all 5 task types sustains target throughput

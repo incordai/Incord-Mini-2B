@@ -1,6 +1,6 @@
-# QORA Server Deployment Guide
+# Incord Server Deployment Guide
 
-This guide covers deploying the QORA multi-model API server on a single Linux box.
+This guide covers deploying the Incord multi-model API server on a single Linux box.
 
 ## Hardware Requirements
 
@@ -30,16 +30,16 @@ If you load a larger LLM variant (9B or 27B), add proportionally more RAM.
 
 ## Required Files
 
-Per-engine model files (all paths configurable in `qora-server.toml`):
+Per-engine model files (all paths configurable in `incord-server.toml`):
 
-- `qora-server` binary (built from this repo via `cargo build --release --bin qora-server`)
-- **LLM engine**: `model.qor4b` (~3.5 GB), `tokenizer.json`
-- **TTS engine**: `model.qora-tts`, `tokenizer.json`
-- **STT engine**: `model.qora-stt-small`
+- `incord-server` binary (built from this repo via `cargo build --release --bin incord-server`)
+- **LLM engine**: `model.incord` (~3.5 GB), `tokenizer.json`
+- **TTS engine**: `model.incord-tts`, `tokenizer.json`
+- **STT engine**: `model.incord-stt-small`
 - **Embedding engine**: `embed.bin`
 - **Rerank engine**: `rerank.bin`
-- `qora-server.toml` — server config
-- `qora.env` — environment variables (secrets)
+- `incord-server.toml` — server config
+- `incord.env` — environment variables (secrets)
 
 Engines you do not need can simply be omitted from the `[[models]]` list in the config — they will not be loaded.
 
@@ -52,16 +52,16 @@ sudo ./scripts/install.sh
 ```
 
 This:
-- Creates the `qora` system user
-- Installs `qora-server` to `/usr/local/bin/`
-- Writes default config to `/etc/qora/qora-server.toml`
-- Creates env-file template at `/etc/qora/qora.env`
+- Creates the `incord` system user
+- Installs `incord-server` to `/usr/local/bin/`
+- Writes default config to `/etc/incord/incord-server.toml`
+- Creates env-file template at `/etc/incord/incord.env`
 - Installs systemd unit
 - Reloads systemd
 
 ## Configuration
 
-Edit `/etc/qora/qora-server.toml`. The key sections are:
+Edit `/etc/incord/incord-server.toml`. The key sections are:
 
 ### `[server]`
 
@@ -75,7 +75,7 @@ Edit `/etc/qora/qora-server.toml`. The key sections are:
 
 ### `[auth]`
 
-- **`db_path`**: path to redb file (must be writable by qora user)
+- **`db_path`**: path to redb file (must be writable by incord user)
 
 ### `[limits.default]`
 
@@ -87,11 +87,11 @@ Each `[[models]]` entry loads one model at startup and registers it in the runti
 
 ```toml
 [[models]]
-id = "qora-llm"
+id = "incord-llm"
 kind = "chat"           # one of: chat | tts | stt | embedding | rerank
-path = "/var/lib/qora/llm/model.qor4b"
-tokenizer = "/var/lib/qora/llm/tokenizer.json"
-description = "QORA hybrid LLM (text + vision)"
+path = "/var/lib/incord/llm/model.incord"
+tokenizer = "/var/lib/incord/llm/tokenizer.json"
+description = "Incord hybrid LLM (text + vision)"
 ```
 
 Required fields per `kind`:
@@ -104,21 +104,21 @@ Required fields per `kind`:
 | `embedding` | `path` | `description` |
 | `rerank` | `path` | `description` |
 
-You can register multiple models of the same kind under different `id` values (e.g., a 4B and a 9B LLM at the same time). See `config/qora-server.toml.example` for a full example.
+You can register multiple models of the same kind under different `id` values (e.g., a 4B and a 9B LLM at the same time). See `config/incord-server.toml.example` for a full example.
 
 ### `[loading]`
 
 - **`mode`**: `"eager"` (default) loads all models at startup. `"lazy"` loads on first request. Use `eager` for production to surface load errors before traffic arrives.
 
-### `/etc/qora/qora.env`
+### `/etc/incord/incord.env`
 
-- **`QORA_SERVER_SECRET`**: 32-byte random hex. Generate with:
+- **`INCORD_SERVER_SECRET`**: 32-byte random hex. Generate with:
   ```bash
-  QORA_SERVER_SECRET=$(head -c 32 /dev/urandom | xxd -p -c 64)
+  INCORD_SERVER_SECRET=$(head -c 32 /dev/urandom | xxd -p -c 64)
   ```
   This is the HMAC key for API key indexing. **Rotating this invalidates all existing API keys** — back up before changing.
 
-- **`QORA_ADMIN_TOKEN`**: bearer token for `/v1/admin/*` endpoints. Generate similarly. Keep secret.
+- **`INCORD_ADMIN_TOKEN`**: bearer token for `/v1/admin/*` endpoints. Generate similarly. Keep secret.
 
 ## TLS Certificates
 
@@ -130,7 +130,7 @@ sudo certbot certonly --standalone -d api.your-domain.com
 # Cert is in /etc/letsencrypt/live/api.your-domain.com/
 ```
 
-Update `qora-server.toml`:
+Update `incord-server.toml`:
 
 ```toml
 [server]
@@ -139,22 +139,22 @@ tls_key  = "/etc/letsencrypt/live/api.your-domain.com/privkey.pem"
 ```
 
 Note: certbot needs read access to the cert directory. Either:
-- Run qora-server as root (not recommended)
-- Add the qora user to a group with read access (preferred)
+- Run incord-server as root (not recommended)
+- Add the incord user to a group with read access (preferred)
 - Use a reverse proxy (nginx/Caddy) terminating TLS
 
 ## Backup Procedure
 
-The redb auth/usage database lives at `auth.db_path` (default `/var/lib/qora/auth.redb`).
+The redb auth/usage database lives at `auth.db_path` (default `/var/lib/incord/auth.redb`).
 
 Daily backup via cron:
 
 ```bash
-# /etc/cron.daily/qora-backup
+# /etc/cron.daily/incord-backup
 #!/bin/bash
 DATE=$(date +%Y-%m-%d)
-cp /var/lib/qora/auth.redb /var/lib/qora/backups/auth-$DATE.redb
-find /var/lib/qora/backups -name "auth-*.redb" -mtime +30 -delete
+cp /var/lib/incord/auth.redb /var/lib/incord/backups/auth-$DATE.redb
+find /var/lib/incord/backups -name "auth-*.redb" -mtime +30 -delete
 ```
 
 (redb supports concurrent reads so live backup is safe.)
@@ -162,18 +162,18 @@ find /var/lib/qora/backups -name "auth-*.redb" -mtime +30 -delete
 To restore:
 
 ```bash
-systemctl stop qora-server
-cp /var/lib/qora/backups/auth-2026-04-25.redb /var/lib/qora/auth.redb
-chown qora:qora /var/lib/qora/auth.redb
-systemctl start qora-server
+systemctl stop incord-server
+cp /var/lib/incord/backups/auth-2026-04-25.redb /var/lib/incord/auth.redb
+chown incord:incord /var/lib/incord/auth.redb
+systemctl start incord-server
 ```
 
 ## Operations
 
-Start: `systemctl start qora-server`
-Stop: `systemctl stop qora-server` (graceful — finishes in-flight requests)
-Restart: `systemctl restart qora-server`
-Logs: `journalctl -u qora-server -f`
+Start: `systemctl start incord-server`
+Stop: `systemctl stop incord-server` (graceful — finishes in-flight requests)
+Restart: `systemctl restart incord-server`
+Logs: `journalctl -u incord-server -f`
 Health: `curl https://api.your-domain.com/health`
 Models: `curl https://api.your-domain.com/v1/models` (lists all registered engines + IDs)
 Metrics: `curl http://localhost:9090/metrics` (or wherever Prometheus is configured)
@@ -195,7 +195,7 @@ Create an API key:
 
 ```bash
 curl -X POST https://api.your-domain.com/v1/admin/keys \
-  -H "Authorization: Bearer $QORA_ADMIN_TOKEN" \
+  -H "Authorization: Bearer $INCORD_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"user_id":"customer-1","name":"production","rpm_limit":600,"tpm_limit":600000}'
 ```
@@ -206,20 +206,20 @@ Revoke a key:
 
 ```bash
 curl -X DELETE https://api.your-domain.com/v1/admin/keys/<key-id> \
-  -H "Authorization: Bearer $QORA_ADMIN_TOKEN"
+  -H "Authorization: Bearer $INCORD_ADMIN_TOKEN"
 ```
 
 ## Admin Token Rotation
 
-To rotate `QORA_ADMIN_TOKEN`:
-1. Edit `/etc/qora/qora.env` with the new value.
-2. `systemctl restart qora-server`.
+To rotate `INCORD_ADMIN_TOKEN`:
+1. Edit `/etc/incord/incord.env` with the new value.
+2. `systemctl restart incord-server`.
 3. Update any deployment automation that uses the old token.
 
-To rotate `QORA_SERVER_SECRET` (rare; invalidates all API keys):
+To rotate `INCORD_SERVER_SECRET` (rare; invalidates all API keys):
 1. Schedule downtime — all customers must be informed.
-2. Edit `/etc/qora/qora.env`.
-3. `systemctl restart qora-server`.
+2. Edit `/etc/incord/incord.env`.
+3. `systemctl restart incord-server`.
 4. Re-issue API keys to all customers.
 
 ## Monitoring
@@ -229,17 +229,17 @@ Recommended Prometheus scrape:
 ```yaml
 # /etc/prometheus/prometheus.yml
 scrape_configs:
-  - job_name: 'qora'
+  - job_name: 'incord'
     scrape_interval: 15s
     static_configs:
       - targets: ['localhost:9090']
 ```
 
 Key metrics to alert on:
-- `qora_active_slots / config.slot_count > 0.9` for 5 min → over capacity, consider another node
-- `qora_queue_depth > 0` sustained → backlog growing
-- Increase in `qora_errors_total{error_type="inference_error"}` → investigate logs
-- `rate(qora_request_duration_seconds_bucket{le="30"}[5m]) / rate(qora_request_duration_seconds_count[5m]) < 0.95` → p95 above 30s
+- `incord_active_slots / config.slot_count > 0.9` for 5 min → over capacity, consider another node
+- `incord_queue_depth > 0` sustained → backlog growing
+- Increase in `incord_errors_total{error_type="inference_error"}` → investigate logs
+- `rate(incord_request_duration_seconds_bucket{le="30"}[5m]) / rate(incord_request_duration_seconds_count[5m]) < 0.95` → p95 above 30s
 
 ## Capacity Tuning
 
@@ -255,7 +255,7 @@ For the EPYC 9354 reference target (~400 GB/s memory bandwidth, 3.5 GB Q4 weight
 - 128 slots → similar aggregate throughput, ~13 tok/s per user
 - 32 slots → ~110 fwd/sec, ~50 tok/s per user, but only 32 concurrent
 
-Tune via `scheduler.slot_count` in `qora-server.toml`.
+Tune via `scheduler.slot_count` in `incord-server.toml`.
 
 ### Per-engine concurrency semaphores
 
@@ -263,20 +263,20 @@ Each non-LLM engine is gated by a Tokio semaphore that caps parallelism to prote
 
 | Engine | Default permits | Source constant |
 |--------|----------------|-----------------|
-| Vision encoder | 1 | `crates/qora-server/src/http/handlers/inference.rs` |
+| Vision encoder | 1 | `crates/incord-server/src/http/handlers/inference.rs` |
 | TTS | 2 | same file |
 | STT | 2 | same file |
 | Embedding | 8 | same file |
 | Rerank | 4 | same file |
 
-These defaults are set in `InferenceState::for_test` and the production `main.rs` wiring. Adjust the permit counts in `crates/qora-server/src/bin/qora_server.rs` to match your hardware profile (more RAM / more cores → raise the cap).
+These defaults are set in `InferenceState::for_test` and the production `main.rs` wiring. Adjust the permit counts in `crates/incord-server/src/bin/incord_server.rs` to match your hardware profile (more RAM / more cores → raise the cap).
 
 ## Troubleshooting
 
 - **Server fails to start with `tokenizer.json not found`**: check the `path`/`tokenizer` fields for the affected `[[models]]` entry.
-- **`QORA_SERVER_SECRET env var must be set`**: check `/etc/qora/qora.env`.
+- **`INCORD_SERVER_SECRET env var must be set`**: check `/etc/incord/incord.env`.
 - **Unknown model error**: verify the `id` in the request matches a `[[models]]` entry in the config.
-- **All requests return 401 immediately**: verify the `Authorization: Bearer` header has a valid `qora_…` key. Use `curl -v` to inspect.
-- **Requests hang forever**: check `journalctl -u qora-server` for batcher panic; restart service. Most likely a model file corruption or incompatible config version.
-- **Memory growth over time**: redb compaction may be needed. Stop service, run `redb compact /var/lib/qora/auth.redb` (if redb-cli is installed), restart.
-- **TTS/STT requests queue up**: the engine semaphore permits may be too low for your traffic. Increase the permit count in `qora_server.rs` and rebuild.
+- **All requests return 401 immediately**: verify the `Authorization: Bearer` header has a valid `incord_…` key. Use `curl -v` to inspect.
+- **Requests hang forever**: check `journalctl -u incord-server` for batcher panic; restart service. Most likely a model file corruption or incompatible config version.
+- **Memory growth over time**: redb compaction may be needed. Stop service, run `redb compact /var/lib/incord/auth.redb` (if redb-cli is installed), restart.
+- **TTS/STT requests queue up**: the engine semaphore permits may be too low for your traffic. Increase the permit count in `incord_server.rs` and rebuild.

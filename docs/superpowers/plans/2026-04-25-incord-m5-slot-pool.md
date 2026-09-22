@@ -4,7 +4,7 @@
 
 **Goal:** Replace M3's parallel-independent worker model with a fixed pool of 64 slots managed by a single batched scheduler thread. Active slots are decoded together via `forward_decode_batch` from M4. New requests admit into free slots between decode steps. Prefill is run by the same scheduler in batches when multiple slots prefill simultaneously. End state: 64 concurrent users decode together, server saturates the EPYC's memory bandwidth.
 
-**Prerequisites:** M4 merged. Branch `feature/qora-server-m5-slot-pool` from `feature/qora-server`.
+**Prerequisites:** M4 merged. Branch `feature/incord-server-m5-slot-pool` from `feature/incord-server`.
 
 **Architecture:**
 - One **scheduler thread** owns the slot pool. Workers from M3 are removed.
@@ -74,7 +74,7 @@ use std::sync::{Arc, Mutex};
 use crate::server::scheduler::slot::{Slot, SlotPhase};
 use crate::server::scheduler::queue::{PendingRequest, Queue};
 use crate::gemv_batch::SlotInferenceState;
-use crate::config::Qor4bConfig;
+use crate::config::IncordConfig;
 
 pub struct SlotPool {
     pub slots: Mutex<Vec<Slot>>,
@@ -91,7 +91,7 @@ impl SlotPool {
 
     /// Admit a pending request into the first free slot.
     /// Returns `true` if admitted; `false` if no free slot.
-    pub fn admit(&self, req: PendingRequest, config: &Qor4bConfig) -> bool {
+    pub fn admit(&self, req: PendingRequest, config: &IncordConfig) -> bool {
         let mut slots = self.slots.lock().unwrap();
         for slot in slots.iter_mut() {
             if slot.is_free() {
@@ -143,7 +143,7 @@ mod tests {
                 id: Uuid::new_v4(),
                 key_id: "k".into(),
                 user_id: "u".into(),
-                model_name: "qora-4b".into(),
+                model_name: "incord-mini-2b".into(),
                 cache: HybridCache::new(&w.config),
                 prompt_tokens: vec![1],
                 generated_tokens: Vec::new(),
@@ -197,7 +197,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use crate::gemv::{ModelWeights, prefill};
 use crate::gemv_batch::forward_decode_batch;
-use crate::tokenizer::QoraTokenizer;
+use crate::tokenizer::IncordTokenizer;
 use crate::server::scheduler::pool::SlotPool;
 use crate::server::scheduler::queue::Queue;
 use crate::server::scheduler::slot::SlotPhase;
@@ -207,7 +207,7 @@ pub struct Batcher {
     pub pool: Arc<SlotPool>,
     pub queue: Arc<Queue>,
     pub weights: Arc<ModelWeights>,
-    pub tokenizer: Arc<QoraTokenizer>,
+    pub tokenizer: Arc<IncordTokenizer>,
 }
 
 impl Batcher {
@@ -233,7 +233,7 @@ impl Batcher {
         }
     }
 
-    fn admit_pending(&self, config: &crate::config::Qor4bConfig) {
+    fn admit_pending(&self, config: &crate::config::IncordConfig) {
         // Try to admit at most (free slots) sessions per iteration
         let free = self.pool.size - self.pool.count_active();
         for _ in 0..free {
@@ -385,24 +385,24 @@ git commit -m "feat(scheduler): continuous-batching scheduler loop"
 ## Task 3: Replace per-request workers with a single batcher thread
 
 **Files:**
-- Modify: `src/bin/qora_server.rs`
+- Modify: `src/bin/incord_server.rs`
 - Modify: `tests/integration/common.rs`
 
 - [ ] **Step 1: Update binary**
 
-In `src/bin/qora_server.rs`, replace the worker spawn block with:
+In `src/bin/incord_server.rs`, replace the worker spawn block with:
 
 ```rust
-let pool = qor4b::server::scheduler::pool::SlotPool::new(config.scheduler.slot_count);
+let pool = incord::server::scheduler::pool::SlotPool::new(config.scheduler.slot_count);
 
-let batcher = qor4b::server::scheduler::batcher::Batcher {
+let batcher = incord::server::scheduler::batcher::Batcher {
     pool: pool.clone(),
     queue: queue.clone(),
     weights: weights.clone(),
     tokenizer: tokenizer.clone(),
 };
 std::thread::Builder::new()
-    .name("qora-batcher".into())
+    .name("incord-batcher".into())
     .spawn(move || batcher.run())?;
 ```
 
@@ -423,7 +423,7 @@ Expected: still passes — the API contract is unchanged, only the scheduler imp
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/bin/qora_server.rs tests/integration/common.rs
+git add src/bin/incord_server.rs tests/integration/common.rs
 git commit -m "feat(scheduler): replace worker pool with continuous batcher thread"
 ```
 
@@ -507,7 +507,7 @@ async fn client_drop_frees_slot() {
         .post(server.url("/v1/chat/completions"))
         .bearer_auth(&key)
         .json(&json!({
-            "model":"qora-4b","messages":[{"role":"user","content":"hi"}],
+            "model":"incord-mini-2b","messages":[{"role":"user","content":"hi"}],
             "stream":true,"max_tokens":1000
         }))
         .send().await.unwrap();
@@ -520,7 +520,7 @@ async fn client_drop_frees_slot() {
         .post(server.url("/v1/chat/completions"))
         .bearer_auth(&key)
         .json(&json!({
-            "model":"qora-4b","messages":[{"role":"user","content":"hi"}],
+            "model":"incord-mini-2b","messages":[{"role":"user","content":"hi"}],
             "max_tokens":2
         }))
         .send().await.unwrap();
@@ -594,7 +594,7 @@ async fn sixty_four_concurrent_requests_all_complete() {
             let resp = client.post(&url)
                 .bearer_auth(&key)
                 .json(&json!({
-                    "model":"qora-4b",
+                    "model":"incord-mini-2b",
                     "messages":[{"role":"user","content":format!("hi {i}")}],
                     "max_tokens":4
                 }))
@@ -646,8 +646,8 @@ cargo clippy --all-targets -- -D warnings
 - [ ] **Step 2: Smoke test against full model**
 
 ```bash
-cargo build --bin qora-server --release
-QORA_ADMIN_TOKEN=admin1 ./target/release/qora-server /tmp/qora-test.toml &
+cargo build --bin incord-server --release
+INCORD_ADMIN_TOKEN=admin1 ./target/release/incord-server /tmp/incord-test.toml &
 PID=$!
 sleep 3
 # Issue 32 parallel requests with curl
@@ -659,7 +659,7 @@ KEY=$(echo "$ADMIN_RESP" | jq -r .raw_key)
 for i in $(seq 1 32); do
   curl -sf -H "Authorization: Bearer $KEY" \
     -X POST http://127.0.0.1:18080/v1/chat/completions \
-    -d '{"model":"qora-4b","messages":[{"role":"user","content":"hi"}],"max_tokens":10}' \
+    -d '{"model":"incord-mini-2b","messages":[{"role":"user","content":"hi"}],"max_tokens":10}' \
     > /tmp/resp_$i.json &
 done
 wait
@@ -691,9 +691,9 @@ git commit --allow-empty -m "milestone: M5 slot pool + continuous batching compl
 
 Acceptance: cargo test --test slot_pool_concurrency --features mock-weights"
 
-git checkout feature/qora-server
-git merge --no-ff feature/qora-server-m5-slot-pool
-git checkout feature/qora-server-m5-slot-pool
+git checkout feature/incord-server
+git merge --no-ff feature/incord-server-m5-slot-pool
+git checkout feature/incord-server-m5-slot-pool
 ```
 
 M5 complete. Proceed to M6 (vision + observability + deployment).

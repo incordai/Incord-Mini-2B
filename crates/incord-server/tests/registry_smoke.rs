@@ -3,8 +3,8 @@
 
 #![cfg(feature = "mock-weights")]
 
-use qora_server::config::{ModelKind, ServerConfig};
-use qora_server::registry::Registry;
+use incord_server::config::{ModelKind, ServerConfig};
+use incord_server::registry::Registry;
 
 #[test]
 fn empty_registry_is_buildable() {
@@ -33,7 +33,7 @@ max_context = 8192
 request_timeout_secs = 90
 
 [auth]
-admin_token_env = "QORA_ADMIN_TOKEN"
+admin_token_env = "INCORD_ADMIN_TOKEN"
 db_path = "/tmp/auth.redb"
 
 [limits.default]
@@ -115,17 +115,17 @@ path = "/x"
 
 #[tokio::test]
 async fn registry_with_mock_chat_engine_dispatches_correctly() {
-    use qora_server::engines::llm::LlmEngine;
+    use incord_server::engines::llm::LlmEngine;
     use std::sync::Arc;
 
-    // Build a mock chat engine using qor4b::gemv::mock::tiny_weights
-    let weights = Arc::new(qor4b::gemv::mock::tiny_weights());
+    // Build a mock chat engine using incord::gemv::mock::tiny_weights
+    let weights = Arc::new(incord::gemv::mock::tiny_weights());
     let tokenizer_path = std::path::PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../qora-llm/model/tokenizer.json"
+        "/../incord-llm/model/tokenizer.json"
     ));
     let tokenizer = if tokenizer_path.exists() {
-        Arc::new(qor4b::tokenizer::QoraTokenizer::from_file(&tokenizer_path).unwrap())
+        Arc::new(incord::tokenizer::IncordTokenizer::from_file(&tokenizer_path).unwrap())
     } else {
         // Skip this test if no tokenizer fixture is available
         eprintln!(

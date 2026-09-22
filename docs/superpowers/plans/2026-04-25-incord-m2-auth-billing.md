@@ -4,9 +4,9 @@
 
 **Goal:** Add **redb-backed** API keys with HMAC index + Argon2 verification, sliding-window rate limiting per key, admin endpoints to create/revoke keys, and usage tracking for billing reconciliation. End state: invalid keys → 401, exceeded rate → 429, every successful request logged to redb with token counts.
 
-**Why redb (not SQLite/sqlx):** QORA's core promise is "pure Rust, single binary, no external runtime/C deps." sqlx+SQLite pulls libsqlite3-sys (a C library) which breaks that promise. **redb** is a pure-Rust embedded ACID key-value DB used in production by Iroh and others. Our access pattern (lookup by hash, append usage rows, count/sum) doesn't need SQL — typed tables + iteration are sufficient at v1 scale.
+**Why redb (not SQLite/sqlx):** Incord's core promise is "pure Rust, single binary, no external runtime/C deps." sqlx+SQLite pulls libsqlite3-sys (a C library) which breaks that promise. **redb** is a pure-Rust embedded ACID key-value DB used in production by Iroh and others. Our access pattern (lookup by hash, append usage rows, count/sum) doesn't need SQL — typed tables + iteration are sufficient at v1 scale.
 
-**Prerequisites:** M1 merged. Branch `feature/qora-server-m2-auth` from `feature/qora-server`.
+**Prerequisites:** M1 merged. Branch `feature/incord-server-m2-auth` from `feature/incord-server`.
 
 **Architecture:**
 - **redb 2** as embedded DB (single file at `auth.redb`).
@@ -15,7 +15,7 @@
 - **Argon2** as defense-in-depth verifier (only runs on HMAC-matched record).
 - **rate limiter** unchanged: in-memory sliding window, separate from redb.
 - **auth middleware** runs before chat handlers, attaches `ApiKey` to request extensions.
-- **server secret** loaded from env at startup (`QORA_SERVER_SECRET`); never persisted.
+- **server secret** loaded from env at startup (`INCORD_SERVER_SECRET`); never persisted.
 
 **Acceptance test:** `cargo test --test auth_flow` — admin creates key → valid key passes → invalid key 401 → revoked key 401 → admin endpoint guarded.
 
@@ -47,8 +47,8 @@ All of the above are pure-Rust crates (verify: none has a `*-sys` transitive dep
 
 ```bash
 cargo check --lib
-cargo check --bin qor4b
-cargo check --bin qora-server
+cargo check --bin incord
+cargo check --bin incord-server
 ```
 
 All three must succeed.
@@ -228,7 +228,7 @@ use uuid::Uuid;
 
 use crate::server::db::{KEYS_BY_ID, ID_BY_HMAC};
 
-pub const KEY_PREFIX: &str = "qora_";
+pub const KEY_PREFIX: &str = "incord_";
 pub const HMAC_LEN: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -472,9 +472,9 @@ mod tests {
     #[test]
     fn hmac_is_deterministic_and_distinct() {
         let s = secret();
-        let a = hmac_index(&s, "qora_a");
-        let b = hmac_index(&s, "qora_a");
-        let c = hmac_index(&s, "qora_b");
+        let a = hmac_index(&s, "incord_a");
+        let b = hmac_index(&s, "incord_a");
+        let c = hmac_index(&s, "incord_b");
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
@@ -484,7 +484,7 @@ mod tests {
         let raw = generate_raw_key();
         let hash = hash_key_argon2(&raw).unwrap();
         assert!(verify_argon2(&raw, &hash));
-        assert!(!verify_argon2("qora_wrong", &hash));
+        assert!(!verify_argon2("incord_wrong", &hash));
     }
 
     #[test]
@@ -504,7 +504,7 @@ mod tests {
         let db = fresh_db();
         let s = secret();
         let _ = create_key(&db, &s, "user1", "t", 60, 60_000).unwrap();
-        let found = lookup_by_raw(&db, &s, "qora_unknown").unwrap();
+        let found = lookup_by_raw(&db, &s, "incord_unknown").unwrap();
         assert!(found.is_none());
     }
 
@@ -775,7 +775,7 @@ git commit -m "feat(auth): axum middleware enforcing API key + rate limit"
 - Modify: `src/server/auth/mod.rs`
 - Modify: `src/server/http/handlers/mod.rs`
 - Modify: `src/server/http/router.rs`
-- Modify: `src/bin/qora_server.rs`
+- Modify: `src/bin/incord_server.rs`
 - Modify: `tests/integration/common.rs`
 
 - [ ] **Step 1: Admin guard**
@@ -911,29 +911,29 @@ pub fn build_router(auth: Arc<AuthState>, admin: Arc<AdminState>) -> Router {
 
 - [ ] **Step 4: Update binary**
 
-In `src/bin/qora_server.rs`, after config load:
+In `src/bin/incord_server.rs`, after config load:
 
 ```rust
 use std::sync::Arc;
 use anyhow::Context;
 
-let db = qor4b::server::db::open(&config.auth.db_path)?;
+let db = incord::server::db::open(&config.auth.db_path)?;
 let admin_token = std::env::var(&config.auth.admin_token_env)
     .with_context(|| format!("admin token env var {} not set", config.auth.admin_token_env))?;
-let server_secret = std::env::var("QORA_SERVER_SECRET")
-    .context("QORA_SERVER_SECRET env var must be set (used for HMAC key index)")?
+let server_secret = std::env::var("INCORD_SERVER_SECRET")
+    .context("INCORD_SERVER_SECRET env var must be set (used for HMAC key index)")?
     .into_bytes();
 
-let auth = Arc::new(qor4b::server::auth::middleware::AuthState {
+let auth = Arc::new(incord::server::auth::middleware::AuthState {
     db,
     server_secret: Arc::new(server_secret),
-    limiter: qor4b::server::auth::ratelimit::RateLimiter::new(),
+    limiter: incord::server::auth::ratelimit::RateLimiter::new(),
 });
-let admin_state = Arc::new(qor4b::server::auth::admin::AdminState { admin_token });
-let router = qor4b::server::http::router::build_router(auth, admin_state);
+let admin_state = Arc::new(incord::server::auth::admin::AdminState { admin_token });
+let router = incord::server::http::router::build_router(auth, admin_state);
 ```
 
-(`config.auth.db_path` already exists from M1's config; only the contents change — point it at `/opt/qora/auth.redb` instead of `auth.db`.)
+(`config.auth.db_path` already exists from M1's config; only the contents change — point it at `/opt/incord/auth.redb` instead of `auth.db`.)
 
 - [ ] **Step 5: Update test harness + router unit tests**
 
@@ -942,11 +942,11 @@ let router = qor4b::server::http::router::build_router(auth, admin_state);
 ```rust
 use std::path::Path;
 use std::sync::Arc;
-use qor4b::server::auth::admin::AdminState;
-use qor4b::server::auth::middleware::AuthState;
-use qor4b::server::auth::ratelimit::RateLimiter;
-use qor4b::server::db::open;
-use qor4b::server::http::router::build_router;
+use incord::server::auth::admin::AdminState;
+use incord::server::auth::middleware::AuthState;
+use incord::server::auth::ratelimit::RateLimiter;
+use incord::server::db::open;
+use incord::server::http::router::build_router;
 use redb::Database;
 use tempfile::TempDir;
 
@@ -1003,7 +1003,7 @@ cargo test --test http_basic
 ```bash
 git add src/server/auth/admin.rs src/server/http/handlers/admin.rs \
         src/server/http/handlers/mod.rs src/server/http/router.rs \
-        src/server/auth/mod.rs src/bin/qora_server.rs tests/integration/common.rs
+        src/server/auth/mod.rs src/bin/incord_server.rs tests/integration/common.rs
 git commit -m "feat(auth): admin endpoints to create/revoke API keys"
 ```
 
@@ -1089,7 +1089,7 @@ mod tests {
         let t = UsageTracker::new(db);
         t.record(UsageRecord {
             request_id: "r1".into(), user_id: "u1".into(), key_id: "k1".into(),
-            model: "qora-4b".into(), input_tokens: 10, output_tokens: 20,
+            model: "incord-mini-2b".into(), input_tokens: 10, output_tokens: 20,
             started_at: 1, duration_ms: 100, status: "success".into(),
         }).unwrap();
         assert_eq!(t.count("u1").unwrap(), 1);
@@ -1164,7 +1164,7 @@ async fn admin_can_create_key() {
         .send().await.unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["raw_key"].as_str().unwrap().starts_with("qora_"));
+    assert!(body["raw_key"].as_str().unwrap().starts_with("incord_"));
 }
 
 #[tokio::test]
@@ -1262,9 +1262,9 @@ git commit --allow-empty -m "milestone: M2 auth + billing complete
 
 Acceptance: cargo test --test auth_flow — 4/4 pass"
 
-git checkout feature/qora-server
-git merge --no-ff feature/qora-server-m2-auth -m "Merge M2: auth + billing (redb)"
-git checkout feature/qora-server-m2-auth
+git checkout feature/incord-server
+git merge --no-ff feature/incord-server-m2-auth -m "Merge M2: auth + billing (redb)"
+git checkout feature/incord-server-m2-auth
 ```
 
 M2 complete. Proceed to M3.

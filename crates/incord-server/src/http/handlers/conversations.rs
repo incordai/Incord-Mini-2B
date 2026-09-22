@@ -121,7 +121,7 @@ pub async fn export_conversation_handler(
     let body_bytes = serde_json::to_vec_pretty(&body)
         .map_err(|e| ServerError::Internal(e.to_string()))?;
 
-    let filename = format!("qora-chat-{}.json", id);
+    let filename = format!("incord-chat-{}.json", id);
     Ok((
         [
             (

@@ -9,8 +9,8 @@ use tracing::info;
 use crate::config::{ModelEntry, ModelKind, ServerConfig};
 use crate::engines::llm::LlmEngine;
 use crate::engines::rag::{QorEmbeddingEngine, QorRagBackend, QorRerankEngine};
-use crate::engines::stt::QoraSttEngine;
-use crate::engines::tts::QoraTtsEngine;
+use crate::engines::stt::IncordSttEngine;
+use crate::engines::tts::IncordTtsEngine;
 use crate::registry::{Registry, RegistryBuilder};
 
 /// Load every model in the config and build the registry.
@@ -68,7 +68,7 @@ pub fn build_registry(config: &ServerConfig) -> anyhow::Result<Registry> {
 }
 
 fn add_tts(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<RegistryBuilder> {
-    // The ModelEntry `path` points to the .qora-tts binary file; the model dir
+    // The ModelEntry `path` points to the .incord-tts binary file; the model dir
     // (containing config.json, tokenizer.json, and the binary itself) is its parent.
     let model_dir = entry
         .path
@@ -83,7 +83,7 @@ fn add_tts(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<Regis
         .clone()
         .unwrap_or_else(|| format!("TTS model: {}", entry.id));
 
-    let engine = QoraTtsEngine::load(entry.id.clone(), model_dir, description)?;
+    let engine = IncordTtsEngine::load(entry.id.clone(), model_dir, description)?;
 
     Ok(builder.add_tts(Arc::new(engine)))
 }
@@ -104,7 +104,7 @@ fn add_stt(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<Regis
         .clone()
         .unwrap_or_else(|| format!("STT model: {}", entry.id));
 
-    let engine = QoraSttEngine::load(entry.id.clone(), model_dir, description)?;
+    let engine = IncordSttEngine::load(entry.id.clone(), model_dir, description)?;
 
     Ok(builder.add_stt(Arc::new(engine)))
 }
@@ -185,11 +185,11 @@ fn add_chat(builder: RegistryBuilder, entry: &ModelEntry) -> anyhow::Result<Regi
 
     info!(model_id = %entry.id, path = ?entry.path, "loading chat model weights...");
 
-    let weights = qor4b::save::load_model(&entry.path)
+    let weights = incord::save::load_model(&entry.path)
         .with_context(|| format!("loading model from {}", entry.path.display()))?;
     let weights = Arc::new(weights);
 
-    let tokenizer = qor4b::tokenizer::QoraTokenizer::from_file(tokenizer_path)
+    let tokenizer = incord::tokenizer::IncordTokenizer::from_file(tokenizer_path)
         .map_err(|e| anyhow::anyhow!("loading tokenizer from {}: {e}", tokenizer_path.display()))?;
     let tokenizer = Arc::new(tokenizer);
 

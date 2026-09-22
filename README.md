@@ -11,8 +11,8 @@ No Python. No CUDA. No external ML runtime. Single binary + model weight files =
 | Capability | Engine | Model formats supported |
 |---|---|---|
 | Chat / completion (text + vision) | `LlmEngine` | `.incord` / Incord-Mini-2B family |
-| Text-to-speech (voice cloning, 25 voices, 10 languages) | `INCORDTtsEngine` | `.INCORD-tts` |
-| Speech-to-text (Whisper-based, multi-language) | `INCORDSttEngine` | `.INCORD-stt-small` |
+| Text-to-speech (voice cloning, 25 voices, 10 languages) | `IncordTtsEngine` | `.incord-tts` |
+| Speech-to-text (Whisper-based, multi-language) | `IncordSttEngine` | `.incord-stt-small` |
 | Sentence embedding (2048-dim, multilingual) | `QorEmbeddingEngine` | qor-rag embedding model |
 | Reranking | `QorRerankEngine` | qor-rag reranker model |
 
@@ -23,7 +23,7 @@ No Python. No CUDA. No external ML runtime. Single binary + model weight files =
 ## Repository structure
 
 ```
-D:\Burn-AI\Incord-Mini-2B\          ← workspace root
+Incord-Mini-2B/                      ← workspace root
 ├── Cargo.toml                       ← workspace manifest
 ├── crates\
 │   ├── incord-llm\                  ← LLM inference engine (workspace member)
@@ -46,14 +46,14 @@ D:\Burn-AI\Incord-Mini-2B\          ← workspace root
 │       │   ├── metrics.rs           ← Prometheus instrumentation
 │       │   ├── registry.rs          ← runtime model lookup table
 │       │   ├── usage\               ← per-request usage tracking
-│       │   └── bin\INCORD_server.rs ← the executable entry point
+│       │   └── bin\incord_server.rs ← the executable entry point
 │       └── tests\                   ← integration tests
 ├── model\                           ← weight files (configured paths in TOML)
 │   ├── model.incord                 ← LLM weights (~2.55 GB for Incord-Mini-2B)
 │   └── tokenizer.json
 ├── config\
-│   ├── INCORD-server.toml.example     ← canonical config template
-│   └── INCORD-server.service          ← systemd unit
+│   ├── incord-server.toml.example     ← canonical config template
+│   └── incord-server.service          ← systemd unit
 ├── docs\
 │   ├── api.md                       ← endpoint reference (auth, schemas, errors)
 │   ├── deployment.md                ← operator guide (TLS, backup, ops)
@@ -64,30 +64,21 @@ D:\Burn-AI\Incord-Mini-2B\          ← workspace root
     └── soak_24h.sh                  ← memory-drift soak test
 ```
 
-### External Rust crates (path-deps from INCORD-server)
+### External Rust crates (path-deps from incord-server)
 
-The TTS / STT / RAG engine code lives outside this repo and is pulled in as Cargo path-deps — no source code is duplicated:
+The TTS / STT / RAG engine code lives in separate repositories and is pulled in as Cargo dependencies — no source code is duplicated:
 
-| External crate | Source location | Used by |
-|---|---|---|
-| `INCORD-tts` | `D:\Burn-AI\INCORD-TTS\` | `INCORD-server::engines::tts::INCORDTtsEngine` |
-| `INCORD-stt-small` | `D:\Burn-AI\INCORD-STT-Small\` | `INCORD-server::engines::stt::INCORDSttEngine` |
-| `qor-rag` | `C:\Projects\AI\qor-main\qor-rs\crates\qor-rag\` | `INCORD-server::engines::rag::Qor*Engine` |
-| `INCORD-simd` | `C:\Projects\AI\qor-main\qor-rs\crates\INCORD-simd\` | transitive dep of qor-rag |
+| External engine | Used by |
+|---|---|
+| TTS engine crate | `incord-server::engines::tts::IncordTtsEngine` |
+| STT engine crate | `incord-server::engines::stt::IncordSttEngine` |
+| RAG engine crate | `incord-server::engines::rag::Qor*Engine` |
 
-These crates are **already compiled into `INCORD-server.exe` at build time** — at runtime, the server is a single binary. The .exe binaries that ship with each external crate (`INCORD-tts.exe`, `INCORD-stt-small.exe`) are **standalone CLI tools** and are NOT used by the server.
+These crates are **compiled into `incord-server` at build time** — at runtime, the server is a single binary.
 
 ### Frontend projects (separate from this repo)
 
-```
-C:\Projects\Chat\fruntend\
-├── chat.jsx              ← single-file user UI (Claude Artifacts deployable)
-├── admin.jsx             ← single-file admin console
-├── chat\                 ← Vite project for local dev (port 5174)
-└── admin\                ← Vite project for local dev (port 5173)
-```
-
-Each frontend project is independent: `cd <dir> && npm install && npm run dev`. They both talk to the INCORD-server HTTP API.
+The user chat panel and the admin console are separate projects. Both talk to the incord-server HTTP API.
 
 ---
 
@@ -95,7 +86,7 @@ Each frontend project is independent: `cd <dir> && npm install && npm run dev`. 
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                       INCORD-server  (single binary)                    │
+│                       incord-server  (single binary)                    │
 │                                                                       │
 │  HTTP Layer                                                           │
 │  ├── /v1/inference          ← unified, dispatched by `task` field     │
@@ -115,11 +106,11 @@ Each frontend project is independent: `cd <dir> && npm install && npm run dev`. 
 │       │                                                               │
 │       ▼                                                               │
 │  Concrete Engines                                                     │
-│  ├── LlmEngine          ──→  INCORD-llm crate (in this repo)            │
-│  ├── INCORDTtsEngine      ──→  INCORD-tts crate (D:\Burn-AI\INCORD-TTS\)    │
-│  ├── INCORDSttEngine      ──→  INCORD-stt-small (D:\Burn-AI\INCORD-STT-Small\)│
-│  ├── QorEmbeddingEngine ──→  qor-rag (C:\Projects\AI\qor-main\...\)   │
-│  └── QorRerankEngine    ──→  qor-rag (same)                            │
+│  ├── LlmEngine          ──→  incord-llm crate (in this repo)            │
+│  ├── IncordTtsEngine    ──→  TTS engine crate (separate repo)          │
+│  ├── IncordSttEngine    ──→  STT engine crate (separate repo)          │
+│  ├── QorEmbeddingEngine ──→  RAG engine crate (separate repo)          │
+│  └── QorRerankEngine    ──→  RAG engine crate (same)                   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -129,49 +120,49 @@ Each frontend project is independent: `cd <dir> && npm install && npm run dev`. 
 
 Three scenarios:
 
-### 1. Different size of an existing model class (e.g. swap QOR4B → QOR9B)
+### 1. Different size of an existing model class
 
-Just update `INCORD-server.toml`:
+Just update `incord-server.toml`:
 
 ```toml
 [[models]]
-id = "INCORD-llm"                                     # keep id stable for clients
+id = "incord-llm"                                     # keep id stable for clients
 kind = "chat"
-path = "/var/lib/INCORD/llm/model.qor9b"              # ← new weight file
-tokenizer = "/var/lib/INCORD/llm/tokenizer.json"
+path = "/var/lib/incord/llm/model.incord"             # ← new weight file
+tokenizer = "/var/lib/incord/llm/tokenizer.json"
 ```
 
 Restart the server. **No code change. No recompile.** This is the value of the registry approach.
 
-### 2. Run multiple sizes side-by-side (e.g. QOR4B + QOR27B)
+### 2. Run multiple sizes side-by-side
 
 Add multiple `[[models]]` entries with different `id` fields:
 
 ```toml
 [[models]]
-id = "INCORD-fast"
+id = "incord-fast"
 kind = "chat"
-path = "/var/lib/INCORD/4b/model.qor4b"
-tokenizer = "/var/lib/INCORD/4b/tokenizer.json"
+path = "/var/lib/incord/small/model.incord"
+tokenizer = "/var/lib/incord/small/tokenizer.json"
 
 [[models]]
-id = "INCORD-large"
+id = "incord-large"
 kind = "chat"
-path = "/var/lib/INCORD/27b/model.qor27b"
-tokenizer = "/var/lib/INCORD/27b/tokenizer.json"
+path = "/var/lib/incord/large/model.incord"
+tokenizer = "/var/lib/incord/large/tokenizer.json"
 ```
 
-Clients then send `"model": "INCORD-fast"` or `"model": "INCORD-large"` in the request. The Registry routes to the right engine.
+Clients then send `"model": "incord-fast"` or `"model": "incord-large"` in the request. The Registry routes to the right engine.
 
 ### 3. New model class (e.g. image generation, video gen)
 
 Bigger work — requires:
 
-- A new trait (`ImageGenEngine`) in `crates/INCORD-server/src/engine/`
+- A new trait (`ImageGenEngine`) in `crates/incord-server/src/engine/`
 - A new variant in the `Task` enum
 - A new field in `Registry`
 - A new arm in the `/v1/inference` task dispatch
-- A wrapper crate in `crates/INCORD-server/src/engines/`
+- A wrapper crate in `crates/incord-server/src/engines/`
 - An external crate (or path-dep) doing the actual inference
 
 The trait hierarchy is designed for this — adding a new task type is additive, doesn't break existing engines.
@@ -182,16 +173,16 @@ The trait hierarchy is designed for this — adding a new task type is additive,
 
 ### Prerequisites
 - Rust toolchain (edition 2024, latest stable)
-- The INCORD-TTS, INCORD-STT-Small, qor-rag, INCORD-simd source trees at the paths Cargo.toml expects
+- The TTS, STT and RAG engine crates that `crates/incord-server/Cargo.toml` depends on
 
 ### Build the server
 
 ```bash
-cd D:\Burn-AI\QOR4B
-cargo build --release --workspace --bin INCORD-server
+cd Incord-Mini-2B
+cargo build --release --workspace --bin incord-server
 ```
 
-Build artifacts at `target\release\INCORD-server.exe`.
+Build artifacts at `target\release\incord-server.exe`.
 
 ### Run locally (development)
 
@@ -202,35 +193,21 @@ $env:INCORD_SERVER_SECRET = "any-32-byte-random-hex"
 $env:INCORD_ADMIN_TOKEN   = "any-admin-secret"
 ```
 
-2. Edit `config\INCORD-server.toml.example` → save as `INCORD-server.toml` with paths pointing to your local model files.
+2. Edit `config\incord-server.toml.example` → save as `incord-server.toml` with paths pointing to your local model files.
 
 3. Run:
 
 ```bash
-.\target\release\INCORD-server.exe INCORD-server.toml
+.\target\release\incord-server.exe incord-server.toml
 ```
 
 Server boots, loads all configured models eagerly, listens on the configured bind address.
 
 ### Run the frontends locally
 
-In two separate terminals:
+The admin console (port 5173) and user chat panel (port 5174) are separate projects: `npm install && npm run dev` in each.
 
-```bash
-# Admin console (port 5173)
-cd C:\Projects\Chat\fruntend\admin
-npm install
-npm run dev
-```
-
-```bash
-# User chat panel (port 5174)
-cd C:\Projects\Chat\fruntend\chat
-npm install
-npm run dev
-```
-
-In the admin login screen, enter `http://localhost:8080` (or wherever INCORD-server is listening) and the `INCORD_ADMIN_TOKEN` you set above.
+In the admin login screen, enter `http://localhost:8080` (or wherever incord-server is listening) and the `INCORD_ADMIN_TOKEN` you set above.
 
 ---
 
@@ -238,12 +215,12 @@ In the admin login screen, enter `http://localhost:8080` (or wherever INCORD-ser
 
 For deployment to a Linux box (e.g. EPYC server):
 
-1. Build for Linux: `cargo build --release --workspace --bin INCORD-server` (or cross-compile)
+1. Build for Linux: `cargo build --release --workspace --bin incord-server` (or cross-compile)
 2. Copy binary + model weight files to the server
 3. Run the install script: `sudo ./scripts/install.sh`
-4. Edit `/etc/INCORD/INCORD-server.toml` with model paths
-5. Set secrets in `/etc/INCORD/INCORD.env`
-6. `systemctl enable --now INCORD-server`
+4. Edit `/etc/incord/incord-server.toml` with model paths
+5. Set secrets in `/etc/incord/incord.env`
+6. `systemctl enable --now incord-server`
 7. Validate with `docs/production-load-test.md` runbook
 
 Full deployment guide: [`docs/deployment.md`](docs/deployment.md).
@@ -274,9 +251,9 @@ Full schemas + curl examples: [`docs/api.md`](docs/api.md). Drop-in OpenAI SDK e
 
 ---
 
-## Configuration (INCORD-server.toml)
+## Configuration (incord-server.toml)
 
-Complete schema in [`config/INCORD-server.toml.example`](config/INCORD-server.toml.example). Key sections:
+Complete schema in [`config/incord-server.toml.example`](config/incord-server.toml.example). Key sections:
 
 ```toml
 [server]            # bind address + optional TLS cert/key paths
@@ -300,12 +277,12 @@ description = "..."
 ## Architectural Decisions (worth remembering)
 
 ### Why a Cargo workspace with path-deps?
-- `INCORD-llm` is a workspace member because we modified it heavily during development.
+- `incord-llm` is a workspace member because we modified it heavily during development.
 - TTS / STT / RAG are external crates because they're already complete — we just consume their public APIs.
 - For deployment, only the compiled binary + model weight files matter. Source layout is a developer ergonomics question.
 
 ### Why `redb` instead of SQLite?
-- INCORD's promise is "pure Rust, single binary, no C deps." sqlx + libsqlite3-sys breaks that.
+- Incord's promise is "pure Rust, single binary, no C deps." sqlx + libsqlite3-sys breaks that.
 - `redb` is a pure-Rust embedded ACID DB used in production by Iroh and others.
 - API keys, usage records, and chat history all live in one redb file with separate logical tables.
 
@@ -337,7 +314,7 @@ description = "..."
 - ✅ Auth + admin keys + rate limiting + redb
 - ✅ Chat history with auto-embed + rerank-as-context + per-user export
 - ✅ Admin console (React)
-- ✅ User chat panel (React, exists separately at C:\Projects\Chat\fruntend)
+- ✅ User chat panel (React, separate project)
 - ✅ Prometheus metrics, structured tracing
 - ✅ TLS via rustls, systemd deployment
 - ⏳ Production EPYC load test — runbook ready, awaiting hardware deployment
@@ -352,10 +329,10 @@ description = "..."
 | How do I add a new model size? | This README, "Adding a new model" |
 | What's the API surface? | [`docs/api.md`](docs/api.md) |
 | How do I deploy? | [`docs/deployment.md`](docs/deployment.md) |
-| What's the multi-model design rationale? | [`docs/superpowers/specs/2026-04-26-INCORD-multimodel-design.md`](docs/superpowers/specs/2026-04-26-INCORD-multimodel-design.md) |
+| What's the multi-model design rationale? | [`docs/superpowers/specs/2026-04-26-incord-multimodel-design.md`](docs/superpowers/specs/2026-04-26-incord-multimodel-design.md) |
 | Why was there an earlier (now-removed) v1.0.0 tag? | The original tag was a single-model slice. We expanded scope; the real v1.0.0 covers multi-model. |
-| What's in INCORD-llm specifically? | [`crates/INCORD-llm/README.md`](crates/INCORD-llm/README.md) |
-| How does chat history retrieval work? | `crates/INCORD-server/src/history/retrieve.rs` (cosine similarity over stored embeddings) |
+| What's in incord-llm specifically? | [`crates/incord-llm/README.md`](crates/incord-llm/README.md) |
+| How does chat history retrieval work? | `crates/incord-server/src/history/retrieve.rs` (cosine similarity over stored embeddings) |
 | Where are API keys stored? | redb at `auth.db_path` — never plaintext, only HMAC index + Argon2 hash |
 
 ---

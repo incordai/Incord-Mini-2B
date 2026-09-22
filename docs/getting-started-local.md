@@ -7,7 +7,7 @@ This guide walks through running the full stack locally: incord-server backend +
 In one terminal:
 
 ```bash
-cd D:\Burn-AI\Incord-Mini-2B
+cd Incord-Mini-2B
 cargo build --release --workspace --bin incord-server
 ```
 
@@ -46,8 +46,8 @@ log_format = "json"
 [[models]]
 id = "incord-mini-2b"
 kind = "chat"
-path = "D:/Burn-AI/Incord-Mini-2B/model/model.incord"
-tokenizer = "D:/Burn-AI/Incord-Mini-2B/model/tokenizer.json"
+path = "./model/model.incord"
+tokenizer = "./model/tokenizer.json"
 description = "Local LLM for testing"
 ```
 
@@ -76,7 +76,7 @@ curl http://localhost:8080/v1/models
 In a second terminal:
 
 ```bash
-cd C:\Projects\Chat\fruntend\admin
+cd <admin-ui-project>
 npm install   # first time only
 npm run dev
 ```
@@ -104,7 +104,7 @@ A modal appears with the raw key (looks like `incord_<64 hex chars>`). **Copy it
 In a third terminal:
 
 ```bash
-cd C:\Projects\Chat\fruntend\chat
+cd <chat-ui-project>
 npm install   # first time only
 npm run dev
 ```

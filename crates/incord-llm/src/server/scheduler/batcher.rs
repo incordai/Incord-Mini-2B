@@ -1,18 +1,18 @@
-use crate::config::Qor4bConfig;
+use crate::config::IncordConfig;
 use crate::gemv::{ModelWeights, prefill, prefill_with_vision};
 use crate::gemv_batch::forward_decode_batch;
 use crate::server::scheduler::pool::SlotPool;
 use crate::server::scheduler::queue::Queue;
 use crate::server::scheduler::slot::SlotPhase;
 use crate::server::scheduler::{Event, FinishReason};
-use crate::tokenizer::QoraTokenizer;
+use crate::tokenizer::IncordTokenizer;
 use std::sync::Arc;
 
 pub struct Batcher {
     pub pool: Arc<SlotPool>,
     pub queue: Arc<Queue>,
     pub weights: Arc<ModelWeights>,
-    pub tokenizer: Arc<QoraTokenizer>,
+    pub tokenizer: Arc<IncordTokenizer>,
 }
 
 impl Batcher {
@@ -42,7 +42,7 @@ impl Batcher {
     }
 
     /// Drain pending requests into free slots.
-    fn admit_pending(&self, config: &Qor4bConfig) {
+    fn admit_pending(&self, config: &IncordConfig) {
         let free = self.pool.size - self.pool.count_active();
         for _ in 0..free {
             // Non-blocking pop from the queue.

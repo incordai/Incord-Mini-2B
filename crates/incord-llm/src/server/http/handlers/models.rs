@@ -18,7 +18,7 @@ pub async fn list_models() -> Json<ModelsListResponse> {
                 owned_by: "incord".into(),
             },
             ModelInfo {
-                id: "qora-4b".into(),
+                id: "incord-mini-2b".into(),
                 object: "model",
                 created: 1_700_000_000,
                 owned_by: "incord".into(),

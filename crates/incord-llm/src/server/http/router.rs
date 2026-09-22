@@ -89,11 +89,11 @@ mod tests {
     /// Construct a tokenizer for tests. The real tokenizer.json is not always available;
     /// fall back to whatever the codebase exposes for tests. If the production tokenizer
     /// requires a tokenizer.json file, this helper should panic with a clear message
-    /// directing the engineer to set QORA_TEST_TOKENIZER env var or similar.
-    fn build_test_tokenizer() -> Arc<crate::tokenizer::QoraTokenizer> {
+    /// directing the engineer to set INCORD_TEST_TOKENIZER env var or similar.
+    fn build_test_tokenizer() -> Arc<crate::tokenizer::IncordTokenizer> {
         // For mock-weights builds, look for the tokenizer at a well-known test fixture path
-        // OR the model dir alongside model.qor4b.
-        // CARGO_MANIFEST_DIR is set at compile time to the crate root (crates/qora-llm/).
+        // OR the model dir alongside model.incord.
+        // CARGO_MANIFEST_DIR is set at compile time to the crate root (crates/incord-llm/).
         // model/ lives at the workspace root; tests/fixtures/ lives inside the crate.
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let workspace_root = std::path::Path::new(manifest_dir)
@@ -105,7 +105,7 @@ mod tests {
         let candidates: &[&std::path::Path] = &[model_tok.as_path(), fixture_tok.as_path()];
         for path in candidates {
             if path.exists()
-                && let Ok(t) = crate::tokenizer::QoraTokenizer::from_file(path)
+                && let Ok(t) = crate::tokenizer::IncordTokenizer::from_file(path)
             {
                 return Arc::new(t);
             }
@@ -130,7 +130,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn models_returns_qora_4b() {
+    async fn models_returns_incord_mini_2b() {
         let (auth, admin, chat, _dir) = test_states();
         let app = build_router(auth, admin, chat);
         let response = app
@@ -176,7 +176,7 @@ mod tests {
     async fn chat_without_auth_returns_401() {
         let (auth, admin, chat, _dir) = test_states();
         let app = build_router(auth, admin, chat);
-        let body = serde_json::json!({"model":"qora-4b","messages":[]});
+        let body = serde_json::json!({"model":"incord-mini-2b","messages":[]});
         let response = app
             .oneshot(
                 Request::builder()

@@ -1,6 +1,6 @@
 //! Thin HTTP client for the internal brain RAG service.
 //!
-//! Brain is a separate process under `C:/Projects/Chat/brain/` that owns
+//! Brain is a separate process that owns
 //! its own embedding model, knowledge graph, and ingestion daemons. The
 //! chat server reaches it over HTTP — no direct linking to brain's crates.
 //!
@@ -22,7 +22,7 @@ use std::time::Duration;
 /// matching on; the brain corpus contains nodes for "BTC at $80k", "Fed
 /// meeting Nov 5", "MSFT earnings beat", etc. and the embedder should use
 /// every token the user wrote.
-pub const QORA_BRAIN_INSTRUCT: &str =
+pub const INCORD_BRAIN_INSTRUCT: &str =
     "Given a user query about markets, news, prices, current events, dates, \
      economic releases, or general knowledge, retrieve the most relevant \
      passages from a heterogeneous knowledge graph that mixes market-data \
@@ -57,7 +57,7 @@ impl BrainClient {
     /// POST `/v1/context` and return the parsed response.
     /// Rerank is intentionally off — it's slow on CPU (~80 s for top-30) and
     /// the chat LLM will reason across all top_k nodes regardless of order.
-    /// The `instruct` field is always populated with [`QORA_BRAIN_INSTRUCT`]
+    /// The `instruct` field is always populated with [`INCORD_BRAIN_INSTRUCT`]
     /// so retrieval is keyed on topic, not on numeric claims in the query.
     pub async fn context(&self, query: &str, top_k: usize) -> anyhow::Result<ContextResponse> {
         let req = ContextRequestBody {
@@ -65,7 +65,7 @@ impl BrainClient {
             top_k,
             rerank: false,
             filters: serde_json::json!({}),
-            instruct: Some(QORA_BRAIN_INSTRUCT.to_string()),
+            instruct: Some(INCORD_BRAIN_INSTRUCT.to_string()),
         };
         let url = format!("{}/v1/context", self.base_url);
         let started = std::time::Instant::now();

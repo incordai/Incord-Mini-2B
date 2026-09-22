@@ -1,14 +1,14 @@
-# QORA API Examples
+# Incord API Examples
 
-Drop-in examples for using the QORA API.
+Drop-in examples for using the Incord API.
 
 ## Setup
 
 Set environment variables:
 
 ```bash
-export QORA_KEY=qora_yourkey
-export QORA_URL=https://api.example.com
+export INCORD_KEY=incord_yourkey
+export INCORD_URL=https://api.example.com
 ```
 
 ## Examples

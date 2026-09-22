@@ -4,9 +4,9 @@
 
 **Goal:** Stand up the axum HTTP server scaffold, OpenAI request/response types, TLS termination, configuration loader, and a new binary target. End state: server starts, `/health` returns 200, `/v1/models` returns a static model list, malformed JSON returns 400. No inference yet — just the HTTP plumbing.
 
-**Prerequisites:** clean checkout of `main`, branch `feature/qora-server-m1-http` created.
+**Prerequisites:** clean checkout of `main`, branch `feature/incord-server-m1-http` created.
 
-**Architecture:** axum 0.8 routes mounted in `src/server/http/router.rs`. Config loaded from TOML via `src/server/config.rs`. New binary at `src/bin/qora_server.rs`. OpenAI types in `src/server/openai/`. Server runs on tokio multi-threaded runtime.
+**Architecture:** axum 0.8 routes mounted in `src/server/http/router.rs`. Config loaded from TOML via `src/server/config.rs`. New binary at `src/bin/incord_server.rs`. OpenAI types in `src/server/openai/`. Server runs on tokio multi-threaded runtime.
 
 **Acceptance test:** `cargo test --test http_basic` passes — verifies server lifecycle, `/health`, `/v1/models`, JSON validation.
 
@@ -56,8 +56,8 @@ tokio-test = "0.4"
 
 # Add server binary target
 [[bin]]
-name = "qora-server"
-path = "src/bin/qora_server.rs"
+name = "incord-server"
+path = "src/bin/incord_server.rs"
 ```
 
 - [ ] **Step 2: Verify Cargo.toml parses**
@@ -66,7 +66,7 @@ path = "src/bin/qora_server.rs"
 cargo check --all-targets 2>&1 | head -40
 ```
 
-Expected: `cargo` downloads new deps, no errors. Will warn about missing main file at `src/bin/qora_server.rs` — fix in next task.
+Expected: `cargo` downloads new deps, no errors. Will warn about missing main file at `src/bin/incord_server.rs` — fix in next task.
 
 - [ ] **Step 3: Commit**
 
@@ -83,7 +83,7 @@ git commit -m "feat(server): add HTTP server dependencies to Cargo.toml"
 - Modify: `src/lib.rs`
 - Create: `src/server/mod.rs`
 - Create: `src/server/error.rs`
-- Create: `src/bin/qora_server.rs`
+- Create: `src/bin/incord_server.rs`
 
 - [ ] **Step 1: Add server module export to lib.rs**
 
@@ -95,7 +95,7 @@ pub mod server;
 - [ ] **Step 2: Create src/server/mod.rs**
 
 ```rust
-//! HTTP API server for QORA-4B.
+//! HTTP API server for Incord-Mini-2B.
 
 pub mod error;
 ```
@@ -167,11 +167,11 @@ impl IntoResponse for ServerError {
 pub type ServerResult<T> = Result<T, ServerError>;
 ```
 
-- [ ] **Step 4: Create src/bin/qora_server.rs as a stub**
+- [ ] **Step 4: Create src/bin/incord_server.rs as a stub**
 
 ```rust
 fn main() {
-    eprintln!("qora-server: not yet implemented");
+    eprintln!("incord-server: not yet implemented");
     std::process::exit(1);
 }
 ```
@@ -198,7 +198,7 @@ git commit -m "feat(server): scaffold server module and binary stub"
 **Files:**
 - Create: `src/server/config.rs`
 - Modify: `src/server/mod.rs`
-- Create: `config/qora-server.toml.example`
+- Create: `config/incord-server.toml.example`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -285,8 +285,8 @@ mod tests {
 bind = "127.0.0.1:8080"
 
 [model]
-path = "/opt/qora/model.qor4b"
-tokenizer = "/opt/qora/tokenizer.json"
+path = "/opt/incord/model.incord"
+tokenizer = "/opt/incord/tokenizer.json"
 
 [scheduler]
 slot_count = 64
@@ -295,8 +295,8 @@ max_context = 8192
 request_timeout_secs = 90
 
 [auth]
-admin_token_env = "QORA_ADMIN_TOKEN"
-db_path = "/opt/qora/auth.db"
+admin_token_env = "INCORD_ADMIN_TOKEN"
+db_path = "/opt/incord/auth.db"
 
 [limits.default]
 rpm = 60
@@ -343,17 +343,17 @@ Expected: 2 tests pass.
 
 - [ ] **Step 4: Create example config file**
 
-Write to `config/qora-server.toml.example`:
+Write to `config/incord-server.toml.example`:
 
 ```toml
 [server]
 bind = "0.0.0.0:443"
-tls_cert = "/opt/qora/certs/fullchain.pem"
-tls_key = "/opt/qora/certs/privkey.pem"
+tls_cert = "/opt/incord/certs/fullchain.pem"
+tls_key = "/opt/incord/certs/privkey.pem"
 
 [model]
-path = "/opt/qora/model.qor4b"
-tokenizer = "/opt/qora/tokenizer.json"
+path = "/opt/incord/model.incord"
+tokenizer = "/opt/incord/tokenizer.json"
 
 [scheduler]
 slot_count = 64
@@ -362,8 +362,8 @@ max_context = 8192
 request_timeout_secs = 90
 
 [auth]
-admin_token_env = "QORA_ADMIN_TOKEN"
-db_path = "/opt/qora/auth.db"
+admin_token_env = "INCORD_ADMIN_TOKEN"
+db_path = "/opt/incord/auth.db"
 
 [limits.default]
 rpm = 60
@@ -439,7 +439,7 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub user: Option<String>,
 
-    // QORA-specific extensions
+    // Incord-specific extensions
     #[serde(default)]
     pub think_budget: Option<u32>,
 
@@ -494,13 +494,13 @@ mod tests {
     #[test]
     fn parses_simple_text_message() {
         let json = r#"{
-            "model": "qora-4b",
+            "model": "incord-mini-2b",
             "messages": [
                 {"role": "user", "content": "hi"}
             ]
         }"#;
         let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.model, "qora-4b");
+        assert_eq!(req.model, "incord-mini-2b");
         assert_eq!(req.messages.len(), 1);
         assert!(matches!(req.messages[0].content, MessageContent::Text(_)));
     }
@@ -508,7 +508,7 @@ mod tests {
     #[test]
     fn parses_vision_content_parts() {
         let json = r#"{
-            "model": "qora-4b",
+            "model": "incord-mini-2b",
             "messages": [{
                 "role": "user",
                 "content": [
@@ -626,7 +626,7 @@ mod tests {
             id: "chatcmpl-1".into(),
             object: "chat.completion",
             created: 1_700_000_000,
-            model: "qora-4b".into(),
+            model: "incord-mini-2b".into(),
             choices: vec![Choice {
                 index: 0,
                 message: ResponseMessage { role: "assistant".into(), content: "hi".into() },
@@ -725,10 +725,10 @@ pub async fn list_models() -> Json<ModelsListResponse> {
     Json(ModelsListResponse {
         object: "list",
         data: vec![ModelInfo {
-            id: "qora-4b".into(),
+            id: "incord-mini-2b".into(),
             object: "model",
             created: 1_700_000_000,
-            owned_by: "qora".into(),
+            owned_by: "incord".into(),
         }],
     })
 }
@@ -766,7 +766,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn models_returns_qora_4b() {
+    async fn models_returns_incord_mini_2b() {
         let app = build_router();
         let response = app
             .oneshot(Request::builder().uri("/v1/models").body(Body::empty()).unwrap())
@@ -775,7 +775,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert_eq!(body["data"][0]["id"], "qora-4b");
+        assert_eq!(body["data"][0]["id"], "incord-mini-2b");
     }
 
     #[tokio::test]
@@ -810,7 +810,7 @@ git commit -m "feat(server): add HTTP router with /health and /v1/models"
 ## Task 6: Server binary that starts axum on configured bind address
 
 **Files:**
-- Modify: `src/bin/qora_server.rs`
+- Modify: `src/bin/incord_server.rs`
 - Modify: `src/server/mod.rs`
 - Create: `src/server/http/serve.rs`
 - Modify: `src/server/http/mod.rs`
@@ -827,7 +827,7 @@ use axum::Router;
 pub async fn serve_plain(router: Router, bind: &str) -> anyhow::Result<()> {
     let addr: SocketAddr = bind.parse().context("parsing bind address")?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "qora-server listening (plain HTTP)");
+    tracing::info!(%addr, "incord-server listening (plain HTTP)");
     axum::serve(listener, router.into_make_service()).await?;
     Ok(())
 }
@@ -844,18 +844,18 @@ pub mod serve;
 
 - [ ] **Step 3: Implement binary main**
 
-Update `src/bin/qora_server.rs`:
+Update `src/bin/incord_server.rs`:
 
 ```rust
 use std::path::PathBuf;
 use anyhow::Context;
-use qor4b::server::{config::ServerConfig, http::{router::build_router, serve::serve_plain}};
+use incord::server::{config::ServerConfig, http::{router::build_router, serve::serve_plain}};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "qora-server.toml".to_string());
+    let config_path = std::env::args().nth(1).unwrap_or_else(|| "incord-server.toml".to_string());
     let config = ServerConfig::load_from_path(&PathBuf::from(&config_path))
         .with_context(|| format!("loading config from {config_path}"))?;
     tracing::info!(?config_path, "config loaded");
@@ -877,12 +877,12 @@ fn init_tracing() {
 
 ```bash
 # Create a minimal test config
-cat > /tmp/qora-test.toml <<EOF
+cat > /tmp/incord-test.toml <<EOF
 [server]
 bind = "127.0.0.1:18080"
 
 [model]
-path = "/tmp/nonexistent.qor4b"
+path = "/tmp/nonexistent.incord"
 tokenizer = "/tmp/nonexistent.json"
 
 [scheduler]
@@ -892,8 +892,8 @@ max_context = 8192
 request_timeout_secs = 90
 
 [auth]
-admin_token_env = "QORA_ADMIN_TOKEN"
-db_path = "/tmp/qora-auth.db"
+admin_token_env = "INCORD_ADMIN_TOKEN"
+db_path = "/tmp/incord-auth.db"
 
 [limits.default]
 rpm = 60
@@ -905,8 +905,8 @@ log_level = "info"
 log_format = "json"
 EOF
 
-cargo build --bin qora-server --release
-./target/release/qora-server /tmp/qora-test.toml &
+cargo build --bin incord-server --release
+./target/release/incord-server /tmp/incord-test.toml &
 SERVER_PID=$!
 sleep 2
 curl -sf http://127.0.0.1:18080/health
@@ -919,8 +919,8 @@ Expected: both curl commands print JSON. Server starts and stops cleanly.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/bin/qora_server.rs src/server/http/serve.rs src/server/http/mod.rs
-git commit -m "feat(server): qora-server binary serves /health and /v1/models"
+git add src/bin/incord_server.rs src/server/http/serve.rs src/server/http/mod.rs
+git commit -m "feat(server): incord-server binary serves /health and /v1/models"
 ```
 
 ---
@@ -931,7 +931,7 @@ git commit -m "feat(server): qora-server binary serves /health and /v1/models"
 - Create: `src/server/http/tls.rs`
 - Modify: `src/server/http/mod.rs`
 - Modify: `src/server/http/serve.rs`
-- Modify: `src/bin/qora_server.rs`
+- Modify: `src/bin/incord_server.rs`
 
 - [ ] **Step 1: Add tls module**
 
@@ -986,7 +986,7 @@ use axum_server::tls_rustls::RustlsConfig;
 
 pub async fn serve_tls(router: Router, bind: &str, tls: RustlsConfig) -> anyhow::Result<()> {
     let addr: SocketAddr = bind.parse().context("parsing bind address")?;
-    tracing::info!(%addr, "qora-server listening (TLS)");
+    tracing::info!(%addr, "incord-server listening (TLS)");
     axum_server::bind_rustls(addr, tls)
         .serve(router.into_make_service())
         .await?;
@@ -996,16 +996,16 @@ pub async fn serve_tls(router: Router, bind: &str, tls: RustlsConfig) -> anyhow:
 
 - [ ] **Step 4: Update binary to choose TLS vs plain**
 
-In `src/bin/qora_server.rs`, replace the `serve_plain(...)` call with:
+In `src/bin/incord_server.rs`, replace the `serve_plain(...)` call with:
 
 ```rust
 match (&config.server.tls_cert, &config.server.tls_key) {
     (Some(cert), Some(key)) => {
-        let tls = qor4b::server::http::tls::load_tls_config(cert, key).await?;
-        qor4b::server::http::serve::serve_tls(router, &config.server.bind, tls).await
+        let tls = incord::server::http::tls::load_tls_config(cert, key).await?;
+        incord::server::http::serve::serve_tls(router, &config.server.bind, tls).await
     }
     (None, None) => {
-        qor4b::server::http::serve::serve_plain(router, &config.server.bind).await
+        incord::server::http::serve::serve_plain(router, &config.server.bind).await
     }
     _ => Err(anyhow::anyhow!("tls_cert and tls_key must be set together or both omitted")),
 }?;
@@ -1023,7 +1023,7 @@ Expected: clean build, 1 tls test passes.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/server/http/tls.rs src/server/http/serve.rs src/server/http/mod.rs src/bin/qora_server.rs
+git add src/server/http/tls.rs src/server/http/serve.rs src/server/http/mod.rs src/bin/incord_server.rs
 git commit -m "feat(server): add optional TLS termination via rustls"
 ```
 
@@ -1170,7 +1170,7 @@ Create `tests/integration/common.rs`:
 
 ```rust
 use std::net::SocketAddr;
-use qor4b::server::http::router::build_router;
+use incord::server::http::router::build_router;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -1222,13 +1222,13 @@ async fn health_endpoint_returns_200() {
 }
 
 #[tokio::test]
-async fn models_endpoint_lists_qora_4b() {
+async fn models_endpoint_lists_incord_mini_2b() {
     let server = TestServer::start().await;
     let resp = reqwest::get(server.url("/v1/models")).await.unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["object"], "list");
-    assert_eq!(body["data"][0]["id"], "qora-4b");
+    assert_eq!(body["data"][0]["id"], "incord-mini-2b");
 }
 
 #[tokio::test]
@@ -1298,12 +1298,12 @@ git commit --allow-empty -m "milestone: M1 HTTP foundation complete
 Acceptance test: cargo test --test http_basic — 4/4 pass"
 ```
 
-- [ ] **Step 4: Merge to feature/qora-server branch**
+- [ ] **Step 4: Merge to feature/incord-server branch**
 
 ```bash
-git checkout feature/qora-server
-git merge --no-ff feature/qora-server-m1-http
-git checkout feature/qora-server-m1-http
+git checkout feature/incord-server
+git merge --no-ff feature/incord-server-m1-http
+git checkout feature/incord-server-m1-http
 ```
 
 M1 complete. Proceed to M2.

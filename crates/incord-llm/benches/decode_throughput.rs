@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use qor4b::gemv::{forward_decode, mock::tiny_weights};
-use qor4b::gemv_batch::{SlotInferenceState, forward_decode_batch};
+use incord::gemv::{forward_decode, mock::tiny_weights};
+use incord::gemv_batch::{SlotInferenceState, forward_decode_batch};
 
 fn bench_throughput(c: &mut Criterion) {
     let w = tiny_weights();

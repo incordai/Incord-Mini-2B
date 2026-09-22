@@ -53,7 +53,7 @@ pub struct InferenceRequest {
     #[serde(default)]
     pub stream: bool,
 
-    // QORA extensions
+    // Incord extensions
     #[serde(default)]
     pub think: Option<bool>,
     #[serde(default)]

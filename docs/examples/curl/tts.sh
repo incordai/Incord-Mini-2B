@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# QORA TTS via /v1/audio/speech. Set QORA_KEY and QORA_URL.
+# Incord TTS via /v1/audio/speech. Set INCORD_KEY and INCORD_URL.
 # The server returns raw WAV bytes; this saves them to output.wav.
 
-QORA_KEY=${QORA_KEY:?set QORA_KEY env var}
-QORA_URL=${QORA_URL:-https://api.example.com}
+INCORD_KEY=${INCORD_KEY:?set INCORD_KEY env var}
+INCORD_URL=${INCORD_URL:-https://api.example.com}
 
-curl -sS "$QORA_URL/v1/audio/speech" \
-    -H "Authorization: Bearer $QORA_KEY" \
+curl -sS "$INCORD_URL/v1/audio/speech" \
+    -H "Authorization: Bearer $INCORD_KEY" \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "qora-tts",
-        "input": "Hello, this is QORA text-to-speech.",
+        "model": "incord-tts",
+        "input": "Hello, this is Incord text-to-speech.",
         "voice": "en-female-1",
         "response_format": "wav"
     }' \

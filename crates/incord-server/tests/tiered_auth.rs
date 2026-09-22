@@ -16,37 +16,37 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
-use qor4b::gemv::mock::tiny_weights;
-use qor4b::tokenizer::QoraTokenizer;
-use qora_server::auth::admin::AdminState;
-use qora_server::auth::middleware::AuthState;
-use qora_server::auth::ratelimit::RateLimiter;
-use qora_server::config::TierConfig;
-use qora_server::db;
-use qora_server::engines::llm::LlmEngine;
-use qora_server::http::handlers::inference::InferenceState;
-use qora_server::http::router::build_router;
-use qora_server::registry::Registry;
+use incord::gemv::mock::tiny_weights;
+use incord::tokenizer::IncordTokenizer;
+use incord_server::auth::admin::AdminState;
+use incord_server::auth::middleware::AuthState;
+use incord_server::auth::ratelimit::RateLimiter;
+use incord_server::config::TierConfig;
+use incord_server::db;
+use incord_server::engines::llm::LlmEngine;
+use incord_server::http::handlers::inference::InferenceState;
+use incord_server::http::router::build_router;
+use incord_server::registry::Registry;
 
 const TEST_ADMIN_TOKEN: &str = "test-admin-m20";
 const TEST_SECRET: &[u8] = b"test-secret-m20";
 
-fn build_test_tokenizer() -> Arc<QoraTokenizer> {
+fn build_test_tokenizer() -> Arc<IncordTokenizer> {
     let candidates = [
         concat!(env!("CARGO_MANIFEST_DIR"), "/../../model/tokenizer.json"),
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../qora-llm/model/tokenizer.json"
+            "/../incord-llm/model/tokenizer.json"
         ),
         concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../qora-llm/tests/fixtures/tokenizer.json"
+            "/../incord-llm/tests/fixtures/tokenizer.json"
         ),
     ];
     for path in candidates {
         let p = std::path::Path::new(path);
         if p.exists() {
-            if let Ok(t) = QoraTokenizer::from_file(p) {
+            if let Ok(t) = IncordTokenizer::from_file(p) {
                 return Arc::new(t);
             }
         }
@@ -68,7 +68,7 @@ fn build_test_app_with_guest_limit(max_msg: u32) -> (axum::Router, TempDir) {
         server_secret: Arc::new(TEST_SECRET.to_vec()),
         limiter: RateLimiter::new(),
         tiers,
-        geo: qora_server::geoip::GeoDb::empty(),
+        geo: incord_server::geoip::GeoDb::empty(),
     });
     let admin_state = Arc::new(AdminState {
         admin_token: TEST_ADMIN_TOKEN.to_string(),
@@ -271,7 +271,7 @@ async fn api_key_path_still_works() {
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let key_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let raw_key = key_resp["raw_key"].as_str().unwrap().to_string();
-    assert!(raw_key.starts_with("qora_"));
+    assert!(raw_key.starts_with("incord_"));
 
     // Use API key for inference
     let chat_body = json!({

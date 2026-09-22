@@ -1,4 +1,4 @@
-//! Prometheus metrics for QORA API server.
+//! Prometheus metrics for Incord API server.
 
 use once_cell::sync::Lazy;
 use prometheus::{
@@ -8,7 +8,7 @@ use prometheus::{
 
 pub static REQUESTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
-        "qora_requests_total",
+        "incord_requests_total",
         "Total HTTP requests by endpoint and status",
         &["endpoint", "status"]
     )
@@ -16,12 +16,12 @@ pub static REQUESTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
 });
 
 pub static TOKENS_EMITTED: Lazy<Counter> = Lazy::new(|| {
-    register_counter!("qora_tokens_emitted_total", "Total output tokens emitted").unwrap()
+    register_counter!("incord_tokens_emitted_total", "Total output tokens emitted").unwrap()
 });
 
 pub static REQUEST_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
-        "qora_request_duration_seconds",
+        "incord_request_duration_seconds",
         "Request duration in seconds",
         &["endpoint"],
         vec![0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]
@@ -30,13 +30,13 @@ pub static REQUEST_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
 });
 
 pub static ACTIVE_SLOTS: Lazy<Gauge> =
-    Lazy::new(|| register_gauge!("qora_active_slots", "Currently active slots").unwrap());
+    Lazy::new(|| register_gauge!("incord_active_slots", "Currently active slots").unwrap());
 
 pub static QUEUE_DEPTH: Lazy<Gauge> =
-    Lazy::new(|| register_gauge!("qora_queue_depth", "Pending requests in queue").unwrap());
+    Lazy::new(|| register_gauge!("incord_queue_depth", "Pending requests in queue").unwrap());
 
 pub static ERRORS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
-    register_counter_vec!("qora_errors_total", "Total errors by type", &["error_type"]).unwrap()
+    register_counter_vec!("incord_errors_total", "Total errors by type", &["error_type"]).unwrap()
 });
 
 pub fn render_metrics() -> String {

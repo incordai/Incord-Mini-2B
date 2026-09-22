@@ -1,5 +1,5 @@
 [package]
-name = "qora-server"
+name = "incord-server"
 version.workspace = true
 edition.workspace = true
 
@@ -7,17 +7,14 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [[bin]]
-name = "qora-server"
-path = "src/bin/qora_server.rs"
+name = "incord-server"
+path = "src/bin/incord_server.rs"
 
 [dependencies]
 # Inference-only views into the AI crates. `default-features = false` strips
-# their bundled HTTP servers, auth stacks, conversion CLIs etc — qora-server
+# their bundled HTTP servers, auth stacks, conversion CLIs etc — incord-server
 # only needs the math + tokenizer + weight loaders.
-qor4b = { path = "../qora-llm", default-features = false }
-qora-tts = { path = "../../../QORA-TTS" }
-qora-stt-small = { path = "../../../QORA-STT-Small" }
-qor-rag = { path = "C:/Projects/AI/qor-main/qor-rs/crates/qor-rag" }
+incord = { path = "../incord-llm", default-features = false }
 base64 = "0.22"
 image = "0.25"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
@@ -54,12 +51,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 maxminddb = "0.24"
 
 [dev-dependencies]
-qor4b = { path = "../qora-llm", features = ["mock-weights"] }
+incord = { path = "../incord-llm", features = ["mock-weights"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 
 [features]
-mock-weights = ["qor4b/mock-weights"]
+mock-weights = ["incord/mock-weights"]
 
 [[test]]
 name = "llm_engine_smoke"

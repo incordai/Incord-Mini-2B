@@ -1,4 +1,4 @@
-//! HTTP API server for QORA-4B.
+//! HTTP API server for Incord-Mini-2B.
 
 pub mod auth;
 pub mod config;

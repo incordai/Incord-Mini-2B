@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# QORA reranking via /v1/rerank. Set QORA_KEY and QORA_URL.
+# Incord reranking via /v1/rerank. Set INCORD_KEY and INCORD_URL.
 
-QORA_KEY=${QORA_KEY:?set QORA_KEY env var}
-QORA_URL=${QORA_URL:-https://api.example.com}
+INCORD_KEY=${INCORD_KEY:?set INCORD_KEY env var}
+INCORD_URL=${INCORD_URL:-https://api.example.com}
 
-curl -sS "$QORA_URL/v1/rerank" \
-    -H "Authorization: Bearer $QORA_KEY" \
+curl -sS "$INCORD_URL/v1/rerank" \
+    -H "Authorization: Bearer $INCORD_KEY" \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "qora-rerank",
+        "model": "incord-rerank",
         "query": "What is the capital of France?",
         "documents": [
             "Paris is the capital and most populous city of France.",

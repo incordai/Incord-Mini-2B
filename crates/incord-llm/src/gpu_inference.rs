@@ -1,4 +1,4 @@
-//! GPU inference for QORA-4B.
+//! GPU inference for Incord-Mini-2B.
 //!
 //! Implements single-token decode using Cortex GPU tensors for the hybrid
 //! DeltaNet + Full Attention architecture.
@@ -8,13 +8,13 @@ use cortex::tensor::activation;
 use std::io::Write;
 use std::time::Instant;
 
-use crate::config::Qor4bConfig;
+use crate::config::IncordConfig;
 use crate::gemv::ModelWeights;
 use crate::generate::GenerateParams;
 use crate::gpu_loader::{
     GpuDeltaNetLayer, GpuFullAttnLayer, GpuHybridLayer, GpuModel, load_model_gpu,
 };
-use crate::tokenizer::QoraTokenizer;
+use crate::tokenizer::IncordTokenizer;
 
 // ============================================================
 // GPU Cache
@@ -44,7 +44,7 @@ pub struct GpuKvCacheEntry<B: Backend> {
 }
 
 impl<B: Backend> GpuHybridCache<B> {
-    pub fn new(config: &Qor4bConfig, device: &B::Device) -> Self {
+    pub fn new(config: &IncordConfig, device: &B::Device) -> Self {
         let mut entries = Vec::with_capacity(config.num_layers);
         for lt in &config.layer_types {
             match lt {
@@ -128,7 +128,7 @@ fn forward_deltanet_decode_gpu<B: Backend>(
     x: Tensor<B, 2>, // [1, hidden]
     layer: &GpuDeltaNetLayer<B>,
     state: &mut GpuDeltaNetState<B>,
-    config: &Qor4bConfig,
+    config: &IncordConfig,
 ) -> Tensor<B, 2> {
     let _device = x.device();
     let num_qk = config.num_qk_heads;
@@ -258,7 +258,7 @@ fn forward_attn_decode_gpu<B: Backend>(
     x: Tensor<B, 2>, // [1, hidden]
     layer: &GpuFullAttnLayer<B>,
     kv: &mut GpuKvCacheEntry<B>,
-    config: &Qor4bConfig,
+    config: &IncordConfig,
     rope_cos: &Tensor<B, 2>, // [max_pos, half_dim]
     rope_sin: &Tensor<B, 2>,
 ) -> Tensor<B, 2> {
@@ -459,7 +459,7 @@ fn prefill_deltanet_layer_gpu<B: Backend>(
     x: Tensor<B, 2>, // [seq_len, hidden] on GPU
     layer: &GpuDeltaNetLayer<B>,
     state: &mut GpuDeltaNetState<B>,
-    config: &Qor4bConfig,
+    config: &IncordConfig,
 ) -> Tensor<B, 2> {
     let device = x.device();
     let seq_len = x.dims()[0];
@@ -713,7 +713,7 @@ fn prefill_attn_layer_gpu<B: Backend>(
     x: Tensor<B, 2>, // [seq_len, hidden]
     layer: &GpuFullAttnLayer<B>,
     kv: &mut GpuKvCacheEntry<B>,
-    config: &Qor4bConfig,
+    config: &IncordConfig,
     rope_cos: &Tensor<B, 2>,
     rope_sin: &Tensor<B, 2>,
 ) -> Tensor<B, 2> {
@@ -1026,7 +1026,7 @@ fn apply_repetition_penalty(logits: &mut [f32], generated: &[u32], penalty: f32)
 
 pub fn generate_gpu(
     weights: &ModelWeights,
-    tokenizer: &QoraTokenizer,
+    tokenizer: &IncordTokenizer,
     prompt: &str,
     params: &GenerateParams,
 ) -> Result<(), String> {
@@ -1091,7 +1091,7 @@ fn detect_free_vram_mb() -> Option<usize> {
 
 fn generate_gpu_inner(
     weights: &ModelWeights,
-    tokenizer: &QoraTokenizer,
+    tokenizer: &IncordTokenizer,
     prompt: &str,
     params: &GenerateParams,
 ) -> Result<(), String> {

@@ -98,7 +98,7 @@ impl Drop for TestServer {
 }
 
 /// Construct a tokenizer for tests. Looks for tokenizer.json at well-known paths.
-fn build_test_tokenizer() -> Arc<incord::tokenizer::QoraTokenizer> {
+fn build_test_tokenizer() -> Arc<incord::tokenizer::IncordTokenizer> {
     // CARGO_MANIFEST_DIR resolves to the crate root (crates/incord-llm/) at compile time.
     // model/ lives two levels up at the workspace root; tests/fixtures/ is inside the crate.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -111,7 +111,7 @@ fn build_test_tokenizer() -> Arc<incord::tokenizer::QoraTokenizer> {
     let candidates: &[&std::path::Path] = &[model_tok.as_path(), fixture_tok.as_path()];
     for path in candidates {
         if path.exists()
-            && let Ok(t) = incord::tokenizer::QoraTokenizer::from_file(path)
+            && let Ok(t) = incord::tokenizer::IncordTokenizer::from_file(path)
         {
             return Arc::new(t);
         }

@@ -40,7 +40,6 @@ pub struct IncordConfig {
 }
 
 pub type IncoreConfig = IncordConfig;
-pub type Qor4bConfig = IncordConfig;
 
 impl IncordConfig {
     /// Default configuration for OpenBMB MiniCPM5-2B.

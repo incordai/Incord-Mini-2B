@@ -23,13 +23,13 @@ use crate::server::scheduler::{
 use crate::server::session::core::Session;
 use crate::server::session::sampler::Sampler;
 use crate::server::usage::tracker::{UsageRecord, UsageTracker};
-use crate::tokenizer::QoraTokenizer;
+use crate::tokenizer::IncordTokenizer;
 
 #[derive(Clone)]
 pub struct ChatState {
     pub queue: Arc<Queue>,
     pub weights: Arc<ModelWeights>,
-    pub tokenizer: Arc<QoraTokenizer>,
+    pub tokenizer: Arc<IncordTokenizer>,
     pub usage: UsageTracker,
     /// Semaphore limiting concurrent vision encodes (protects peak memory).
     pub vision_semaphore: Arc<tokio::sync::Semaphore>,
@@ -42,7 +42,7 @@ pub async fn chat_completions(
 ) -> Result<axum::response::Response, ServerError> {
     let valid_model = matches!(
         req.model.as_str(),
-        "incord" | "incord-mini-2b" | "incord-2b" | "qora-4b"
+        "incord" | "incord-mini-2b" | "incord-2b"
     );
     if !valid_model {
         return Err(ServerError::BadRequest(format!(
@@ -53,7 +53,7 @@ pub async fn chat_completions(
 
     // Build the user message string and collect any inline/remote image bytes.
     // OpenAI sends a sequence of system/user/assistant messages;
-    // QORA's tokenizer.format_chat takes a single user_message and builds the full prompt
+    // Incord's tokenizer.format_chat takes a single user_message and builds the full prompt
     // (with system prompt + chat template) internally. For v1, concatenate all messages
     // into a single user message; system content becomes a prefix.
     let (user_message, images) = render_user_message_with_images(&req.messages).await?;

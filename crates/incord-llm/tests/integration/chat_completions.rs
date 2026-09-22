@@ -35,7 +35,7 @@ async fn missing_auth_returns_401() {
     let server = TestServer::start().await;
     let resp = reqwest::Client::new()
         .post(server.url("/v1/chat/completions"))
-        .json(&json!({"model":"qora-4b","messages":[{"role":"user","content":"hi"}]}))
+        .json(&json!({"model":"incord-mini-2b","messages":[{"role":"user","content":"hi"}]}))
         .send()
         .await
         .unwrap();
@@ -51,7 +51,7 @@ async fn non_streaming_returns_completion() {
         .post(server.url("/v1/chat/completions"))
         .bearer_auth(&key)
         .json(&json!({
-            "model": "qora-4b",
+            "model": "incord-mini-2b",
             "messages": [{"role":"user","content":"hi"}],
             "max_tokens": 4,
             "temperature": 0.0
@@ -76,7 +76,7 @@ async fn streaming_returns_sse_chunks() {
         .post(server.url("/v1/chat/completions"))
         .bearer_auth(&key)
         .json(&json!({
-            "model": "qora-4b",
+            "model": "incord-mini-2b",
             "messages": [{"role":"user","content":"hi"}],
             "stream": true,
             "max_tokens": 4,
@@ -104,7 +104,7 @@ async fn chat_completions_accepts_incord_model_names() {
     let server = TestServer::start().await;
     let key = create_user_key(&server).await;
 
-    for model_name in &["incord", "incord-mini-2b", "incord-2b", "qora-4b"] {
+    for model_name in &["incord", "incord-mini-2b", "incord-2b", "incord-mini-2b"] {
         let resp = reqwest::Client::new()
             .post(server.url("/v1/chat/completions"))
             .bearer_auth(&key)

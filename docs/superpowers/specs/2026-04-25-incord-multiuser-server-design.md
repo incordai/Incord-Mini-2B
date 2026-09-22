@@ -1,4 +1,4 @@
-# QORA Multi-User API Server — v1 Design
+# Incord Multi-User API Server — v1 Design
 
 **Status**: Approved
 **Date**: 2026-04-25
@@ -8,7 +8,7 @@
 
 ## 1. Goal
 
-Run QORA-4B as a complete, sellable, OpenAI-compatible HTTP API on one CPU server. Day-one feature set must be sufficient to charge customers without "we'll add it later" caveats. The deferred concern is multi-server scaling (load balancer + horizontal fleet) — that is *not* part of this v1, but the architecture must not preclude it.
+Run Incord-Mini-2B as a complete, sellable, OpenAI-compatible HTTP API on one CPU server. Day-one feature set must be sufficient to charge customers without "we'll add it later" caveats. The deferred concern is multi-server scaling (load balancer + horizontal fleet) — that is *not* part of this v1, but the architecture must not preclude it.
 
 ### Non-goals (explicitly deferred)
 - Multi-server / multi-node deployment
@@ -16,7 +16,7 @@ Run QORA-4B as a complete, sellable, OpenAI-compatible HTTP API on one CPU serve
 - Geographic / multi-region replication
 - Fine-tuning APIs
 - Audio (speech / TTS) endpoints
-- Embedding endpoints (QORA is a decoder-only model)
+- Embedding endpoints (Incord is a decoder-only model)
 - Function calling / tool use (base model does not support)
 
 ## 2. Capacity target
@@ -85,10 +85,10 @@ Run QORA-4B as a complete, sellable, OpenAI-compatible HTTP API on one CPU serve
 
 ### 3.2 Data flow — one chat completion request
 
-1. Client sends `POST /v1/chat/completions` with `Authorization: Bearer qora_<key>` and JSON body.
+1. Client sends `POST /v1/chat/completions` with `Authorization: Bearer incord_<key>` and JSON body.
 2. axum handler parses + validates against OpenAI schema.
 3. Auth middleware: API key lookup in SQLite, rate-limit check per key. Reject with 401 / 429 if necessary.
-4. Convert OpenAI `messages` → QORA chat-template tokens via existing `tokenizer.rs` (chat template logic already present).
+4. Convert OpenAI `messages` → Incord chat-template tokens via existing `tokenizer.rs` (chat template logic already present).
 5. Build a `Session { id, cache, prompt_tokens, params, sse_tx, deadline }`.
 6. Push session to scheduler queue. Reject 503 if queue depth exceeds `MAX_QUEUE`.
 7. Scheduler thread admits session into a free slot. Runs prefill on this slot's `HybridCache`.
@@ -120,7 +120,7 @@ Run QORA-4B as a complete, sellable, OpenAI-compatible HTTP API on one CPU serve
 | 17 | systemd service + deployment scripts | NEW | ~150 |
 | 18 | Test suite (unit + integration + load) | NEW | ~1500 |
 | | **Total new code** | | **~7,000 lines** |
-| | **Existing QORA core** (gemv, simd, vision, generate, tokenizer) | UNCHANGED | ~4,400 |
+| | **Existing Incord core** (gemv, simd, vision, generate, tokenizer) | UNCHANGED | ~4,400 |
 
 ## 5. Memory layout (verified against existing code)
 
@@ -175,7 +175,7 @@ For all `n ≤ 64`, calling `forward_decode_batch` with N=1 slot must return log
 ### 7.1 Implemented in v1
 
 - `POST /v1/chat/completions` — text and vision; streaming SSE & non-streaming
-- `GET /v1/models` — returns `{ data: [{ id: "qora-4b", ... }] }`
+- `GET /v1/models` — returns `{ data: [{ id: "incord-mini-2b", ... }] }`
 - `GET /health` — liveness probe
 - `GET /metrics` — Prometheus format
 - `POST /v1/admin/keys` — create/revoke API key (admin-only, separate auth)
@@ -200,7 +200,7 @@ Vision encoder runs on a dedicated thread with single-concurrent-encoding admiss
 
 `temperature`, `top_p`, `max_tokens`, `presence_penalty`, `frequency_penalty`, `n` (up to 4), `stop` (string or array), `stream`, `user` (passed through to logs).
 
-QORA-specific extensions (included in v1 as additive request-body fields; OpenAI clients ignore unknown fields):
+Incord-specific extensions (included in v1 as additive request-body fields; OpenAI clients ignore unknown fields):
 - `think_budget` (integer) — defaults to 1024 unless overridden; clamped by server config
 - `think` (boolean, default true) — set false to disable thinking mode (equivalent to current `--no-think` CLI flag)
 - `show_think` (boolean, default false) — if true, include thinking tokens in the streamed output (default: thinking tokens are suppressed and only the final answer is returned)
@@ -227,7 +227,7 @@ CSV export endpoint for billing reconciliation. Stripe metered billing integrati
 ### 8.4 Observability
 
 - `tracing` crate with JSON logs to journald.
-- Prometheus metrics: `qora_requests_total`, `qora_tokens_per_second`, `qora_slot_utilization`, `qora_queue_depth`, `qora_request_duration_seconds`, `qora_active_slots`, `qora_errors_total`.
+- Prometheus metrics: `incord_requests_total`, `incord_tokens_per_second`, `incord_slot_utilization`, `incord_queue_depth`, `incord_request_duration_seconds`, `incord_active_slots`, `incord_errors_total`.
 - Grafana dashboard JSON shipped in repo.
 
 ### 8.5 TLS
@@ -237,9 +237,9 @@ CSV export endpoint for billing reconciliation. Stripe metered billing integrati
 ### 8.6 Deployment
 
 - systemd unit, restart on failure, log to journald.
-- Single binary, model + tokenizer + config + DB in `/opt/qora/`.
+- Single binary, model + tokenizer + config + DB in `/opt/incord/`.
 - Backups: SQLite WAL + nightly snapshot to second SSD.
-- Start: `systemctl start qora-api`. Stop: graceful drain (stop accepting new requests, finish in-flight, exit).
+- Start: `systemctl start incord-api`. Stop: graceful drain (stop accepting new requests, finish in-flight, exit).
 
 ## 9. Error handling
 
@@ -321,12 +321,12 @@ A complete, OpenAI-compatible API at `https://api.<your-domain>/v1/`:
 ```toml
 [server]
 bind = "0.0.0.0:443"
-tls_cert = "/opt/qora/certs/fullchain.pem"
-tls_key = "/opt/qora/certs/privkey.pem"
+tls_cert = "/opt/incord/certs/fullchain.pem"
+tls_key = "/opt/incord/certs/privkey.pem"
 
 [model]
-path = "/opt/qora/model.qor4b"
-tokenizer = "/opt/qora/tokenizer.json"
+path = "/opt/incord/model.incord"
+tokenizer = "/opt/incord/tokenizer.json"
 
 [scheduler]
 slot_count = 64
@@ -336,7 +336,7 @@ request_timeout_secs = 90
 
 [auth]
 admin_token = "from_env"
-db_path = "/opt/qora/auth.db"
+db_path = "/opt/incord/auth.db"
 
 [limits.default]
 rpm = 60

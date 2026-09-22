@@ -1,9 +1,9 @@
-//! Load test binary for QORA API server.
+//! Load test binary for Incord API server.
 //!
 //! Usage:
 //!   cargo run --release --bin load_test -- \
 //!     --url http://api.example.com \
-//!     --key qora_xxx \
+//!     --key incord_xxx \
 //!     --concurrency 100 --duration 60 --max-tokens 200
 
 use std::sync::Arc;
@@ -52,7 +52,7 @@ async fn main() {
             }
             "--help" | "-h" => {
                 eprintln!(
-                    "load_test --url <base> --key <qora_xxx> [--concurrency N] [--duration S] [--max-tokens N] [--prompt TEXT]"
+                    "load_test --url <base> --key <incord_xxx> [--concurrency N] [--duration S] [--max-tokens N] [--prompt TEXT]"
                 );
                 std::process::exit(0);
             }
@@ -97,7 +97,7 @@ async fn main() {
                     .post(format!("{url}/v1/chat/completions"))
                     .bearer_auth(&*key)
                     .json(&json!({
-                        "model": "qora-4b",
+                        "model": "incord-mini-2b",
                         "messages": [{"role":"user","content":&*prompt}],
                         "max_tokens": max_tokens,
                         "stream": false,

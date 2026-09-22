@@ -2,14 +2,14 @@ use anyhow::Context;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use qora_server::auth::admin::AdminState;
-use qora_server::auth::middleware::AuthState;
-use qora_server::auth::ratelimit::RateLimiter;
-use qora_server::config::ServerConfig;
-use qora_server::db;
-use qora_server::http::handlers::inference::InferenceState;
-use qora_server::http::router::build_router;
-use qora_server::loader::build_registry;
+use incord_server::auth::admin::AdminState;
+use incord_server::auth::middleware::AuthState;
+use incord_server::auth::ratelimit::RateLimiter;
+use incord_server::config::ServerConfig;
+use incord_server::db;
+use incord_server::http::handlers::inference::InferenceState;
+use incord_server::http::router::build_router;
+use incord_server::loader::build_registry;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
 
     let config_path = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "qora-server.toml".to_string());
+        .unwrap_or_else(|| "incord-server.toml".to_string());
     let config = ServerConfig::load_from_path(&PathBuf::from(&config_path))
         .with_context(|| format!("loading config from {config_path}"))?;
     tracing::info!(?config_path, "config loaded");
@@ -26,8 +26,8 @@ async fn main() -> anyhow::Result<()> {
     let db = db::open(&config.auth.db_path)?;
 
     // Server secret (for HMAC key index)
-    let server_secret = std::env::var("QORA_SERVER_SECRET")
-        .context("QORA_SERVER_SECRET env var must be set")?
+    let server_secret = std::env::var("INCORD_SERVER_SECRET")
+        .context("INCORD_SERVER_SECRET env var must be set")?
         .into_bytes();
 
     // Admin token
@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     // GeoIP database (optional — graceful if absent)
-    let geo = qora_server::geoip::GeoDb::try_load(config.geoip.db_path.as_deref());
+    let geo = incord_server::geoip::GeoDb::try_load(config.geoip.db_path.as_deref());
 
     let auth = Arc::new(AuthState {
         db,
@@ -71,10 +71,10 @@ async fn main() -> anyhow::Result<()> {
     // Serve via TLS or plain HTTP based on config
     match (&config.server.tls_cert, &config.server.tls_key) {
         (Some(cert), Some(key)) => {
-            let tls = qora_server::http::tls::load_tls_config(cert, key).await?;
-            qora_server::http::server::serve_tls(router, &config.server.bind, tls).await
+            let tls = incord_server::http::tls::load_tls_config(cert, key).await?;
+            incord_server::http::server::serve_tls(router, &config.server.bind, tls).await
         }
-        (None, None) => qora_server::http::server::serve_plain(router, &config.server.bind).await,
+        (None, None) => incord_server::http::server::serve_plain(router, &config.server.bind).await,
         _ => Err(anyhow::anyhow!(
             "tls_cert and tls_key must be set together or both omitted"
         )),

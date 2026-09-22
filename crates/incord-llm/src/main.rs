@@ -141,15 +141,10 @@ fn main() {
         .parent()
         .unwrap()
         .to_path_buf();
-    let default_converted = PathBuf::from("D:/Burn-AI/models/MiniCPM5-2B/model_q8.incord");
     let model_path = if let Some(ref p) = custom_model_path {
         p.clone()
     } else if exe_dir.join("model_q8.incord").exists() {
         exe_dir.join("model_q8.incord")
-    } else if default_converted.exists() {
-        default_converted
-    } else if exe_dir.join("model.incord").exists() {
-        exe_dir.join("model.incord")
     } else {
         exe_dir.join("model.incord")
     };
@@ -164,17 +159,12 @@ fn main() {
     );
 
     // Load tokenizer from same directory as the executable or fallback
-    let default_tok = PathBuf::from("D:/Burn-AI/models/MiniCPM5-2B/tokenizer.json");
     let tokenizer_path = if let Some(ref p) = custom_tokenizer_path {
         if p.is_dir() {
             p.join("tokenizer.json")
         } else {
             p.clone()
         }
-    } else if exe_dir.join("tokenizer.json").exists() {
-        exe_dir.join("tokenizer.json")
-    } else if default_tok.exists() {
-        default_tok
     } else {
         exe_dir.join("tokenizer.json")
     };

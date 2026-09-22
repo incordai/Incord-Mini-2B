@@ -1,7 +1,7 @@
 //! Smoke test for embedding + rerank dispatch via qor-rag.
 //!
-//! Requires the qor-rag model directory to be present at a known location.
-//! If no model directory is found, the test skips gracefully rather than failing —
+//! Requires the qor-rag model directory, given by `INCORD_RAG_MODEL_DIR`.
+//! If it is unset or missing, the test skips gracefully rather than failing —
 //! CI environments without model weights will still report a green run.
 //!
 //! Expected directory layout:
@@ -15,16 +15,15 @@
 
 #![cfg(feature = "mock-weights")]
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Return the first candidate model directory that exists, or None.
-fn find_model_dir() -> Option<&'static Path> {
-    const CANDIDATES: &[&str] = &[
-        "C:/Projects/AI/qor-main/qor-rs/crates/qor-rag/model",
-        "D:/Burn-AI/qor-rag/model",
-    ];
-    CANDIDATES.iter().map(|s| Path::new(s)).find(|p| p.exists())
+/// Return the model directory from `INCORD_RAG_MODEL_DIR` if it exists, or None.
+fn find_model_dir() -> Option<PathBuf> {
+    std::env::var("INCORD_RAG_MODEL_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
 }
 
 #[tokio::test]
@@ -37,11 +36,11 @@ async fn embedding_returns_vector() {
         }
     };
 
-    use qora_server::engine::ModelEngine;
-    use qora_server::engine::embed::{EmbedRequest, EmbeddingEngine};
-    use qora_server::engines::rag::{QorEmbeddingEngine, QorRagBackend};
+    use incord_server::engine::ModelEngine;
+    use incord_server::engine::embed::{EmbedRequest, EmbeddingEngine};
+    use incord_server::engines::rag::{QorEmbeddingEngine, QorRagBackend};
 
-    let backend = match QorRagBackend::load(model_dir) {
+    let backend = match QorRagBackend::load(&model_dir) {
         Ok(b) => Arc::new(b),
         Err(e) => {
             eprintln!("[rag_smoke] SKIP: QorRagBackend::load failed: {e}");
@@ -110,11 +109,11 @@ async fn rerank_scores_and_sorts() {
         }
     };
 
-    use qora_server::engine::ModelEngine;
-    use qora_server::engine::rerank::{RerankEngine, RerankRequest};
-    use qora_server::engines::rag::{QorRagBackend, QorRerankEngine};
+    use incord_server::engine::ModelEngine;
+    use incord_server::engine::rerank::{RerankEngine, RerankRequest};
+    use incord_server::engines::rag::{QorRagBackend, QorRerankEngine};
 
-    let backend = match QorRagBackend::load(model_dir) {
+    let backend = match QorRagBackend::load(&model_dir) {
         Ok(b) => Arc::new(b),
         Err(e) => {
             eprintln!("[rag_smoke] SKIP: QorRagBackend::load failed: {e}");
@@ -186,10 +185,10 @@ async fn rerank_top_k_truncation() {
         }
     };
 
-    use qora_server::engine::rerank::{RerankEngine, RerankRequest};
-    use qora_server::engines::rag::{QorRagBackend, QorRerankEngine};
+    use incord_server::engine::rerank::{RerankEngine, RerankRequest};
+    use incord_server::engines::rag::{QorRagBackend, QorRerankEngine};
 
-    let backend = match QorRagBackend::load(model_dir) {
+    let backend = match QorRagBackend::load(&model_dir) {
         Ok(b) => Arc::new(b),
         Err(e) => {
             eprintln!("[rag_smoke] SKIP: QorRagBackend::load failed: {e}");

@@ -27,7 +27,7 @@ model-index:
     results: []
 ---
 
-# Incord-Mini-2B (QORA)
+# Incord-Mini-2B (Incord)
 
 Pure Rust multimodal inference engine and standalone server. No Python, no CUDA, no PyTorch, no external C++ ML frameworks. Single executable + quantized model weights = portable AI that runs locally on Windows, Linux, and macOS.
 
@@ -35,7 +35,7 @@ Pure Rust multimodal inference engine and standalone server. No Python, no CUDA,
 
 ## Directory Contents
 
-This folder (`D:\Burn-AI\Incord-Mini-2B\model`) is completely self-contained with everything needed to run text and multimodal inference:
+This `model` folder is completely self-contained with everything needed to run text and multimodal inference:
 
 | File | Size | Description |
 |------|------|-------------|
@@ -52,7 +52,7 @@ This folder (`D:\Burn-AI\Incord-Mini-2B\model`) is completely self-contained wit
 Open PowerShell or Command Prompt, navigate to this folder, and run `incord.exe`:
 
 ```powershell
-cd D:\Burn-AI\Incord-Mini-2B\model
+cd model
 
 # 1. Basic prompt (uses default prompt or pass your own)
 .\incord.exe --prompt "Explain the theory of relativity in simple terms."
@@ -104,7 +104,7 @@ A standalone HTTP API server (`incord-server.exe`, Release build ~14.5 MB) is pr
 The server reads configuration from `incord-server.toml` (located in the same directory) and requires two environment variables:
 
 ```powershell
-cd D:\Burn-AI\Incord-Mini-2B\model
+cd model
 
 # 1. Set environment variables (operator chosen)
 $env:INCORD_ADMIN_TOKEN   = "<OPERATOR_ADMIN_TOKEN>"

@@ -1,4 +1,4 @@
-//! Text generation for QORA-4B (hybrid DeltaNet + Full Attention architecture).
+//! Text generation for Incord-Mini-2B (hybrid DeltaNet + Full Attention architecture).
 
 use std::io::Write;
 use std::time::Instant;
@@ -7,7 +7,7 @@ use crate::gemv::{
     HybridCache, ModelWeights, forward_decode, forward_decode_no_logits, prefill,
     prefill_with_vision,
 };
-use crate::tokenizer::QoraTokenizer;
+use crate::tokenizer::IncordTokenizer;
 
 /// Generation parameters.
 pub struct GenerateParams {
@@ -132,7 +132,7 @@ pub fn is_stuck_in_loop(tokens: &[u32]) -> bool {
 
 fn decode_loop(
     weights: &ModelWeights,
-    tokenizer: &QoraTokenizer,
+    tokenizer: &IncordTokenizer,
     initial_logits: &mut [f32],
     cache: &mut HybridCache,
     params: &GenerateParams,
@@ -290,7 +290,7 @@ fn decode_loop(
 /// Generate text from a text-only prompt.
 pub fn generate(
     weights: &ModelWeights,
-    tokenizer: &QoraTokenizer,
+    tokenizer: &IncordTokenizer,
     prompt: &str,
     params: &GenerateParams,
 ) {
@@ -336,7 +336,7 @@ pub fn generate(
 /// Generate text from image + text prompt.
 pub fn generate_with_image(
     weights: &ModelWeights,
-    tokenizer: &QoraTokenizer,
+    tokenizer: &IncordTokenizer,
     prompt: &str,
     vision_embeds: &[f32],
     num_vision_tokens: usize,
@@ -390,7 +390,7 @@ pub fn generate_with_image(
 /// Generate text from video + text prompt.
 pub fn generate_with_video(
     weights: &ModelWeights,
-    tokenizer: &QoraTokenizer,
+    tokenizer: &IncordTokenizer,
     prompt: &str,
     vision_embeds: &[f32],
     num_vision_tokens: usize,

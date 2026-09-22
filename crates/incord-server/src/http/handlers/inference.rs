@@ -123,10 +123,10 @@ pub async fn openai_chat_completions(
     // `use_brain` is set — doing so triggered an extra ~70 s tool-loop hop
     // on the chat path even though brain context was already in the prompt.
     //
-    // Smart auto-routing. If the caller asked for `qora-auto`, inspect the
+    // Smart auto-routing. If the caller asked for `incord-auto`, inspect the
     // latest user message and resolve to a concrete chat model:
-    //   - greetings / chitchat → small (qora-llm-mini, ~0.8B)
-    //   - reasoning / code / long input → big (qora-llm, 4B)
+    //   - greetings / chitchat → small (incord-llm-mini, ~0.8B)
+    //   - reasoning / code / long input → big (incord-llm, 4B)
     // Bypassed for any explicit model id.
     if req.model == crate::router::AUTO_MODEL_ID {
         // Pull text from the latest user message (handle both Text + Parts shape).

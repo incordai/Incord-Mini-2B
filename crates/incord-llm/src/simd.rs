@@ -1,4 +1,4 @@
-//! AVX-512 SIMD kernels for QOR4B CPU inference.
+//! AVX-512 SIMD kernels for Incord CPU inference.
 //!
 //! Optimized GEMV for Q4 and F16 weights, and DeltaNet state updates.
 //! Falls back to scalar code on non-AVX-512 CPUs (dispatch in gemv.rs).

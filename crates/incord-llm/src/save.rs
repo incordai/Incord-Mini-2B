@@ -1,4 +1,4 @@
-//! Save/load QORA-4B ModelWeights to compact binary format (.qor4b).
+//! Save/load Incord-Mini-2B ModelWeights to compact binary format (.incord).
 //!
 //! File format:
 //!   Header: magic "QOR4" + version(u32) + format(u8: 0=F16, 1=Q4)
@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-use crate::config::{LayerType, Qor4bConfig};
+use crate::config::{LayerType, IncordConfig};
 use crate::gemv::*;
 
 const MAGIC: &[u8; 4] = b"QOR4";
@@ -377,7 +377,7 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
         });
     }
 
-    let config = Qor4bConfig {
+    let config = IncordConfig {
         vocab_size,
         hidden_size,
         num_layers,

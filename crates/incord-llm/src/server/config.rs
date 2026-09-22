@@ -80,8 +80,8 @@ mod tests {
 bind = "127.0.0.1:8080"
 
 [model]
-path = "/opt/qora/model.qor4b"
-tokenizer = "/opt/qora/tokenizer.json"
+path = "/opt/incord/model.incord"
+tokenizer = "/opt/incord/tokenizer.json"
 
 [scheduler]
 slot_count = 64
@@ -90,8 +90,8 @@ max_context = 8192
 request_timeout_secs = 90
 
 [auth]
-admin_token_env = "QORA_ADMIN_TOKEN"
-db_path = "/opt/qora/auth.db"
+admin_token_env = "INCORD_ADMIN_TOKEN"
+db_path = "/opt/incord/auth.db"
 
 [limits.default]
 rpm = 60

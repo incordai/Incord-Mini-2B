@@ -73,7 +73,7 @@ mod tests {
             request_id: "r1".into(),
             user_id: "u1".into(),
             key_id: "k1".into(),
-            model: "qora-4b".into(),
+            model: "incord-mini-2b".into(),
             input_tokens: 10,
             output_tokens: 20,
             started_at: 1,

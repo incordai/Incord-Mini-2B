@@ -433,7 +433,7 @@ pub async fn export_usage_csv_handler(
     }
 
     let ts = Utc::now().timestamp();
-    let filename = format!("qora-usage-{ts}.csv");
+    let filename = format!("incord-usage-{ts}.csv");
 
     Ok((
         [

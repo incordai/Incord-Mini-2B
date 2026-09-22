@@ -893,7 +893,7 @@ dependencies = [
 [[package]]
 name = "cortex"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-autodiff",
  "cortex-candle",
@@ -915,7 +915,7 @@ dependencies = [
 [[package]]
 name = "cortex-autodiff"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-backend",
  "cortex-std",
@@ -931,7 +931,7 @@ dependencies = [
 [[package]]
 name = "cortex-backend"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "bytemuck",
  "cortex-std",
@@ -949,7 +949,7 @@ dependencies = [
 [[package]]
 name = "cortex-candle"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "candle-core",
  "cortex-backend",
@@ -960,7 +960,7 @@ dependencies = [
 [[package]]
 name = "cortex-core"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "ahash",
  "bincode",
@@ -988,7 +988,7 @@ dependencies = [
 [[package]]
 name = "cortex-cpu"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-backend",
  "cortex-cubecl",
@@ -999,7 +999,7 @@ dependencies = [
 [[package]]
 name = "cortex-cubecl"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-backend",
  "cortex-cubecl-fusion",
@@ -1018,7 +1018,7 @@ dependencies = [
 [[package]]
 name = "cortex-cubecl-fusion"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-backend",
  "cortex-fusion",
@@ -1033,7 +1033,7 @@ dependencies = [
 [[package]]
 name = "cortex-cuda"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-backend",
  "cortex-cubecl",
@@ -1044,7 +1044,7 @@ dependencies = [
 [[package]]
 name = "cortex-derive"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "derive-new",
  "proc-macro2",
@@ -1055,7 +1055,7 @@ dependencies = [
 [[package]]
 name = "cortex-dispatch"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-autodiff",
  "cortex-backend",
@@ -1072,7 +1072,7 @@ dependencies = [
 [[package]]
 name = "cortex-fusion"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-backend",
  "cortex-ir",
@@ -1087,7 +1087,7 @@ dependencies = [
 [[package]]
 name = "cortex-ir"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-backend",
  "hashbrown 0.16.1",
@@ -1097,7 +1097,7 @@ dependencies = [
 [[package]]
 name = "cortex-ndarray"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "atomic_float",
  "const-random",
@@ -1119,7 +1119,7 @@ dependencies = [
 [[package]]
 name = "cortex-nn"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-core",
  "num-traits",
@@ -1128,7 +1128,7 @@ dependencies = [
 [[package]]
 name = "cortex-optim"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-core",
  "derive-new",
@@ -1141,7 +1141,7 @@ dependencies = [
 [[package]]
 name = "cortex-rocm"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-backend",
  "cortex-cubecl",
@@ -1152,7 +1152,7 @@ dependencies = [
 [[package]]
 name = "cortex-router"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-backend",
  "cortex-ir",
@@ -1165,7 +1165,7 @@ dependencies = [
 [[package]]
 name = "cortex-std"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "bytemuck",
  "bytes",
@@ -1181,7 +1181,7 @@ dependencies = [
 [[package]]
 name = "cortex-store"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "byteorder",
  "bytes",
@@ -1199,7 +1199,7 @@ dependencies = [
 [[package]]
 name = "cortex-tch"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cc",
  "cortex-backend",
@@ -1212,7 +1212,7 @@ dependencies = [
 [[package]]
 name = "cortex-tensor"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "colored",
  "cortex-backend",
@@ -1229,7 +1229,7 @@ dependencies = [
 [[package]]
 name = "cortex-wgpu"
 version = "0.21.0-pre.1"
-source = "git+https://github.com/qora-protocol/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
+source = "git+https://github.com/incordlabs/cortex#c968e437e74c2a54975efd62547458083d4e26c6"
 dependencies = [
  "cortex-backend",
  "cortex-cubecl",

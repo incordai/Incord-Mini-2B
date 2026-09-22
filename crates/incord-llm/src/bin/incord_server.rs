@@ -29,8 +29,8 @@ async fn main() -> anyhow::Result<()> {
         )
     })?;
     let server_secret = std::env::var("INCORD_SERVER_SECRET")
-        .or_else(|_| std::env::var("QORA_SERVER_SECRET"))
-        .context("INCORD_SERVER_SECRET (or QORA_SERVER_SECRET) env var must be set (used for HMAC key index)")?
+        .or_else(|_| std::env::var("INCORD_SERVER_SECRET"))
+        .context("INCORD_SERVER_SECRET (or INCORD_SERVER_SECRET) env var must be set (used for HMAC key index)")?
         .into_bytes();
 
     let auth = Arc::new(incord::server::auth::middleware::AuthState {
@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("loading model from {}", config.model.path.display()))?,
     );
     let tokenizer = Arc::new(
-        incord::tokenizer::QoraTokenizer::from_file(&config.model.tokenizer)
+        incord::tokenizer::IncordTokenizer::from_file(&config.model.tokenizer)
             .map_err(|e| anyhow::anyhow!("{}", e))
             .with_context(|| {
                 format!(

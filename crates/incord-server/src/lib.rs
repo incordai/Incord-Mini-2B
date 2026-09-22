@@ -1,4 +1,4 @@
-//! qora-server: HTTP API + scheduler + multi-model registry + auth.
+//! incord-server: HTTP API + scheduler + multi-model registry + auth.
 
 pub mod api;
 pub mod auth;

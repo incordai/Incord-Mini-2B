@@ -4,7 +4,7 @@
 
 **Goal:** Wire chat completion requests through to the *existing* `forward_decode` function — one slot at a time, but with `Arc<ModelWeights>` shared across requests so multiple requests can run in parallel-independent mode (each thread runs a full forward pass for its own user). End state: working `/v1/chat/completions` endpoint with streaming SSE, against the real model. No batching yet — each user gets a dedicated worker thread. This is the minimum-viable inference integration.
 
-**Prerequisites:** M1 + M2 merged. Branch `feature/qora-server-m3-session` from `feature/qora-server`.
+**Prerequisites:** M1 + M2 merged. Branch `feature/incord-server-m3-session` from `feature/incord-server`.
 
 **Architecture:** A `Session` struct holds one user's `HybridCache`, tokens, sampler, SSE channel. A `Scheduler` owns `Arc<ModelWeights>` and a bounded queue. When a request arrives, build a Session, push to queue. A pool of N worker threads pop sessions from the queue, run prefill + decode loops calling existing `forward_decode`, send tokens via SSE.
 
@@ -41,10 +41,10 @@ Append to `src/gemv.rs` (at the end of the file):
 pub mod mock {
     //! Minimal stub model weights for tests. Tiny dimensions, deterministic outputs.
     use super::*;
-    use crate::config::{Qor4bConfig, LayerType};
+    use crate::config::{IncordConfig, LayerType};
     use half::f16;
 
-    pub fn tiny_config() -> Qor4bConfig {
+    pub fn tiny_config() -> IncordConfig {
         // Real production config: hidden=2560, vocab=248320, 32 layers, deltanet_head_dim=128.
         // Tiny test config below uses the same architecture but small-power-of-2 dims to keep
         // unit tests fast (< 50 ms per call) while exercising every code path.
@@ -54,7 +54,7 @@ pub mod mock {
         layer_types.push(LayerType::DeltaNet);
         layer_types.push(LayerType::FullAttn);
 
-        Qor4bConfig {
+        IncordConfig {
             vocab_size: 256,
             hidden_size: 64,
             num_layers: 4,
@@ -88,7 +88,7 @@ pub mod mock {
         // F16Weights for every projection at the shapes implied by tiny_config().
         //
         // Production ModelWeights has fields (verify by reading src/save.rs::ModelWeights):
-        //   - config: Qor4bConfig
+        //   - config: IncordConfig
         //   - hidden: usize
         //   - vocab: usize
         //   - format_name: String
@@ -121,7 +121,7 @@ pub mod mock {
 }
 ```
 
-> **Implementation note**: the exact bodies depend on the production `Qor4bConfig` and `ModelWeights` shapes. The engineer reads those structs in `src/config.rs` and `src/save.rs::ModelWeights`, then writes the smallest-possible default that the existing `forward_decode` accepts without panicking. Acceptance check: `let w = mock::tiny_weights(); let mut cache = HybridCache::new(&w.config); let _ = forward_decode(&w, 0, &mut cache);` runs without panicking.
+> **Implementation note**: the exact bodies depend on the production `IncordConfig` and `ModelWeights` shapes. The engineer reads those structs in `src/config.rs` and `src/save.rs::ModelWeights`, then writes the smallest-possible default that the existing `forward_decode` accepts without panicking. Acceptance check: `let w = mock::tiny_weights(); let mut cache = HybridCache::new(&w.config); let _ = forward_decode(&w, 0, &mut cache);` runs without panicking.
 
 - [ ] **Step 3: Build with the feature**
 
@@ -444,14 +444,14 @@ Create `src/server/scheduler/worker.rs`:
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use crate::gemv::{ModelWeights, prefill, forward_decode};
-use crate::tokenizer::QoraTokenizer;
+use crate::tokenizer::IncordTokenizer;
 use crate::server::scheduler::queue::{PendingRequest, Queue};
 use crate::server::scheduler::{Event, FinishReason};
 
 pub struct Worker {
     pub id: usize,
     pub weights: Arc<ModelWeights>,
-    pub tokenizer: Arc<QoraTokenizer>,
+    pub tokenizer: Arc<IncordTokenizer>,
     pub queue: Arc<Queue>,
 }
 
@@ -594,7 +594,7 @@ use crate::server::usage::tracker::{UsageRecord, UsageTracker};
 pub struct ChatState {
     pub queue: Arc<Queue>,
     pub weights: Arc<crate::gemv::ModelWeights>,
-    pub tokenizer: Arc<crate::tokenizer::QoraTokenizer>,
+    pub tokenizer: Arc<crate::tokenizer::IncordTokenizer>,
     pub usage: UsageTracker,
 }
 
@@ -603,7 +603,7 @@ pub async fn chat_completions(
     Extension(key): Extension<ApiKey>,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, ServerError> {
-    if req.model != "qora-4b" {
+    if req.model != "incord-mini-2b" {
         return Err(ServerError::BadRequest(format!("unknown model: {}", req.model)));
     }
     let prompt_text = render_messages(&req.messages)?;
@@ -817,30 +817,30 @@ git commit -m "feat(http): /v1/chat/completions handler with stream and non-stre
 ## Task 6: Wire workers and queue into the binary
 
 **Files:**
-- Modify: `src/bin/qora_server.rs`
+- Modify: `src/bin/incord_server.rs`
 - Modify: `tests/integration/common.rs`
 
 - [ ] **Step 1: Update binary main**
 
-In `src/bin/qora_server.rs` add after auth construction:
+In `src/bin/incord_server.rs` add after auth construction:
 
 ```rust
-let weights = Arc::new(qor4b::save::load_model(&config.model.path)?);
-let tokenizer = Arc::new(qor4b::tokenizer::QoraTokenizer::from_file(&config.model.tokenizer)?);
+let weights = Arc::new(incord::save::load_model(&config.model.path)?);
+let tokenizer = Arc::new(incord::tokenizer::IncordTokenizer::from_file(&config.model.tokenizer)?);
 
-let queue = qor4b::server::scheduler::queue::Queue::new(config.scheduler.max_queue);
+let queue = incord::server::scheduler::queue::Queue::new(config.scheduler.max_queue);
 
 // Spawn N worker threads (start with 1 — Phase 1 is single-slot serial-parallel)
 let num_workers = num_cpus::get().min(8); // Conservative: kernel work is rayon-parallelized internally
 for id in 0..num_workers {
-    qor4b::server::scheduler::worker::Worker {
+    incord::server::scheduler::worker::Worker {
         id, weights: weights.clone(), tokenizer: tokenizer.clone(), queue: queue.clone(),
     }.spawn();
 }
 
-let usage = qor4b::server::usage::tracker::UsageTracker::new(pool.clone());
+let usage = incord::server::usage::tracker::UsageTracker::new(pool.clone());
 
-let chat_state = Arc::new(qor4b::server::http::handlers::chat::ChatState {
+let chat_state = Arc::new(incord::server::http::handlers::chat::ChatState {
     queue, weights: weights.clone(), tokenizer: tokenizer.clone(), usage,
 });
 
@@ -856,7 +856,7 @@ In `tests/integration/common.rs`, add fixture-weights path: under feature `mock-
 ```rust
 #[cfg(feature = "mock-weights")]
 pub async fn start_with_mock_model() -> TestServer {
-    use qor4b::gemv::mock::tiny_weights;
+    use incord::gemv::mock::tiny_weights;
     let dir = TempDir::new().unwrap();
     let pool = open_pool(&dir.path().join("test.db")).await.unwrap();
     let admin_token = "test-admin".to_string();
@@ -867,13 +867,13 @@ pub async fn start_with_mock_model() -> TestServer {
     // tokenizer for tests: a small fake or the real one if tokenizer.json fits in tests/fixtures
     let tokenizer = Arc::new(/* mock or real */);
 
-    let queue = qor4b::server::scheduler::queue::Queue::new(100);
-    qor4b::server::scheduler::worker::Worker {
+    let queue = incord::server::scheduler::queue::Queue::new(100);
+    incord::server::scheduler::worker::Worker {
         id: 0, weights: weights.clone(), tokenizer: tokenizer.clone(), queue: queue.clone(),
     }.spawn();
 
-    let usage = qor4b::server::usage::tracker::UsageTracker::new(pool.clone());
-    let chat_state = Arc::new(qor4b::server::http::handlers::chat::ChatState {
+    let usage = incord::server::usage::tracker::UsageTracker::new(pool.clone());
+    let chat_state = Arc::new(incord::server::http::handlers::chat::ChatState {
         queue, weights, tokenizer, usage,
     });
 
@@ -889,8 +889,8 @@ pub async fn start_with_mock_model() -> TestServer {
 - [ ] **Step 3: Build full binary**
 
 ```bash
-cargo build --bin qora-server --release
-cargo build --bin qora-server --features mock-weights
+cargo build --bin incord-server --release
+cargo build --bin incord-server --features mock-weights
 ```
 
 Expected: clean build.
@@ -898,7 +898,7 @@ Expected: clean build.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add src/bin/qora_server.rs tests/integration/common.rs Cargo.toml
+git add src/bin/incord_server.rs tests/integration/common.rs Cargo.toml
 git commit -m "feat(server): wire workers, queue, and chat handler into binary"
 ```
 
@@ -947,7 +947,7 @@ async fn non_streaming_returns_completion() {
         .post(server.url("/v1/chat/completions"))
         .bearer_auth(&key)
         .json(&json!({
-            "model": "qora-4b",
+            "model": "incord-mini-2b",
             "messages": [{"role":"user","content":"hi"}],
             "max_tokens": 4,
             "temperature": 0.0
@@ -969,7 +969,7 @@ async fn streaming_returns_sse_chunks() {
         .post(server.url("/v1/chat/completions"))
         .bearer_auth(&key)
         .json(&json!({
-            "model": "qora-4b",
+            "model": "incord-mini-2b",
             "messages": [{"role":"user","content":"hi"}],
             "stream": true,
             "max_tokens": 4
@@ -999,7 +999,7 @@ async fn missing_auth_returns_401() {
     let server = start_with_mock_model().await;
     let resp = reqwest::Client::new()
         .post(server.url("/v1/chat/completions"))
-        .json(&json!({"model":"qora-4b","messages":[]}))
+        .json(&json!({"model":"incord-mini-2b","messages":[]}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 401);
 }
@@ -1039,8 +1039,8 @@ Expected: green.
 - [ ] **Step 2: Manual smoke test against the real model**
 
 ```bash
-cargo build --bin qora-server --release
-QORA_ADMIN_TOKEN=admin1 ./target/release/qora-server /tmp/qora-test.toml &
+cargo build --bin incord-server --release
+INCORD_ADMIN_TOKEN=admin1 ./target/release/incord-server /tmp/incord-test.toml &
 PID=$!
 sleep 3
 ADMIN_RESP=$(curl -sf -H "Authorization: Bearer admin1" \
@@ -1049,7 +1049,7 @@ ADMIN_RESP=$(curl -sf -H "Authorization: Bearer admin1" \
 KEY=$(echo "$ADMIN_RESP" | jq -r .raw_key)
 curl -sf -H "Authorization: Bearer $KEY" \
   -X POST http://127.0.0.1:18080/v1/chat/completions \
-  -d '{"model":"qora-4b","messages":[{"role":"user","content":"hi"}],"max_tokens":20}'
+  -d '{"model":"incord-mini-2b","messages":[{"role":"user","content":"hi"}],"max_tokens":20}'
 kill $PID
 ```
 
@@ -1068,9 +1068,9 @@ git commit --allow-empty -m "milestone: M3 single-slot inference complete
 
 Acceptance: cargo test --test chat_completions --features mock-weights — 4/4 pass"
 
-git checkout feature/qora-server
-git merge --no-ff feature/qora-server-m3-session
-git checkout feature/qora-server-m3-session
+git checkout feature/incord-server
+git merge --no-ff feature/incord-server-m3-session
+git checkout feature/incord-server-m3-session
 ```
 
 M3 complete. Proceed to M4 (batched kernels — the heavy lift).

@@ -1,6 +1,6 @@
 //! EmbeddingEngine + RerankEngine wrapping qor-rag's QorRag.
 //!
-//! Integration approach: path dependency on C:/Projects/AI/qor-main/qor-rs/crates/qor-rag.
+//! Integration approach: Cargo dependency on the qor-rag crate (separate repo).
 //!
 //! # API notes (from qor-rag src/lib.rs)
 //!

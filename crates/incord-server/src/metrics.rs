@@ -1,4 +1,4 @@
-//! Prometheus metrics for qora-server.
+//! Prometheus metrics for incord-server.
 
 use once_cell::sync::Lazy;
 use prometheus::{
@@ -7,7 +7,7 @@ use prometheus::{
 
 pub static REQUESTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
-        "qora_server_requests_total",
+        "incord_server_requests_total",
         "Total HTTP requests by endpoint and status",
         &["endpoint", "status"]
     )
@@ -16,7 +16,7 @@ pub static REQUESTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
 
 pub static REQUEST_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
-        "qora_server_request_duration_seconds",
+        "incord_server_request_duration_seconds",
         "Request duration in seconds",
         &["endpoint"],
         vec![0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]
@@ -26,7 +26,7 @@ pub static REQUEST_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
 
 pub static ERRORS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
-        "qora_server_errors_total",
+        "incord_server_errors_total",
         "Total errors by type",
         &["error_type"]
     )

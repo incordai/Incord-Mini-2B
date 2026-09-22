@@ -1,13 +1,13 @@
 use crate::gemv::{ModelWeights, forward_decode, prefill};
 use crate::server::scheduler::queue::{PendingRequest, Queue};
 use crate::server::scheduler::{Event, FinishReason};
-use crate::tokenizer::QoraTokenizer;
+use crate::tokenizer::IncordTokenizer;
 use std::sync::Arc;
 
 pub struct Worker {
     pub id: usize,
     pub weights: Arc<ModelWeights>,
-    pub tokenizer: Arc<QoraTokenizer>,
+    pub tokenizer: Arc<IncordTokenizer>,
     pub queue: Arc<Queue>,
 }
 
@@ -40,7 +40,7 @@ impl Worker {
             session.generated_tokens.push(token);
 
             // Decode token to text for SSE delta.
-            // QoraTokenizer::decode(&[u32]) -> String (returns String directly, no Result).
+            // IncordTokenizer::decode(&[u32]) -> String (returns String directly, no Result).
             let text = self.tokenizer.decode(&[token]);
 
             // Send token event. If channel closed (client gone), stop.

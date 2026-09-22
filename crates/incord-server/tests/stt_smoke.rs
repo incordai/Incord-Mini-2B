@@ -1,20 +1,24 @@
-//! Smoke test for STT. Requires real qora-stt-small model directory.
-//! Skipped when not present.
+//! Smoke test for STT. Requires a real STT model directory, given by
+//! `INCORD_STT_MODEL_DIR`. Skipped when unset or not present.
 
 #![cfg(feature = "mock-weights")]
 
 #[tokio::test]
 async fn stt_transcribes_short_audio() {
-    let stt_model_dir = std::path::PathBuf::from("D:/Burn-AI/QORA-STT-Small/model");
+    let Ok(dir) = std::env::var("INCORD_STT_MODEL_DIR") else {
+        eprintln!("skipping: INCORD_STT_MODEL_DIR not set");
+        return;
+    };
+    let stt_model_dir = std::path::PathBuf::from(dir);
     if !stt_model_dir.exists() {
         eprintln!("skipping: STT model not at {}", stt_model_dir.display());
         return;
     }
 
-    use qora_server::engine::stt::{SttEngine, SttRequest};
-    use qora_server::engines::stt::QoraSttEngine;
+    use incord_server::engine::stt::{SttEngine, SttRequest};
+    use incord_server::engines::stt::IncordSttEngine;
 
-    let engine = match QoraSttEngine::load("test-stt", stt_model_dir, "Test STT") {
+    let engine = match IncordSttEngine::load("test-stt", stt_model_dir, "Test STT") {
         Ok(e) => e,
         Err(err) => {
             eprintln!("skipping: STT engine load failed: {err}");
@@ -22,14 +26,14 @@ async fn stt_transcribes_short_audio() {
         }
     };
 
-    // Use a small WAV from a known fixture if available, else skip
-    let fixture_paths = [
-        std::path::PathBuf::from("D:/Burn-AI/QORA-TTS/model/1.7B/output.wav"),
-        std::path::PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/sample.wav"
-        )),
-    ];
+    // Use a small WAV from INCORD_STT_TEST_WAV or the repo fixture, else skip
+    let mut fixture_paths = vec![std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.wav"
+    ))];
+    if let Ok(wav) = std::env::var("INCORD_STT_TEST_WAV") {
+        fixture_paths.insert(0, std::path::PathBuf::from(wav));
+    }
     let audio_path = fixture_paths.iter().find(|p| p.exists());
     let Some(audio_path) = audio_path else {
         eprintln!("skipping: no audio fixture available");
