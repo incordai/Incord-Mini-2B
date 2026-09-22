@@ -1,20 +1,31 @@
 //! CLI tool to convert Hugging Face safetensors models to the Incord binary format.
 //!
-//! Usage: incord-convert --input <safetensors_dir> --output model.incord [--format q8|q4|f16]
+//! Usage: incord-convert --input <safetensors_dir> --output model.incord
+//!        [--format q8|q4|f16] [--rounding mse|rtn]
+//!
+//! `--rounding` picks how Q4/Q8 group scales are chosen (see `incord::quant`):
+//! `mse` (default) minimises each group's error, `rtn` reproduces the
+//! original round-to-nearest output byte for byte.
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use half::f16;
+use incord::quant::Rounding;
 use memmap2::Mmap;
+
+/// Scale rounding for every quantized tensor, set once from the command line.
+static ROUNDING: OnceLock<Rounding> = OnceLock::new();
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut input_dir = PathBuf::from(".");
     let mut output_path = PathBuf::from("model_q8.incord");
     let mut format = "q8".to_string();
+    let mut rounding = Rounding::Mse;
 
     let mut i = 1;
     while i < args.len() {
@@ -37,10 +48,20 @@ fn main() {
                     i += 1;
                 }
             }
+            "--rounding" => {
+                if i + 1 < args.len() {
+                    rounding = args[i + 1].parse().unwrap_or_else(|e| {
+                        eprintln!("ERROR: {e}");
+                        std::process::exit(1);
+                    });
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
     }
+    ROUNDING.set(rounding).expect("rounding set once");
 
     let format_id: u8 = if format == "f16" {
         0
@@ -53,6 +74,7 @@ fn main() {
     eprintln!("  Input:  {}", input_dir.display());
     eprintln!("  Output: {}", output_path.display());
     eprintln!("  Format: {} (id={})", format, format_id);
+    eprintln!("  Rounding: {rounding:?}");
 
     // Load safetensors index
     let index_path = input_dir.join("model.safetensors.index.json");
@@ -689,81 +711,23 @@ fn write_tensor_f16(w: &mut impl Write, tensors: &HashMap<String, TensorData>, n
 }
 
 // ============================================================
-// Q4 quantization
+// Quantization (implemented in incord::quant)
 // ============================================================
+
+fn rounding() -> Rounding {
+    *ROUNDING.get().expect("rounding is set in main")
+}
 
 /// Quantize f32 data to Q4 symmetric (group_size=32).
 /// Returns (packed_bytes, scales).
 fn quantize_q4(data: &[f32], k: usize, n: usize) -> (Vec<u8>, Vec<f16>) {
-    let group_size = 32;
-    assert!(
-        n.is_multiple_of(group_size),
-        "n={n} not divisible by group_size={group_size}"
-    );
-    let groups_per_row = n / group_size;
-    let packed_per_group = group_size / 2;
-
-    let mut packed = Vec::with_capacity(k * groups_per_row * packed_per_group);
-    let mut scales = Vec::with_capacity(k * groups_per_row);
-
-    for ki in 0..k {
-        for g in 0..groups_per_row {
-            let offset = ki * n + g * group_size;
-            let group = &data[offset..offset + group_size];
-
-            // Find absmax
-            let absmax = group.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-            let scale = if absmax > 0.0 { absmax / 7.0 } else { 0.0 };
-            scales.push(f16::from_f32(scale));
-
-            // Quantize and pack
-            let inv_scale = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-            for j in (0..group_size).step_by(2) {
-                let q0 = ((group[j] * inv_scale).round() as i32).clamp(-8, 7) + 8;
-                let q1 = ((group[j + 1] * inv_scale).round() as i32).clamp(-8, 7) + 8;
-                packed.push((q0 as u8) | ((q1 as u8) << 4));
-            }
-        }
-    }
-
-    (packed, scales)
+    incord::quant::quantize_q4(data, k, n, rounding())
 }
-
-// ============================================================
-// Q8 quantization
-// ============================================================
 
 /// Quantize f32 data to Q8 symmetric (group_size=32).
 /// Returns (Vec<i8>, Vec<f16>).
 fn quantize_q8(data: &[f32], k: usize, n: usize) -> (Vec<i8>, Vec<f16>) {
-    let group_size = 32;
-    assert!(
-        n.is_multiple_of(group_size),
-        "n={n} not divisible by group_size={group_size}"
-    );
-    let groups_per_row = n / group_size;
-
-    let mut q8_data = Vec::with_capacity(k * n);
-    let mut scales = Vec::with_capacity(k * groups_per_row);
-
-    for ki in 0..k {
-        for g in 0..groups_per_row {
-            let offset = ki * n + g * group_size;
-            let group = &data[offset..offset + group_size];
-
-            let absmax = group.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-            let scale = if absmax > 0.0 { absmax / 127.0 } else { 0.0 };
-            scales.push(f16::from_f32(scale));
-
-            let inv_scale = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-            for &val in group {
-                let q = ((val * inv_scale).round() as i32).clamp(-128, 127) as i8;
-                q8_data.push(q);
-            }
-        }
-    }
-
-    (q8_data, scales)
+    incord::quant::quantize_q8(data, k, n, rounding())
 }
 
 // ============================================================

@@ -23,3 +23,7 @@ Cargo.lock.backup
 .incord/
 .claude/
 .playwright-mcp/
+
+# Evaluation outputs (converted models, reference files, results)
+/eval-data/
+/target-*/

@@ -76,6 +76,40 @@ impl Weight {
             Weight::Q8(w) => w.data.len() + w.scales.len() * 2,
         }
     }
+
+    /// Write row `i`, columns `c0 .. c0 + dst.len()`, as f32. For quantized
+    /// formats `c0` and `dst.len()` must be multiples of the 32-value group
+    /// (quant groups run along `n`; element `(i, c)` is value `i*n + c`).
+    pub fn row_segment_f32(&self, i: usize, c0: usize, dst: &mut [f32]) {
+        match self {
+            Weight::F16(w) => {
+                use half::slice::HalfFloatSliceExt;
+                let o = i * w.n + c0;
+                w.data[o..o + dst.len()].convert_to_f32_slice(dst);
+            }
+            Weight::Q4(w) => {
+                let first = (i * w.n + c0) / Q4_GROUP_SIZE;
+                for (gd, g) in dst.chunks_mut(Q4_GROUP_SIZE).zip(first..) {
+                    let s = w.scales[g].to_f32();
+                    let bytes = &w.packed[g * Q4_GROUP_SIZE / 2..(g + 1) * Q4_GROUP_SIZE / 2];
+                    for (pair, &b) in gd.chunks_mut(2).zip(bytes) {
+                        pair[0] = ((b & 0x0F) as i32 - 8) as f32 * s;
+                        pair[1] = ((b >> 4) as i32 - 8) as f32 * s;
+                    }
+                }
+            }
+            Weight::Q8(w) => {
+                let first = (i * w.n + c0) / Q8_GROUP_SIZE;
+                for (gd, g) in dst.chunks_mut(Q8_GROUP_SIZE).zip(first..) {
+                    let s = w.scales[g].to_f32();
+                    let q = &w.data[g * Q8_GROUP_SIZE..(g + 1) * Q8_GROUP_SIZE];
+                    for (d, &v) in gd.iter_mut().zip(q) {
+                        *d = v as f32 * s;
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ============================================================
@@ -337,6 +371,9 @@ pub fn gemv(input: &[f32], weight: &Weight) -> Vec<f32> {
 /// GEMM: [seq_len, k] @ [k, n] -> [seq_len, n].
 #[inline]
 pub fn gemm(x: &[f32], seq_len: usize, weight: &Weight) -> Vec<f32> {
+    if seq_len >= GEMM_TILED_MIN_TOKENS {
+        return gemm_tiled(x, seq_len, weight);
+    }
     match weight {
         Weight::F16(w) => gemm_f16(x, seq_len, w),
         Weight::Q4(w) => gemm_q4(x, seq_len, w),
@@ -495,6 +532,60 @@ fn gemv_f16(input: &[f32], weight: &F16Weight) -> Vec<f32> {
         }
     }
     output
+}
+
+// ============================================================
+// Token-tiled GEMM (prefill)
+// ============================================================
+
+/// Prompts at least this long use [`gemm_tiled`]; shorter batches (e.g.
+/// multi-slot decode) keep the per-token path, which parallelises better
+/// when there are few tokens.
+const GEMM_TILED_MIN_TOKENS: usize = 16;
+/// Tokens per tile: each weight row segment is dequantized once per tile.
+const GEMM_TILE_TOKENS: usize = 32;
+/// Output columns per tile (multiple of the 32-value quant group).
+const GEMM_TILE_COLS: usize = 128;
+
+/// `out[t, j] = Σ_i x[t, i] · W[i, j]` for `x: [seq_len, k]`, `W: [k, n]`.
+///
+/// The work is split into (token tile × column tile) blocks; within a block
+/// each weight row segment is dequantized once and applied to every token of
+/// the tile, so the weights are streamed `seq_len / GEMM_TILE_TOKENS` times
+/// instead of once per token.
+fn gemm_tiled(x: &[f32], seq_len: usize, weight: &Weight) -> Vec<f32> {
+    let (k, n) = (weight.k(), weight.n());
+    let t_tiles = seq_len.div_ceil(GEMM_TILE_TOKENS);
+    let c_tiles = n.div_ceil(GEMM_TILE_COLS);
+    let blocks: Vec<(usize, usize, usize, Vec<f32>)> = (0..t_tiles * c_tiles)
+        .into_par_iter()
+        .map(|b| {
+            let t0 = (b / c_tiles) * GEMM_TILE_TOKENS;
+            let c0 = (b % c_tiles) * GEMM_TILE_COLS;
+            let nt = (seq_len - t0).min(GEMM_TILE_TOKENS);
+            let nc = (n - c0).min(GEMM_TILE_COLS);
+            let mut acc = vec![0.0f32; nt * nc];
+            let mut wrow = vec![0.0f32; nc];
+            for i in 0..k {
+                weight.row_segment_f32(i, c0, &mut wrow);
+                for t in 0..nt {
+                    let xv = x[(t0 + t) * k + i];
+                    for (a, &w) in acc[t * nc..(t + 1) * nc].iter_mut().zip(&wrow) {
+                        *a += xv * w;
+                    }
+                }
+            }
+            (t0, c0, nc, acc)
+        })
+        .collect();
+    let mut out = vec![0.0f32; seq_len * n];
+    for (t0, c0, nc, acc) in blocks {
+        for (t, row) in acc.chunks(nc).enumerate() {
+            let o = (t0 + t) * n + c0;
+            out[o..o + nc].copy_from_slice(row);
+        }
+    }
+    out
 }
 
 #[inline]
@@ -1066,6 +1157,56 @@ fn softmax_raw(scores: &mut [f32]) {
 }
 
 /// Parallel lm_head.
+/// Logits for several positions at once: `rows` is `[n_rows, hidden]`, the
+/// head weight is `[vocab, hidden]` (same layout `lm_head_parallel` reads).
+/// Returns `[n_rows, vocab]`. Each vocab row is dequantized once and dotted
+/// with every position, instead of once per position.
+pub fn lm_head_batch(rows: &[f32], n_rows: usize, weight: &Weight) -> Vec<f32> {
+    const VOCAB_CHUNK: usize = 256;
+    let (vocab, hidden) = (weight.k(), weight.n());
+    assert_eq!(rows.len(), n_rows * hidden);
+    let chunks: Vec<Vec<f32>> = (0..vocab.div_ceil(VOCAB_CHUNK))
+        .into_par_iter()
+        .map(|c| {
+            let v0 = c * VOCAB_CHUNK;
+            let nv = (vocab - v0).min(VOCAB_CHUNK);
+            let mut out = vec![0.0f32; n_rows * nv];
+            let mut w = vec![0.0f32; hidden];
+            for vi in 0..nv {
+                weight.row_segment_f32(v0 + vi, 0, &mut w);
+                for t in 0..n_rows {
+                    out[t * nv + vi] = dot_lanes(&w, &rows[t * hidden..(t + 1) * hidden]);
+                }
+            }
+            out
+        })
+        .collect();
+    let mut logits = vec![0.0f32; n_rows * vocab];
+    for (c, out) in chunks.iter().enumerate() {
+        let v0 = c * VOCAB_CHUNK;
+        let nv = out.len() / n_rows.max(1);
+        for t in 0..n_rows {
+            logits[t * vocab + v0..t * vocab + v0 + nv].copy_from_slice(&out[t * nv..(t + 1) * nv]);
+        }
+    }
+    logits
+}
+
+/// Dot product with 16 independent accumulators so the compiler vectorizes
+/// it (a single running sum forces sequential float adds).
+fn dot_lanes(a: &[f32], b: &[f32]) -> f32 {
+    const L: usize = 16;
+    let mut acc = [0.0f32; L];
+    let (ca, cb) = (a.chunks_exact(L), b.chunks_exact(L));
+    let tail: f32 = ca.remainder().iter().zip(cb.remainder()).map(|(x, y)| x * y).sum();
+    for (xa, xb) in ca.zip(cb) {
+        for l in 0..L {
+            acc[l] += xa[l] * xb[l];
+        }
+    }
+    acc.iter().sum::<f32>() + tail
+}
+
 pub fn lm_head_parallel(input: &[f32], embed: &Weight, vocab: usize, hidden: usize) -> Vec<f32> {
     match embed {
         Weight::F16(w) => {
@@ -1853,6 +1994,36 @@ fn prefill_deltanet_layer(
 /// Prefill all tokens, return logits for last token.
 pub fn prefill(weights: &ModelWeights, token_ids: &[u32], cache: &mut HybridCache) -> Vec<f32> {
     let hidden = weights.hidden;
+    let seq_len = token_ids.len();
+    let x = prefill_layers(weights, token_ids, cache);
+
+    // Final norm (last token only)
+    let last = &x[(seq_len - 1) * hidden..seq_len * hidden];
+    let normed = rms_norm(last, &weights.final_norm);
+    lm_head_parallel(&normed, &weights.lm_head, weights.vocab, hidden)
+}
+
+/// Prefill returning the final-normed hidden state of EVERY position,
+/// `[seq_len, hidden]`. Feed a row to `lm_head_parallel` for that position's
+/// logits. Used by the quality evaluator, which scores every position.
+pub fn prefill_hidden_all(
+    weights: &ModelWeights,
+    token_ids: &[u32],
+    cache: &mut HybridCache,
+) -> Vec<f32> {
+    let hidden = weights.hidden;
+    let mut x = prefill_layers(weights, token_ids, cache);
+    for row in x.chunks_mut(hidden) {
+        let normed = rms_norm(row, &weights.final_norm);
+        row.copy_from_slice(&normed);
+    }
+    x
+}
+
+/// Embedding + every layer over the whole prompt. Returns the residual stream
+/// `[seq_len, hidden]` before the final norm.
+fn prefill_layers(weights: &ModelWeights, token_ids: &[u32], cache: &mut HybridCache) -> Vec<f32> {
+    let hidden = weights.hidden;
     let config = &weights.config;
     let seq_len = token_ids.len();
 
@@ -1885,11 +2056,7 @@ pub fn prefill(weights: &ModelWeights, token_ids: &[u32], cache: &mut HybridCach
         }
     }
     eprint!("\r                              \r");
-
-    // Final norm (last token only)
-    let last = &x[(seq_len - 1) * hidden..seq_len * hidden];
-    let normed = rms_norm(last, &weights.final_norm);
-    lm_head_parallel(&normed, &weights.lm_head, weights.vocab, hidden)
+    x
 }
 
 /// Prefill with vision embeddings injected at IMAGE_PAD positions.
@@ -2389,5 +2556,92 @@ pub mod mock {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod gemm_tiled_tests {
+    use super::*;
+    use crate::quant::{Rounding, quantize_q4, quantize_q8};
+
+    fn data(len: usize, seed: u32) -> Vec<f32> {
+        (0..len)
+            .map(|i| (((i as u32).wrapping_mul(2_654_435_761) ^ seed) % 2001) as f32 / 1000.0 - 1.0)
+            .collect()
+    }
+
+    /// Tiled GEMM must equal running the single-token GEMV on every row.
+    fn check(weight: &Weight) {
+        let (k, n) = (weight.k(), weight.n());
+        let seq = 37; // > GEMM_TILED_MIN_TOKENS, not a multiple of the tile
+        assert!(seq >= GEMM_TILED_MIN_TOKENS);
+        let x = data(seq * k, 7);
+        let tiled = gemm(&x, seq, weight);
+        for t in 0..seq {
+            let row = gemv(&x[t * k..(t + 1) * k], weight);
+            for j in 0..n {
+                let (a, b) = (tiled[t * n + j], row[j]);
+                assert!((a - b).abs() <= 1e-4 * (1.0 + b.abs()), "t={t} j={j}: {a} vs {b}");
+            }
+        }
+    }
+
+    // n = 320: not a multiple of the 128-column tile.
+    const K: usize = 96;
+    const N: usize = 320;
+
+    #[test]
+    fn tiled_f16_matches_gemv() {
+        let w = data(K * N, 1).into_iter().map(f16::from_f32).collect();
+        check(&Weight::F16(F16Weight { data: w, k: K, n: N }));
+    }
+
+    #[test]
+    fn tiled_q4_matches_gemv() {
+        let (packed, scales) = quantize_q4(&data(K * N, 2), K, N, Rounding::Mse);
+        check(&Weight::Q4(Q4Weight { packed, scales, k: K, n: N }));
+    }
+
+    #[test]
+    fn tiled_q8_matches_gemv() {
+        let (data, scales) = quantize_q8(&data(K * N, 3), K, N, Rounding::Mse);
+        check(&Weight::Q8(Q8Weight { data, scales, k: K, n: N }));
+    }
+
+    /// Batched head must equal the per-position head. Vocab 600 is not a
+    /// multiple of the 256-row chunk.
+    fn check_head(weight: &Weight) {
+        let (vocab, hidden) = (weight.k(), weight.n());
+        let n_rows = 5;
+        let rows = data(n_rows * hidden, 9);
+        let batch = lm_head_batch(&rows, n_rows, weight);
+        for t in 0..n_rows {
+            let one = lm_head_parallel(&rows[t * hidden..(t + 1) * hidden], weight, vocab, hidden);
+            for v in 0..vocab {
+                let (a, b) = (batch[t * vocab + v], one[v]);
+                assert!((a - b).abs() <= 1e-4 * (1.0 + b.abs()), "t={t} v={v}: {a} vs {b}");
+            }
+        }
+    }
+
+    const VOCAB: usize = 600;
+    const HIDDEN: usize = 96;
+
+    #[test]
+    fn head_batch_f16_matches() {
+        let w = data(VOCAB * HIDDEN, 4).into_iter().map(f16::from_f32).collect();
+        check_head(&Weight::F16(F16Weight { data: w, k: VOCAB, n: HIDDEN }));
+    }
+
+    #[test]
+    fn head_batch_q4_matches() {
+        let (packed, scales) = quantize_q4(&data(VOCAB * HIDDEN, 5), VOCAB, HIDDEN, Rounding::Mse);
+        check_head(&Weight::Q4(Q4Weight { packed, scales, k: VOCAB, n: HIDDEN }));
+    }
+
+    #[test]
+    fn head_batch_q8_matches() {
+        let (data, scales) = quantize_q8(&data(VOCAB * HIDDEN, 6), VOCAB, HIDDEN, Rounding::Mse);
+        check_head(&Weight::Q8(Q8Weight { data, scales, k: VOCAB, n: HIDDEN }));
     }
 }
