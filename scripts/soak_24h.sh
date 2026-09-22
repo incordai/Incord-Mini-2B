@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 24-hour soak test for QORA API server.
+# 24-hour soak test for Incord API server.
 # Runs load_test for 24h while sampling RSS every minute.
 # Verifies <5% RSS drift (no memory leaks).
 #
 # Usage:
-#   URL=https://api.example.com KEY=qora_yourkey CONCURRENCY=100 ./scripts/soak_24h.sh
+#   URL=https://api.example.com KEY=incord_yourkey CONCURRENCY=100 ./scripts/soak_24h.sh
 #
 # Environment variables:
 #   URL          - API base URL (required)
@@ -21,19 +21,19 @@ CONCURRENCY=${CONCURRENCY:-100}
 MAX_TOKENS=${MAX_TOKENS:-200}
 DURATION=${DURATION:-86400}
 
-LOGDIR=${LOGDIR:-/var/log/qora}
+LOGDIR=${LOGDIR:-/var/log/incord}
 mkdir -p "$LOGDIR"
 TS=$(date +%Y%m%d_%H%M)
 LOG=$LOGDIR/soak_${TS}.log
 MEMLOG=$LOGDIR/soak_${TS}.mem
 
-# Find the qora-server PID. Adjust if the binary name differs.
-PID=$(pgrep -x qora-server || pgrep -f 'qora-server' | head -1)
+# Find the incord-server PID. Adjust if the binary name differs.
+PID=$(pgrep -x incord-server || pgrep -f 'incord-server' | head -1)
 if [ -z "$PID" ]; then
-    echo "qora-server is not running" >&2
+    echo "incord-server is not running" >&2
     exit 1
 fi
-echo "Monitoring qora-server PID=$PID for ${DURATION}s ($((DURATION/3600))h)"
+echo "Monitoring incord-server PID=$PID for ${DURATION}s ($((DURATION/3600))h)"
 echo "Load: ${CONCURRENCY} concurrent, max_tokens=${MAX_TOKENS}"
 echo "Logs: $LOG (load), $MEMLOG (memory)"
 
@@ -41,7 +41,7 @@ echo "Logs: $LOG (load), $MEMLOG (memory)"
 (
     while sleep 60; do
         if ! kill -0 "$PID" 2>/dev/null; then
-            echo "$(date -Iseconds) qora-server process died" >> "$MEMLOG"
+            echo "$(date -Iseconds) incord-server process died" >> "$MEMLOG"
             exit 1
         fi
         rss=$(ps -o rss= -p "$PID" 2>/dev/null || echo 0)

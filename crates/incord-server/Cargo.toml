@@ -1,0 +1,104 @@
+[package]
+name = "incord-server"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "incord-server"
+path = "src/bin/incord_server.rs"
+
+[dependencies]
+# Inference-only views into the AI crates. `default-features = false` strips
+# their bundled HTTP servers, auth stacks, conversion CLIs etc — incord-server
+# only needs the math + tokenizer + weight loaders.
+incord = { path = "../incord-llm", default-features = false }
+base64 = "0.22"
+image = "0.25"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+async-trait = "0.1"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { version = "1", features = ["v4", "serde"] }
+half = { workspace = true }
+toml = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "limit", "timeout"] }
+rustls = "0.23"
+rustls-pemfile = "2"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+bytes = "1"
+redb = "2"
+bincode = { version = "2", features = ["serde"] }
+argon2 = "0.5"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+rand_core = { version = "0.6", features = ["std"] }
+once_cell = "1"
+regex = "1"
+prometheus = "0.13"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+maxminddb = "0.24"
+
+[dev-dependencies]
+incord = { path = "../incord-llm", features = ["mock-weights"] }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[features]
+mock-weights = ["incord/mock-weights"]
+
+[[test]]
+name = "llm_engine_smoke"
+path = "tests/llm_engine_smoke.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "registry_smoke"
+path = "tests/registry_smoke.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "inference_dispatch"
+path = "tests/inference_dispatch.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "tts_smoke"
+path = "tests/tts_smoke.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "stt_smoke"
+path = "tests/stt_smoke.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "rag_smoke"
+path = "tests/rag_smoke.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "conversations"
+path = "tests/conversations.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "admin_endpoints"
+path = "tests/admin_endpoints.rs"
+required-features = ["mock-weights"]
+
+[[test]]
+name = "tiered_auth"
+path = "tests/tiered_auth.rs"
+required-features = ["mock-weights"]

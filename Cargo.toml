@@ -1,7 +1,8 @@
 [workspace]
+# This workspace is now just the LLM inference crate (incord). The
+# standalone server depends on incord via absolute path.
 members = [
-    "crates/qora-llm",
-    "crates/qora-server",
+    "crates/incord-llm",
 ]
 resolver = "2"
 

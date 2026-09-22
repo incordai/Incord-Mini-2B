@@ -3,7 +3,23 @@
 /backup/
 /test_frames/
 *.exe
-*.qor4b
-model.qor4b
+*.incord
+model.incord
 *.py
 *.png
+
+# Local runtime state and secrets — never commit
+*.redb
+incord-server.toml
+model/incord-server.toml
+# Model weights (multi-GB) — distributed via Releases, not git
+*.incord
+*.safetensors
+# Editor/agent tool state and edit backups
+.backups/
+*.bak.*
+Cargo.lock.backup
+.axon/
+.incord/
+.claude/
+.playwright-mcp/

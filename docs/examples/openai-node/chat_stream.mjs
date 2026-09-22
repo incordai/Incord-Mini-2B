@@ -3,12 +3,12 @@
 import OpenAI from "openai";
 
 const client = new OpenAI({
-    apiKey: process.env.QORA_KEY,
-    baseURL: (process.env.QORA_URL ?? "https://api.example.com") + "/v1",
+    apiKey: process.env.INCORD_KEY,
+    baseURL: (process.env.INCORD_URL ?? "https://api.example.com") + "/v1",
 });
 
 const stream = await client.chat.completions.create({
-    model: "qora-4b",
+    model: "incord-mini-2b",
     messages: [{ role: "user", content: "Hello!" }],
     max_tokens: 200,
     stream: true,

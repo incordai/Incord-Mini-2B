@@ -1,7 +1,7 @@
-"""QORA TTS via the openai Python SDK (/v1/audio/speech).
+"""Incord TTS via the openai Python SDK (/v1/audio/speech).
 
 Install: pip install openai
-Run:     QORA_KEY=qora_xxx QORA_URL=https://api.example.com python tts.py
+Run:     INCORD_KEY=incord_xxx INCORD_URL=https://api.example.com python tts.py
 
 Output is saved to output.wav.
 """
@@ -11,14 +11,14 @@ import pathlib
 from openai import OpenAI
 
 client = OpenAI(
-    api_key=os.environ["QORA_KEY"],
-    base_url=os.environ.get("QORA_URL", "https://api.example.com") + "/v1",
+    api_key=os.environ["INCORD_KEY"],
+    base_url=os.environ.get("INCORD_URL", "https://api.example.com") + "/v1",
 )
 
 response = client.audio.speech.create(
-    model="qora-tts",
+    model="incord-tts",
     voice="en-female-1",
-    input="Hello, this is QORA text-to-speech.",
+    input="Hello, this is Incord text-to-speech.",
     response_format="wav",
 )
 

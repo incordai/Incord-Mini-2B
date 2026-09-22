@@ -1,0 +1,33 @@
+[Unit]
+Description=Incord-Mini-2B API server
+After=network-online.target
+Wants=network-online.target
+Documentation=https://github.com/incordai/Incord-Mini-2B
+
+[Service]
+Type=simple
+User=incord
+Group=incord
+EnvironmentFile=/etc/incord/incord.env
+ExecStart=/usr/local/bin/incord-server /etc/incord/incord-server.toml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/incord
+
+[Install]
+WantedBy=multi-user.target

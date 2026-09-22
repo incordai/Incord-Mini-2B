@@ -6,8 +6,8 @@ import sys
 from openai import OpenAI
 
 client = OpenAI(
-    api_key=os.environ["QORA_KEY"],
-    base_url=os.environ.get("QORA_URL", "https://api.example.com") + "/v1",
+    api_key=os.environ["INCORD_KEY"],
+    base_url=os.environ.get("INCORD_URL", "https://api.example.com") + "/v1",
 )
 
 img_path = sys.argv[1] if len(sys.argv) > 1 else "tests/fixtures/tiny.png"
@@ -15,7 +15,7 @@ with open(img_path, "rb") as f:
     b64 = base64.b64encode(f.read()).decode()
 
 resp = client.chat.completions.create(
-    model="qora-4b",
+    model="incord-mini-2b",
     messages=[{
         "role": "user",
         "content": [
