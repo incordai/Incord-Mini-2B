@@ -17,6 +17,13 @@ use crate::gemv::*;
 
 const MAGIC: &[u8; 4] = b"QOR4";
 const VERSION: u32 = 2; // v2: vision weights stored as f16 (was f32 in v1)
+/// v3: a weight's format byte may carry [`ROTATED_FLAG`]. Written only when
+/// the file holds rotated weights, so plain files stay readable by v2
+/// loaders while an old loader rejects a rotated file at the header.
+pub const VERSION_ROTATED: u32 = 3;
+/// Set on a weight's per-weight format byte when its data is stored in
+/// Hadamard-rotated input space (`Weight::Rotated`, see `crate::rotate`).
+pub const ROTATED_FLAG: u8 = 0x80;
 
 // ============================================================
 // I/O helpers
@@ -129,10 +136,9 @@ fn read_bytes_vec(r: &mut impl Read) -> io::Result<Vec<u8>> {
 fn write_weight(w: &mut impl Write, weight: &Weight) -> io::Result<()> {
     write_u64(w, weight.k() as u64)?;
     write_u64(w, weight.n() as u64)?;
-    let fmt = match weight {
-        Weight::F16(_) => 0u8,
-        Weight::Q4(_) => 1u8,
-        Weight::Q8(_) => 2u8,
+    let (fmt, weight) = match weight {
+        Weight::Rotated(inner) => (inner.format_id() | ROTATED_FLAG, inner.as_ref()),
+        other => (other.format_id(), other),
     };
     write_u8(w, fmt)?;
     match weight {
@@ -148,6 +154,12 @@ fn write_weight(w: &mut impl Write, weight: &Weight) -> io::Result<()> {
             write_bytes(w, bytes)?;
             write_f16_vec(w, &qw.scales)?;
         }
+        Weight::Rotated(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "nested rotated weight cannot be stored",
+            ));
+        }
     }
     Ok(())
 }
@@ -156,6 +168,14 @@ fn read_weight(r: &mut impl Read, _format_id: u8) -> io::Result<Weight> {
     let k = read_u64(r)? as usize;
     let n = read_u64(r)? as usize;
     let per_weight_fmt = read_u8(r)?;
+    if per_weight_fmt & ROTATED_FLAG != 0 {
+        let inner = read_weight_body(r, per_weight_fmt & !ROTATED_FLAG, k, n)?;
+        return Ok(Weight::Rotated(Box::new(inner)));
+    }
+    read_weight_body(r, per_weight_fmt, k, n)
+}
+
+fn read_weight_body(r: &mut impl Read, per_weight_fmt: u8, k: usize, n: usize) -> io::Result<Weight> {
     match per_weight_fmt {
         0 => {
             let data = read_f16_vec(r)?;
@@ -200,7 +220,8 @@ pub fn save_model(weights: &ModelWeights, path: &Path) -> io::Result<()> {
 
     // Header
     w.write_all(MAGIC)?;
-    write_u32(&mut w, VERSION)?;
+    let version = if weights.has_rotated() { VERSION_ROTATED } else { VERSION };
+    write_u32(&mut w, version)?;
     write_u8(&mut w, format_id)?;
 
     // Config
@@ -334,10 +355,10 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
         }
     };
     let version = read_u32(&mut r)?;
-    if version != 1 && version != VERSION {
+    if !(1..=VERSION_ROTATED).contains(&version) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Unsupported version {version} (expected 1 or {VERSION})"),
+            format!("Unsupported version {version} (expected 1..={VERSION_ROTATED})"),
         ));
     }
     let format_id = read_u8(&mut r)?;
@@ -539,4 +560,48 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
         format_name,
         vision,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip(weight: &Weight) -> Weight {
+        let mut buf = Vec::new();
+        write_weight(&mut buf, weight).unwrap();
+        read_weight(&mut buf.as_slice(), 0).unwrap()
+    }
+
+    #[test]
+    fn rotated_weight_survives_save_and_load() {
+        let (packed, scales) = crate::quant::quantize_q4(
+            &(0..64 * 32).map(|i| (i % 17) as f32 * 0.01 - 0.08).collect::<Vec<_>>(),
+            64,
+            32,
+            crate::quant::Rounding::Mse,
+        );
+        let w = Weight::Rotated(Box::new(Weight::Q4(Q4Weight { packed, scales, k: 64, n: 32 })));
+        let back = roundtrip(&w);
+        assert!(back.is_rotated());
+        assert_eq!((back.k(), back.n(), back.format_id()), (64, 32, 1));
+        match (&w, &back) {
+            (Weight::Rotated(a), Weight::Rotated(b)) => match (a.as_ref(), b.as_ref()) {
+                (Weight::Q4(a), Weight::Q4(b)) => {
+                    assert_eq!(a.packed, b.packed);
+                    assert_eq!(a.scales, b.scales);
+                }
+                _ => panic!("inner format changed"),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn plain_weight_has_no_rotation_flag() {
+        let w = Weight::F16(F16Weight { data: vec![f16::from_f32(1.0); 32], k: 1, n: 32 });
+        let mut buf = Vec::new();
+        write_weight(&mut buf, &w).unwrap();
+        assert_eq!(buf[16], 0, "format byte must stay 0 for plain F16");
+        assert!(!roundtrip(&w).is_rotated());
+    }
 }

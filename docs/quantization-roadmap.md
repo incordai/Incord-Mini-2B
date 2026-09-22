@@ -46,12 +46,15 @@ in [`quantization-results.md`](quantization-results.md).
 Each milestone: its own branch, backups of every edited file, unit tests,
 the quality gate, then merge to `main` and push.
 
+Order: the quality milestones (M3, M4, M5) run before the GPU port (M2),
+because they decide which formats the GPU path must support.
+
 | # | Milestone | Proof required before it counts as done | Status |
 |---|---|---|---|
 | M0 | **Quality harness + baselines** — all-position logits, `incord-eval`, F16 reference, baseline scores for current Q8 and plain Q4 | ref vs itself gives KL = 0 and 100% agreement; two runs give identical numbers; unit tests for KL/softmax math | **done** — KL 0.000000, 100% (see results) |
 | M1 | **Better rounding** — Q4 uses all 16 levels (today −8 is never used) and searches the best scale per group | unit test: error ≤ old Q4 on every group; KL(new Q4) < KL(old Q4) | **done** — KL 0.224 → 0.190 |
 | M2 | **GPU: port to cortex-v2 + CUDA + packed weights** — move `gpu_inference.rs` / `gpu_loader.rs` to cortex-v2 (Burn 0.22 base, runtime `Device`, one code path for Vulkan / Metal / CUDA); keep Q4/Q8 packed on the GPU (cortex-v2 dequantizes inside the matmul kernel) instead of expanding to f32 (today ~4 bytes/weight in VRAM, so the Q8 model cannot fit a 6 GB card) | GPU logits match CPU within tolerance on Vulkan **and** CUDA; Q4 using level −8 verified on GPU; VRAM measured before/after | planned |
-| M3 | **Hadamard rotation** — rotate weights offline, run a fast Walsh–Hadamard transform on activations (block size fits 2048 and 6144) | F16 + rotation gives KL ≈ 0 (math is exact); KL(rotated Q4) < KL(M1 Q4) | planned |
+| M3 | **Hadamard rotation** — rotate weights offline, run a fast Walsh–Hadamard transform on activations (block size fits 2048 and 6144) | F16 + rotation gives KL ≈ 0 (math is exact); KL(rotated Q4) < KL(M1 Q4) | **done** — F16+rot KL 0.000001; Q4 KL 0.190 → 0.177 |
 | M4 | **Calibration + GPTQ** — capture layer inputs on calibration text, Hessian-aware rounding | KL(GPTQ + rotation Q4) < KL(rotation Q4); output stays standard Q4 (no new kernels) | planned |
 | M5 | **Mixed precision** — per-tensor bit choice from measured sensitivity (embedding, output head, attention, MLP) | best KL at each target size; size/KL table published | planned |
 | M6 | **Sub-4-bit formats** — Q3 / Q2 kernels (CPU + GPU) for the least sensitive tensors | kernel output = dequantized reference; KL table vs size | planned |

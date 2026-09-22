@@ -4,6 +4,7 @@ pub mod gemv;
 pub mod gemv_batch;
 pub mod generate;
 pub mod quant;
+pub mod rotate;
 pub mod save;
 pub mod simd;
 pub mod system;

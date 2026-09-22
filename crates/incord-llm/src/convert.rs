@@ -1,11 +1,15 @@
 //! CLI tool to convert Hugging Face safetensors models to the Incord binary format.
 //!
 //! Usage: incord-convert --input <safetensors_dir> --output model.incord
-//!        [--format q8|q4|f16] [--rounding mse|rtn]
+//!        [--format q8|q4|f16] [--rounding mse|rtn] [--rotate]
 //!
 //! `--rounding` picks how Q4/Q8 group scales are chosen (see `incord::quant`):
 //! `mse` (default) minimises each group's error, `rtn` reproduces the
 //! original round-to-nearest output byte for byte.
+//!
+//! `--rotate` stores every matmul weight, the output head and the embedding
+//! in Hadamard-rotated input space (see `incord::rotate`), which spreads
+//! outliers before quantization. The engine undoes it exactly at runtime.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -15,10 +19,20 @@ use std::sync::OnceLock;
 
 use half::f16;
 use incord::quant::Rounding;
+use incord::save::{ROTATED_FLAG, VERSION_ROTATED};
 use memmap2::Mmap;
 
-/// Scale rounding for every quantized tensor, set once from the command line.
-static ROUNDING: OnceLock<Rounding> = OnceLock::new();
+/// Quantization options, set once from the command line.
+struct QuantOpts {
+    rounding: Rounding,
+    rotate: bool,
+}
+
+static OPTS: OnceLock<QuantOpts> = OnceLock::new();
+
+fn opts() -> &'static QuantOpts {
+    OPTS.get().expect("options are set in main")
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -26,6 +40,7 @@ fn main() {
     let mut output_path = PathBuf::from("model_q8.incord");
     let mut format = "q8".to_string();
     let mut rounding = Rounding::Mse;
+    let mut rotate = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -57,11 +72,14 @@ fn main() {
                     i += 1;
                 }
             }
+            "--rotate" => rotate = true,
             _ => {}
         }
         i += 1;
     }
-    ROUNDING.set(rounding).expect("rounding set once");
+    if OPTS.set(QuantOpts { rounding, rotate }).is_err() {
+        unreachable!("options set once");
+    }
 
     let format_id: u8 = if format == "f16" {
         0
@@ -75,6 +93,7 @@ fn main() {
     eprintln!("  Output: {}", output_path.display());
     eprintln!("  Format: {} (id={})", format, format_id);
     eprintln!("  Rounding: {rounding:?}");
+    eprintln!("  Rotate: {rotate}");
 
     // Load safetensors index
     let index_path = input_dir.join("model.safetensors.index.json");
@@ -121,7 +140,10 @@ fn main() {
 
     // Header
     w.write_all(b"QOR4").unwrap();
-    w.write_all(&2u32.to_le_bytes()).unwrap(); // version 2: f16 vision
+    // Version 2: f16 vision. Rotated weights need VERSION_ROTATED so older
+    // loaders reject the file instead of misreading it.
+    let version: u32 = if opts().rotate { VERSION_ROTATED } else { 2 };
+    w.write_all(&version.to_le_bytes()).unwrap();
     w.write_all(&[format_id]).unwrap();
 
     // Config
@@ -587,7 +609,7 @@ fn write_tensor_weight(
     let raw = t.to_f32();
     let shape = &t.shape;
 
-    let (k, n, f32_data) = if shape.len() == 2 {
+    let (k, n, mut f32_data) = if shape.len() == 2 {
         // Transpose: [out_dim, in_dim] → [in_dim, out_dim]
         let out_dim = shape[0];
         let in_dim = shape[1];
@@ -616,8 +638,16 @@ fn write_tensor_weight(
         format_id
     };
 
+    // Matmul weights ([in, out]) are rotated down the input dimension:
+    // W' = Rᵀ·W, so the engine computes (x·R)·W' = x·W.
+    let rotate = opts().rotate && shape.len() == 2;
+    if rotate {
+        incord::rotate::rotate_columns(&mut f32_data, k, n);
+    }
+
     // Write per-weight format byte so loader knows
-    w.write_all(&[effective_format]).unwrap();
+    let flag = if rotate { ROTATED_FLAG } else { 0 };
+    w.write_all(&[effective_format | flag]).unwrap();
 
     match effective_format {
         0 => {
@@ -656,7 +686,7 @@ fn write_embedding_weight(
     let t = tensors
         .get(name)
         .unwrap_or_else(|| panic!("Missing tensor: {name}"));
-    let f32_data = t.to_f32();
+    let mut f32_data = t.to_f32();
     let shape = &t.shape;
     // Embedding shape: [vocab_size, hidden_size]
     let (k, n) = (shape[0], shape[1]); // k=vocab (rows), n=hidden (cols)
@@ -668,8 +698,17 @@ fn write_embedding_weight(
     write_u64(w, k as u64);
     write_u64(w, n as u64);
 
+    // Rows (one per token) are rotated along hidden: the head dots rotated
+    // rows with rotated activations, the lookup un-rotates the row it reads.
+    let flag = if opts().rotate {
+        incord::rotate::rotate_rows(&mut f32_data, n);
+        ROTATED_FLAG
+    } else {
+        0
+    };
+
     // For embedding: n=hidden=2048, always divisible by 32
-    w.write_all(&[format_id]).unwrap();
+    w.write_all(&[format_id | flag]).unwrap();
     match format_id {
         0 => {
             let f16_data: Vec<f16> = f32_data.iter().map(|&v| f16::from_f32(v)).collect();
@@ -715,7 +754,7 @@ fn write_tensor_f16(w: &mut impl Write, tensors: &HashMap<String, TensorData>, n
 // ============================================================
 
 fn rounding() -> Rounding {
-    *ROUNDING.get().expect("rounding is set in main")
+    opts().rounding
 }
 
 /// Quantize f32 data to Q4 symmetric (group_size=32).
