@@ -16,6 +16,9 @@
 //! is written/read by [`RefFile`].
 
 use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+
+use crate::tokenizer::IncordTokenizer;
 
 /// Magic bytes of a reference file.
 pub const REF_MAGIC: &[u8; 4] = b"IEVR";
@@ -102,6 +105,58 @@ pub fn kl_topk(r: &RefPosition, cand_logprobs: &[f32]) -> f64 {
     }
     // Rounding can push a near-zero KL slightly negative.
     kl.max(0.0)
+}
+
+/// Corpus `.txt` files of a directory in a stable (sorted) order, or the
+/// single file given.
+pub fn corpus_files(path: &Path) -> Result<Vec<PathBuf>, String> {
+    if path.is_file() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "txt"))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(format!("no .txt files in {}", path.display()));
+    }
+    Ok(files)
+}
+
+/// Split a corpus into model inputs: each chunk is `bos` followed by
+/// `seq_len - 1` consecutive tokens of one file, at most `per_file` chunks
+/// per file. Shared by the evaluator and the calibration tools so both cut
+/// text identically.
+pub fn corpus_chunks(
+    tokenizer: &IncordTokenizer,
+    path: &Path,
+    seq_len: usize,
+    per_file: usize,
+    bos: u32,
+) -> Result<Vec<Vec<u32>>, String> {
+    if seq_len < 2 {
+        return Err("sequence length must be at least 2".into());
+    }
+    let mut chunks = Vec::new();
+    for file in corpus_files(path)? {
+        let text =
+            std::fs::read_to_string(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
+        let ids = tokenizer.encode(&text);
+        let n = (ids.len() / (seq_len - 1)).min(per_file);
+        eprintln!("  {}: {} tokens -> {n} chunk(s)", file.display(), ids.len());
+        for c in 0..n {
+            let mut chunk = Vec::with_capacity(seq_len);
+            chunk.push(bos);
+            chunk.extend_from_slice(&ids[c * (seq_len - 1)..(c + 1) * (seq_len - 1)]);
+            chunks.push(chunk);
+        }
+    }
+    if chunks.is_empty() {
+        return Err(format!("corpus too short for sequence length {seq_len}"));
+    }
+    Ok(chunks)
 }
 
 /// Index of the largest value (lowest index wins ties).

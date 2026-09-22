@@ -12,10 +12,12 @@
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
-use incord::eval::{DEFAULT_TOP_K, RefFile, RefPosition, ScoreAccumulator, log_softmax};
+use incord::eval::{
+    DEFAULT_TOP_K, RefFile, RefPosition, ScoreAccumulator, corpus_chunks, log_softmax,
+};
 use incord::gemv::{HybridCache, ModelWeights, lm_head_batch, prefill_hidden_all};
 
 fn main() {
@@ -67,23 +69,6 @@ fn load_model(path: &str) -> Result<ModelWeights, String> {
     Ok(w)
 }
 
-/// Corpus files in a stable (sorted) order.
-fn corpus_files(path: &Path) -> Result<Vec<PathBuf>, String> {
-    if path.is_file() {
-        return Ok(vec![path.to_path_buf()]);
-    }
-    let mut files: Vec<PathBuf> = std::fs::read_dir(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "txt"))
-        .collect();
-    files.sort();
-    if files.is_empty() {
-        return Err(format!("no .txt files in {}", path.display()));
-    }
-    Ok(files)
-}
-
 /// Full-vocabulary log-probabilities for every position of one chunk.
 /// Calls `f(position, logprobs)` for positions 0..len-1 (each predicts the
 /// next token), so only one vocabulary-sized buffer is alive at a time.
@@ -131,26 +116,8 @@ fn cmd_reference(args: &[String]) -> Result<(), String> {
     let tokenizer = incord::tokenizer::IncordTokenizer::from_file(tok_path)
         .map_err(|e| format!("load tokenizer {tok_path}: {e}"))?;
     let w = load_model(model)?;
-    let bos = w.config.bos_token_id;
-
-    // Each chunk = BOS + (seq_len - 1) consecutive tokens of one corpus file.
-    let mut chunks = Vec::new();
-    for file in corpus_files(Path::new(corpus))? {
-        let text =
-            std::fs::read_to_string(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
-        let ids = tokenizer.encode(&text);
-        let n = (ids.len() / (seq_len - 1)).min(per_file);
-        eprintln!("  {}: {} tokens -> {n} chunk(s)", file.display(), ids.len());
-        for c in 0..n {
-            let mut chunk = Vec::with_capacity(seq_len);
-            chunk.push(bos);
-            chunk.extend_from_slice(&ids[c * (seq_len - 1)..(c + 1) * (seq_len - 1)]);
-            chunks.push(chunk);
-        }
-    }
-    if chunks.is_empty() {
-        return Err(format!("corpus too short for --seq-len {seq_len}"));
-    }
+    let chunks =
+        corpus_chunks(&tokenizer, Path::new(corpus), seq_len, per_file, w.config.bos_token_id)?;
 
     let t0 = Instant::now();
     let mut positions = Vec::new();

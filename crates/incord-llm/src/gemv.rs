@@ -57,8 +57,9 @@ pub enum Weight {
     /// embedding `[vocab, hidden]` holds every row times `R`. Every compute
     /// path rotates the activation with `rotate::forward` before using the
     /// inner weight (embedding lookup applies `rotate::inverse` after), so
-    /// results equal the unrotated weight's.
-    Rotated(Box<Weight>),
+    /// results equal the unrotated weight's. The `u64` is the sign seed the
+    /// data was rotated with (stored in the file header).
+    Rotated(Box<Weight>, u64),
 }
 
 impl Weight {
@@ -67,7 +68,7 @@ impl Weight {
             Weight::F16(w) => w.n,
             Weight::Q4(w) => w.n,
             Weight::Q8(w) => w.n,
-            Weight::Rotated(w) => w.n(),
+            Weight::Rotated(w, _) => w.n(),
         }
     }
     pub fn k(&self) -> usize {
@@ -75,7 +76,7 @@ impl Weight {
             Weight::F16(w) => w.k,
             Weight::Q4(w) => w.k,
             Weight::Q8(w) => w.k,
-            Weight::Rotated(w) => w.k(),
+            Weight::Rotated(w, _) => w.k(),
         }
     }
     pub fn memory_bytes(&self) -> usize {
@@ -83,7 +84,7 @@ impl Weight {
             Weight::F16(w) => w.data.len() * 2,
             Weight::Q4(w) => w.packed.len() + w.scales.len() * 2,
             Weight::Q8(w) => w.data.len() + w.scales.len() * 2,
-            Weight::Rotated(w) => w.memory_bytes(),
+            Weight::Rotated(w, _) => w.memory_bytes(),
         }
     }
 
@@ -93,12 +94,20 @@ impl Weight {
             Weight::F16(_) => 0,
             Weight::Q4(_) => 1,
             Weight::Q8(_) => 2,
-            Weight::Rotated(w) => w.format_id(),
+            Weight::Rotated(w, _) => w.format_id(),
         }
     }
 
     pub fn is_rotated(&self) -> bool {
-        matches!(self, Weight::Rotated(_))
+        matches!(self, Weight::Rotated(..))
+    }
+
+    /// Sign seed of a rotated weight.
+    pub fn rotation_seed(&self) -> Option<u64> {
+        match self {
+            Weight::Rotated(_, seed) => Some(*seed),
+            _ => None,
+        }
     }
 
     /// Write row `i`, columns `c0 .. c0 + dst.len()`, as f32. For quantized
@@ -133,22 +142,22 @@ impl Weight {
                 }
             }
             // Raw stored (rotated-space) values; callers rotate the input.
-            Weight::Rotated(w) => w.row_segment_f32(i, c0, dst),
+            Weight::Rotated(w, _) => w.row_segment_f32(i, c0, dst),
         }
     }
 }
 
 /// `x` rotated into a rotated weight's input space.
-fn rotated(x: &[f32]) -> Vec<f32> {
+fn rotated(x: &[f32], seed: u64) -> Vec<f32> {
     let mut v = x.to_vec();
-    crate::rotate::forward(&mut v);
+    crate::rotate::forward(&mut v, seed);
     v
 }
 
 /// Every `len`-long row of `x` rotated into rotated-weight input space.
-fn rotated_rows(x: &[f32], len: usize) -> Vec<f32> {
+fn rotated_rows(x: &[f32], len: usize, seed: u64) -> Vec<f32> {
     let mut v = x.to_vec();
-    v.par_chunks_mut(len).for_each(crate::rotate::forward);
+    v.par_chunks_mut(len).for_each(|row| crate::rotate::forward(row, seed));
     v
 }
 
@@ -436,15 +445,15 @@ pub fn gemv(input: &[f32], weight: &Weight) -> Vec<f32> {
         Weight::F16(w) => gemv_f16(input, w),
         Weight::Q4(w) => gemv_q4(input, w),
         Weight::Q8(w) => gemv_q8(input, w),
-        Weight::Rotated(w) => gemv(&rotated(input), w),
+        Weight::Rotated(w, seed) => gemv(&rotated(input, *seed), w),
     }
 }
 
 /// GEMM: [seq_len, k] @ [k, n] -> [seq_len, n].
 #[inline]
 pub fn gemm(x: &[f32], seq_len: usize, weight: &Weight) -> Vec<f32> {
-    if let Weight::Rotated(w) = weight {
-        return gemm(&rotated_rows(x, w.k()), seq_len, w);
+    if let Weight::Rotated(w, seed) = weight {
+        return gemm(&rotated_rows(x, w.k(), *seed), seq_len, w);
     }
     if seq_len >= GEMM_TILED_MIN_TOKENS {
         return gemm_tiled(x, seq_len, weight);
@@ -453,7 +462,7 @@ pub fn gemm(x: &[f32], seq_len: usize, weight: &Weight) -> Vec<f32> {
         Weight::F16(w) => gemm_f16(x, seq_len, w),
         Weight::Q4(w) => gemm_q4(x, seq_len, w),
         Weight::Q8(w) => gemm_q8(x, seq_len, w),
-        Weight::Rotated(_) => unreachable!("unwrapped above"),
+        Weight::Rotated(..) => unreachable!("unwrapped above"),
     }
 }
 
@@ -463,7 +472,9 @@ pub(crate) fn fused_gate_up_gemv(input: &[f32], gate_w: &Weight, up_w: &Weight) 
     match (gate_w, up_w) {
         (Weight::Q4(gw), Weight::Q4(uw)) => fused_gate_up_q4(input, gw, uw),
         // Same input, same rotation: rotate once, keep the fused kernel.
-        (Weight::Rotated(gw), Weight::Rotated(uw)) => fused_gate_up_gemv(&rotated(input), gw, uw),
+        (Weight::Rotated(gw, gs), Weight::Rotated(uw, us)) if gs == us => {
+            fused_gate_up_gemv(&rotated(input, *gs), gw, uw)
+        }
         _ => {
             let gate = gemv(input, gate_w);
             let up = gemv(input, up_w);
@@ -491,9 +502,9 @@ pub fn embed_lookup(weight: &Weight, token_id: usize, hidden: usize) -> Vec<f32>
         }
         Weight::Q4(w) => embed_lookup_q4(w, token_id),
         Weight::Q8(w) => embed_lookup_q8(w, token_id),
-        Weight::Rotated(w) => {
+        Weight::Rotated(w, seed) => {
             let mut row = embed_lookup(w, token_id, hidden);
-            crate::rotate::inverse(&mut row);
+            crate::rotate::inverse(&mut row, *seed);
             row
         }
     }
@@ -1248,8 +1259,8 @@ pub fn lm_head_batch(rows: &[f32], n_rows: usize, weight: &Weight) -> Vec<f32> {
     const VOCAB_CHUNK: usize = 256;
     let (vocab, hidden) = (weight.k(), weight.n());
     assert_eq!(rows.len(), n_rows * hidden);
-    if let Weight::Rotated(w) = weight {
-        return lm_head_batch(&rotated_rows(rows, hidden), n_rows, w);
+    if let Weight::Rotated(w, seed) = weight {
+        return lm_head_batch(&rotated_rows(rows, hidden, *seed), n_rows, w);
     }
     let chunks: Vec<Vec<f32>> = (0..vocab.div_ceil(VOCAB_CHUNK))
         .into_par_iter()
@@ -1294,8 +1305,8 @@ fn dot_lanes(a: &[f32], b: &[f32]) -> f32 {
 }
 
 pub fn lm_head_parallel(input: &[f32], embed: &Weight, vocab: usize, hidden: usize) -> Vec<f32> {
-    if let Weight::Rotated(w) = embed {
-        return lm_head_parallel(&rotated(input), w, vocab, hidden);
+    if let Weight::Rotated(w, seed) = embed {
+        return lm_head_parallel(&rotated(input, *seed), w, vocab, hidden);
     }
     match embed {
         Weight::F16(w) => {
@@ -1399,7 +1410,7 @@ pub fn lm_head_parallel(input: &[f32], embed: &Weight, vocab: usize, hidden: usi
                 });
             output
         }
-        Weight::Rotated(_) => unreachable!("unwrapped above"),
+        Weight::Rotated(..) => unreachable!("unwrapped above"),
     }
 }
 
@@ -1907,6 +1918,7 @@ fn prefill_deltanet_layer(
     lw: &DeltaNetLayerWeights,
     state: &mut DeltaNetState,
     config: &IncordConfig,
+    obs: &mut dyn LinearObserver,
 ) {
     let hidden = config.hidden_size;
     let num_qk = config.num_qk_heads;
@@ -1929,6 +1941,7 @@ fn prefill_deltanet_layer(
     }
 
     // ── Step 2: Batch ALL input projections as GEMM ──
+    obs.observe(LinearSite::AttnIn, &x_norm, seq_len);
     let qkv_all = gemm(&x_norm, seq_len, &lw.in_proj_qkv);
     let a_all = gemm(&x_norm, seq_len, &lw.in_proj_a);
     let b_all = gemm(&x_norm, seq_len, &lw.in_proj_b);
@@ -2052,6 +2065,7 @@ fn prefill_deltanet_layer(
     }
 
     // ── Step 5: Output projection as GEMM + residual ──
+    obs.observe(LinearSite::AttnOut, &y_all, seq_len);
     let attn_out = gemm(&y_all, seq_len, &lw.out_proj);
     for j in 0..seq_len * hidden {
         x[j] += attn_out[j];
@@ -2063,6 +2077,7 @@ fn prefill_deltanet_layer(
         let row = rms_norm(&x[t * hidden..(t + 1) * hidden], &lw.post_attn_norm);
         x_norm2[t * hidden..(t + 1) * hidden].copy_from_slice(&row);
     }
+    obs.observe(LinearSite::MlpIn, &x_norm2, seq_len);
     let gate = gemm(&x_norm2, seq_len, &lw.gate_proj);
     let up = gemm(&x_norm2, seq_len, &lw.up_proj);
     let inter_size = lw.gate_proj.n();
@@ -2071,6 +2086,7 @@ fn prefill_deltanet_layer(
         let g = gate[j];
         intermediate[j] = (g / (1.0 + (-g).exp())) * up[j];
     }
+    obs.observe(LinearSite::MlpDown, &intermediate, seq_len);
     let mlp_out = gemm(&intermediate, seq_len, &lw.down_proj);
     for j in 0..seq_len * hidden {
         x[j] += mlp_out[j];
@@ -2127,26 +2143,69 @@ fn prefill_layers(weights: &ModelWeights, token_ids: &[u32], cache: &mut HybridC
     let num_layers = config.num_layers;
     for i in 0..num_layers {
         eprint!("\r  Prefill: layer {}/{num_layers}  ", i + 1);
-        match (&weights.layers[i], &mut cache.entries[i]) {
-            (HybridLayerWeights::DeltaNet(lw), CacheEntry::DeltaNet(state)) => {
-                prefill_deltanet_layer(&mut x, seq_len, lw, state, config);
-            }
-            (HybridLayerWeights::FullAttn(lw), CacheEntry::KvCache(kv)) => {
-                prefill_attn_layer(
-                    &mut x,
-                    seq_len,
-                    lw,
-                    kv,
-                    config,
-                    &weights.rope_cos,
-                    &weights.rope_sin,
-                );
-            }
-            _ => panic!("Layer type mismatch at layer {i}"),
-        }
+        prefill_layer(weights, i, &mut x, seq_len, cache, &mut NoObserver);
     }
     eprint!("\r                              \r");
     x
+}
+
+/// Where a projection reads its input inside a layer. Projections at the
+/// same site share one input matrix (and one GPTQ Hessian).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LinearSite {
+    /// Normed residual into q/k/v (attention) or in_proj_* (DeltaNet).
+    AttnIn,
+    /// Attention output into o_proj / out_proj.
+    AttnOut,
+    /// Normed residual into gate_proj and up_proj.
+    MlpIn,
+    /// SwiGLU output into down_proj.
+    MlpDown,
+}
+
+/// Receives the input matrix `[rows, k]` of every projection site during
+/// prefill (used by calibration, e.g. GPTQ's Hessians).
+pub trait LinearObserver {
+    fn observe(&mut self, site: LinearSite, x: &[f32], rows: usize);
+}
+
+/// Observer that ignores everything (normal inference).
+pub struct NoObserver;
+
+impl LinearObserver for NoObserver {
+    #[inline]
+    fn observe(&mut self, _: LinearSite, _: &[f32], _: usize) {}
+}
+
+/// Run layer `i` over `x: [seq_len, hidden]` in place (residual included),
+/// reporting every projection input to `obs`.
+pub fn prefill_layer(
+    weights: &ModelWeights,
+    i: usize,
+    x: &mut [f32],
+    seq_len: usize,
+    cache: &mut HybridCache,
+    obs: &mut dyn LinearObserver,
+) {
+    let config = &weights.config;
+    match (&weights.layers[i], &mut cache.entries[i]) {
+        (HybridLayerWeights::DeltaNet(lw), CacheEntry::DeltaNet(state)) => {
+            prefill_deltanet_layer(x, seq_len, lw, state, config, obs);
+        }
+        (HybridLayerWeights::FullAttn(lw), CacheEntry::KvCache(kv)) => {
+            prefill_attn_layer(
+                x,
+                seq_len,
+                lw,
+                kv,
+                config,
+                &weights.rope_cos,
+                &weights.rope_sin,
+                obs,
+            );
+        }
+        _ => panic!("Layer type mismatch at layer {i}"),
+    }
 }
 
 /// Prefill with vision embeddings injected at IMAGE_PAD positions.
@@ -2187,23 +2246,7 @@ pub fn prefill_with_vision(
     let num_layers = config.num_layers;
     for i in 0..num_layers {
         eprint!("\r  Prefill: layer {}/{num_layers}  ", i + 1);
-        match (&weights.layers[i], &mut cache.entries[i]) {
-            (HybridLayerWeights::DeltaNet(lw), CacheEntry::DeltaNet(state)) => {
-                prefill_deltanet_layer(&mut x, seq_len, lw, state, config);
-            }
-            (HybridLayerWeights::FullAttn(lw), CacheEntry::KvCache(kv)) => {
-                prefill_attn_layer(
-                    &mut x,
-                    seq_len,
-                    lw,
-                    kv,
-                    config,
-                    &weights.rope_cos,
-                    &weights.rope_sin,
-                );
-            }
-            _ => panic!("Layer type mismatch at layer {i}"),
-        }
+        prefill_layer(weights, i, &mut x, seq_len, cache, &mut NoObserver);
     }
     eprint!("\r                              \r");
 
@@ -2223,6 +2266,7 @@ fn prefill_attn_layer(
     config: &IncordConfig,
     rope_cos: &[f32],
     rope_sin: &[f32],
+    obs: &mut dyn LinearObserver,
 ) {
     let hidden = config.hidden_size;
     let num_heads = config.num_attn_heads;
@@ -2241,6 +2285,7 @@ fn prefill_attn_layer(
     }
 
     // Q projection: output is [seq_len, q_dim] (standard LLaMA) or [seq_len, 2*q_dim] (gated)
+    obs.observe(LinearSite::AttnIn, &x_norm, seq_len);
     let q_gate_all = gemm(&x_norm, seq_len, &lw.q_proj);
     let is_gated = lw.q_proj.n() == 2 * q_dim;
 
@@ -2370,6 +2415,7 @@ fn prefill_attn_layer(
     }
 
     // O projection + residual
+    obs.observe(LinearSite::AttnOut, &attn_output, seq_len);
     let o_out = gemm(&attn_output, seq_len, &lw.o_proj);
     for j in 0..seq_len * hidden {
         x[j] += o_out[j];
@@ -2384,6 +2430,7 @@ fn prefill_attn_layer(
     }
 
     // MLP
+    obs.observe(LinearSite::MlpIn, &x_norm2, seq_len);
     let gate = gemm(&x_norm2, seq_len, &lw.gate_proj);
     let up = gemm(&x_norm2, seq_len, &lw.up_proj);
     let inter_size = lw.gate_proj.n();
@@ -2392,6 +2439,7 @@ fn prefill_attn_layer(
         let g = gate[j];
         intermediate[j] = (g / (1.0 + (-g).exp())) * up[j];
     }
+    obs.observe(LinearSite::MlpDown, &intermediate, seq_len);
     let mlp_out = gemm(&intermediate, seq_len, &lw.down_proj);
 
     for j in 0..seq_len * hidden {
@@ -2732,26 +2780,35 @@ mod gemm_tiled_tests {
     /// A Rotated weight must give the same result as the plain weight on
     /// every compute path. Both store different f16 values (the rotated
     /// matrix rounds differently), so each carries its own ~1e-3 f16 noise;
-    /// a wrong rotation would be off by O(1). The bound is absolute because
-    /// outputs near zero come from cancellation.
+    /// a wrong rotation would be off by O(1). The bound has an absolute part
+    /// (outputs near zero come from cancellation) and a relative part (the
+    /// fused gate/up path multiplies two noisy outputs, so its noise scales
+    /// with the value).
     #[test]
     fn rotated_weight_matches_plain_on_every_path() {
+        let tol = |y: f32| 1e-2 + 3e-3 * y.abs();
         let close = |a: &[f32], b: &[f32], what: &str| {
             assert_eq!(a.len(), b.len());
-            let worst = a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
-            assert!(worst <= 1e-2, "{what}: max |diff| {worst}");
+            for (i, (x, y)) in a.iter().zip(b).enumerate() {
+                assert!((x - y).abs() <= tol(*y), "{what} i={i}: {x} vs {y}");
+            }
         };
         // Matmul weights [k=64, n=96] (k has one 64-wide Hadamard block).
         let (k, n) = (64, 96);
         let raw = data(k * n, 11);
         let plain = Weight::F16(F16Weight { data: raw.iter().map(|&v| f16::from_f32(v)).collect(), k, n });
         let mut rot = raw.clone();
-        crate::rotate::rotate_columns(&mut rot, k, n);
-        let rotw = Weight::Rotated(Box::new(Weight::F16(F16Weight {
-            data: rot.iter().map(|&v| f16::from_f32(v)).collect(),
-            k,
-            n,
-        })));
+        // A non-default seed, so the seed has to travel with the weight.
+        const SEED: u64 = 7;
+        crate::rotate::rotate_columns(&mut rot, k, n, SEED);
+        let rotw = Weight::Rotated(
+            Box::new(Weight::F16(F16Weight {
+                data: rot.iter().map(|&v| f16::from_f32(v)).collect(),
+                k,
+                n,
+            })),
+            SEED,
+        );
         let x = data(k, 12);
         // Exact f64 result of the unquantized weights: rotated and plain
         // paths must be equally close to it (proves the gap is f16 noise).
@@ -2765,23 +2822,29 @@ mod gemm_tiled_tests {
         let xs = data(37 * k, 13);
         close(&gemm(&xs, 37, &rotw), &gemm(&xs, 37, &plain), "gemm tiled");
         close(&gemm(&xs[..3 * k], 3, &rotw), &gemm(&xs[..3 * k], 3, &plain), "gemm short");
-        close(
-            &fused_gate_up_gemv(&x, &rotw, &rotw),
-            &fused_gate_up_gemv(&x, &plain, &plain),
-            "fused gate/up",
-        );
+        // Fused silu(x·G)·(x·U) with G = U: both paths must sit within the
+        // noise bound of the exact f64 value.
+        let exact_fused: Vec<f32> = exact.iter().map(|&y| (y / (1.0 + (-y).exp())) * y).collect();
+        let fused_rot = fused_gate_up_gemv(&x, &rotw, &rotw);
+        let fused_plain = fused_gate_up_gemv(&x, &plain, &plain);
+        close(&fused_rot, &exact_fused, "fused rotated vs exact");
+        close(&fused_plain, &exact_fused, "fused plain vs exact");
+        close(&fused_rot, &fused_plain, "fused gate/up");
 
         // Head / embedding [vocab=40, hidden=64], rows rotated.
         let (vocab, hidden) = (40, 64);
         let raw = data(vocab * hidden, 14);
         let plain = Weight::F16(F16Weight { data: raw.iter().map(|&v| f16::from_f32(v)).collect(), k: vocab, n: hidden });
         let mut rot = raw.clone();
-        crate::rotate::rotate_rows(&mut rot, hidden);
-        let rotw = Weight::Rotated(Box::new(Weight::F16(F16Weight {
-            data: rot.iter().map(|&v| f16::from_f32(v)).collect(),
-            k: vocab,
-            n: hidden,
-        })));
+        crate::rotate::rotate_rows(&mut rot, hidden, SEED);
+        let rotw = Weight::Rotated(
+            Box::new(Weight::F16(F16Weight {
+                data: rot.iter().map(|&v| f16::from_f32(v)).collect(),
+                k: vocab,
+                n: hidden,
+            })),
+            SEED,
+        );
         let h = data(hidden, 15);
         close(
             &lm_head_parallel(&h, &rotw, vocab, hidden),

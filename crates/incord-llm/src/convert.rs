@@ -1,7 +1,10 @@
 //! CLI tool to convert Hugging Face safetensors models to the Incord binary format.
 //!
 //! Usage: incord-convert --input <safetensors_dir> --output model.incord
-//!        [--format q8|q4|f16] [--rounding mse|rtn] [--rotate]
+//!        [--format q8|q4|f16] [--rounding mse|rtn] [--rotate] [--plan SPEC]
+//!
+//! `--plan` overrides `--format` per tensor, e.g. `table=q8,down@0-3=q8`
+//! (syntax in `incord::plan`).
 //!
 //! `--rounding` picks how Q4/Q8 group scales are chosen (see `incord::quant`):
 //! `mse` (default) minimises each group's error, `rtn` reproduces the
@@ -18,14 +21,27 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use half::f16;
+use incord::plan::{Class, Fmt, Plan};
 use incord::quant::Rounding;
-use incord::save::{ROTATED_FLAG, VERSION_ROTATED};
+use incord::rotate::DEFAULT_SEED;
+use incord::save::{ROTATED_FLAG, VERSION_ROTATION_META, write_rotation_meta};
 use memmap2::Mmap;
 
 /// Quantization options, set once from the command line.
 struct QuantOpts {
     rounding: Rounding,
     rotate: bool,
+    /// Per-tensor formats (`--plan`); the default is `--format`.
+    plan: Plan,
+}
+
+/// Format id for tensor `name` under the plan; tensors the plan cannot
+/// classify keep `default_id`.
+fn planned_format(name: &str, default_id: u8) -> u8 {
+    match Class::from_hf_name(name) {
+        Some((class, layer)) => opts().plan.format_for(class, layer).id(),
+        None => default_id,
+    }
 }
 
 static OPTS: OnceLock<QuantOpts> = OnceLock::new();
@@ -41,6 +57,7 @@ fn main() {
     let mut format = "q8".to_string();
     let mut rounding = Rounding::Mse;
     let mut rotate = false;
+    let mut plan_spec = String::new();
 
     let mut i = 1;
     while i < args.len() {
@@ -73,27 +90,37 @@ fn main() {
                 }
             }
             "--rotate" => rotate = true,
+            "--plan" => {
+                if i + 1 < args.len() {
+                    plan_spec = args[i + 1].clone();
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
     }
-    if OPTS.set(QuantOpts { rounding, rotate }).is_err() {
+
+    let default_fmt = match format.as_str() {
+        "f16" => Fmt::F16,
+        "q8" => Fmt::Q8,
+        _ => Fmt::Q4,
+    };
+    let format_id = default_fmt.id();
+    let plan = Plan::parse(default_fmt, &plan_spec).unwrap_or_else(|e| {
+        eprintln!("ERROR: --plan: {e}");
+        std::process::exit(1);
+    });
+    if OPTS.set(QuantOpts { rounding, rotate, plan }).is_err() {
         unreachable!("options set once");
     }
-
-    let format_id: u8 = if format == "f16" {
-        0
-    } else if format == "q8" {
-        2
-    } else {
-        1
-    };
     eprintln!("Incord Converter");
     eprintln!("  Input:  {}", input_dir.display());
     eprintln!("  Output: {}", output_path.display());
     eprintln!("  Format: {} (id={})", format, format_id);
     eprintln!("  Rounding: {rounding:?}");
     eprintln!("  Rotate: {rotate}");
+    eprintln!("  Plan: {}", if plan_spec.is_empty() { "(uniform)" } else { &plan_spec });
 
     // Load safetensors index
     let index_path = input_dir.join("model.safetensors.index.json");
@@ -140,11 +167,15 @@ fn main() {
 
     // Header
     w.write_all(b"QOR4").unwrap();
-    // Version 2: f16 vision. Rotated weights need VERSION_ROTATED so older
-    // loaders reject the file instead of misreading it.
-    let version: u32 = if opts().rotate { VERSION_ROTATED } else { 2 };
+    // Version 2: f16 vision. Rotated weights need VERSION_ROTATION_META (the
+    // rotation scheme and sign seed follow the format byte) so older loaders
+    // reject the file instead of misreading it.
+    let version: u32 = if opts().rotate { VERSION_ROTATION_META } else { 2 };
     w.write_all(&version.to_le_bytes()).unwrap();
     w.write_all(&[format_id]).unwrap();
+    if opts().rotate {
+        write_rotation_meta(&mut w, DEFAULT_SEED).unwrap();
+    }
 
     // Config
     write_u32(&mut w, config.vocab_size as u32);
@@ -603,6 +634,7 @@ fn write_tensor_weight(
     name: &str,
     format_id: u8,
 ) {
+    let format_id = planned_format(name, format_id);
     let t = tensors
         .get(name)
         .unwrap_or_else(|| panic!("Missing tensor: {name}"));
@@ -642,7 +674,7 @@ fn write_tensor_weight(
     // W' = Rᵀ·W, so the engine computes (x·R)·W' = x·W.
     let rotate = opts().rotate && shape.len() == 2;
     if rotate {
-        incord::rotate::rotate_columns(&mut f32_data, k, n);
+        incord::rotate::rotate_columns(&mut f32_data, k, n, DEFAULT_SEED);
     }
 
     // Write per-weight format byte so loader knows
@@ -683,6 +715,7 @@ fn write_embedding_weight(
     name: &str,
     format_id: u8,
 ) {
+    let format_id = planned_format(name, format_id);
     let t = tensors
         .get(name)
         .unwrap_or_else(|| panic!("Missing tensor: {name}"));
@@ -701,7 +734,7 @@ fn write_embedding_weight(
     // Rows (one per token) are rotated along hidden: the head dots rotated
     // rows with rotated activations, the lookup un-rotates the row it reads.
     let flag = if opts().rotate {
-        incord::rotate::rotate_rows(&mut f32_data, n);
+        incord::rotate::rotate_rows(&mut f32_data, n, DEFAULT_SEED);
         ROTATED_FLAG
     } else {
         0
