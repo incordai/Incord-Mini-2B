@@ -66,6 +66,130 @@ const Q8: Format = Format {
     d_step: 0.25,
 };
 
+const Q3: Format = Format {
+    qmin: -4,
+    qmax: 3,
+    d_lo: 2.5,
+    d_hi: 5.0,
+    d_step: 1.0 / 16.0,
+};
+
+const Q2: Format = Format {
+    qmin: -2,
+    qmax: 1,
+    d_lo: 0.75,
+    d_hi: 2.75,
+    d_step: 1.0 / 16.0,
+};
+
+/// Sub-4-bit formats (roadmap Milestone 6). Groups of [`GROUP`] along `n`,
+/// one f16 scale per group, value = scale * q:
+///
+/// - Q3: q in -4..=3. Per group 12 bytes: 8 bytes of low 2 bits (four
+///   values per byte, value `i` at bits `2*(i%4)` of byte `i/4`) then 4 bytes
+///   of high bits (value `i` at bit `i%8` of byte `8 + i/8`). 3.5 bits/weight.
+/// - Q2: q in -2..=1. Per group 8 bytes, four values per byte as above.
+///   2.5 bits/weight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LowBits {
+    Q3,
+    Q2,
+}
+
+impl LowBits {
+    /// Packed bytes per group of [`GROUP`] values.
+    pub fn group_bytes(self) -> usize {
+        match self {
+            LowBits::Q3 => 12,
+            LowBits::Q2 => 8,
+        }
+    }
+
+    fn format(self) -> &'static Format {
+        match self {
+            LowBits::Q3 => &Q3,
+            LowBits::Q2 => &Q2,
+        }
+    }
+
+    fn offset(self) -> i32 {
+        -self.format().qmin
+    }
+}
+
+/// Pack one group's ints (`q` in the format's range) into `dst`
+/// (`bits.group_bytes()` bytes).
+fn pack_low(bits: LowBits, q: &[i32], dst: &mut [u8]) {
+    dst.fill(0);
+    let off = bits.offset();
+    for (i, &qi) in q.iter().enumerate() {
+        let u = (qi + off) as u8;
+        dst[i / 4] |= (u & 0b11) << (2 * (i % 4));
+        if bits == LowBits::Q3 {
+            dst[8 + i / 8] |= ((u >> 2) & 1) << (i % 8);
+        }
+    }
+}
+
+/// Dequantize one packed group (`GROUP` values) with scale `s` into `dst`.
+pub fn unpack_low(bits: LowBits, src: &[u8], s: f32, dst: &mut [f32]) {
+    let off = bits.offset();
+    for (i, d) in dst.iter_mut().enumerate() {
+        let mut u = ((src[i / 4] >> (2 * (i % 4))) & 0b11) as i32;
+        if bits == LowBits::Q3 {
+            u |= (((src[8 + i / 8] >> (i % 8)) & 1) as i32) << 2;
+        }
+        *d = (u - off) as f32 * s;
+    }
+}
+
+/// Quantize one row (`row.len()` a multiple of [`GROUP`]) to Q3 / Q2.
+pub fn quantize_low_row(
+    row: &[f32],
+    bits: LowBits,
+    rounding: Rounding,
+    prow: &mut [u8],
+    srow: &mut [f16],
+) {
+    let gb = bits.group_bytes();
+    let mut q = [0i32; GROUP];
+    for (g, (grp, s)) in row.chunks(GROUP).zip(srow.iter_mut()).enumerate() {
+        *s = quantize_group(grp, bits.format(), rounding, &mut q);
+        pack_low(bits, &q, &mut prow[g * gb..(g + 1) * gb]);
+    }
+}
+
+/// Quantize a `[k, n]` matrix to Q3 / Q2. Returns (packed bytes, scales).
+pub fn quantize_low(
+    data: &[f32],
+    k: usize,
+    n: usize,
+    bits: LowBits,
+    rounding: Rounding,
+) -> (Vec<u8>, Vec<f16>) {
+    check_shape(data, k, n);
+    let gpr = n / GROUP;
+    let row_bytes = gpr * bits.group_bytes();
+    let mut packed = vec![0u8; k * row_bytes];
+    let mut scales = vec![f16::from_f32(0.0); k * gpr];
+    packed
+        .par_chunks_mut(row_bytes)
+        .zip(scales.par_chunks_mut(gpr))
+        .zip(data.par_chunks(n))
+        .for_each(|((prow, srow), row)| quantize_low_row(row, bits, rounding, prow, srow));
+    (packed, scales)
+}
+
+/// Dequantize Q3 / Q2 back to f32 (reference for tests and tooling).
+pub fn dequantize_low(packed: &[u8], scales: &[f16], bits: LowBits, k: usize, n: usize) -> Vec<f32> {
+    let gb = bits.group_bytes();
+    let mut out = vec![0.0f32; k * n];
+    for (g, dst) in out.chunks_mut(GROUP).enumerate() {
+        unpack_low(bits, &packed[g * gb..(g + 1) * gb], scales[g].to_f32(), dst);
+    }
+    out
+}
+
 /// Quantized ints of `group` for a stored (f16) scale `s`, and the squared
 /// reconstruction error.
 fn quantize_with(group: &[f32], s: f32, inv: f32, f: &Format, q: &mut [i32]) -> f64 {
@@ -294,6 +418,54 @@ mod tests {
             let r = g * GROUP..(g + 1) * GROUP;
             assert!(sse(&w[r.clone()], &em[r.clone()]) <= sse(&w[r.clone()], &er[r]) + 1e-15);
         }
+    }
+
+    /// Every level of both low-bit formats survives pack -> unpack.
+    #[test]
+    fn low_bit_pack_roundtrips_every_level() {
+        for bits in [LowBits::Q3, LowBits::Q2] {
+            let f = bits.format();
+            let q: Vec<i32> = (0..GROUP as i32).map(|i| f.qmin + i % (f.qmax - f.qmin + 1)).collect();
+            let mut packed = vec![0u8; bits.group_bytes()];
+            pack_low(bits, &q, &mut packed);
+            let mut out = vec![0.0f32; GROUP];
+            unpack_low(bits, &packed, 1.0, &mut out);
+            let back: Vec<i32> = out.iter().map(|&v| v as i32).collect();
+            assert_eq!(back, q, "{bits:?}");
+        }
+    }
+
+    #[test]
+    fn low_bit_mse_is_never_worse_than_rtn() {
+        let (k, n) = (32, 128);
+        let w = sample(k * n, 6);
+        for bits in [LowBits::Q3, LowBits::Q2] {
+            let (pr, sr) = quantize_low(&w, k, n, bits, Rounding::Rtn);
+            let (pm, sm) = quantize_low(&w, k, n, bits, Rounding::Mse);
+            let er = dequantize_low(&pr, &sr, bits, k, n);
+            let em = dequantize_low(&pm, &sm, bits, k, n);
+            for g in 0..k * n / GROUP {
+                let r = g * GROUP..(g + 1) * GROUP;
+                assert!(
+                    sse(&w[r.clone()], &em[r.clone()]) <= sse(&w[r.clone()], &er[r]) + 1e-15,
+                    "{bits:?} group {g}"
+                );
+            }
+        }
+    }
+
+    /// Fewer bits, more error: Q2 > Q3 > Q4 on the same data.
+    #[test]
+    fn error_grows_as_bits_shrink() {
+        let (k, n) = (32, 128);
+        let w = sample(k * n, 7);
+        let (p4, s4) = quantize_q4(&w, k, n, Rounding::Mse);
+        let e4 = sse(&w, &dequantize_q4(&p4, &s4, k, n));
+        let (p3, s3) = quantize_low(&w, k, n, LowBits::Q3, Rounding::Mse);
+        let e3 = sse(&w, &dequantize_low(&p3, &s3, LowBits::Q3, k, n));
+        let (p2, s2) = quantize_low(&w, k, n, LowBits::Q2, Rounding::Mse);
+        let e2 = sse(&w, &dequantize_low(&p2, &s2, LowBits::Q2, k, n));
+        assert!(e4 < e3 && e3 < e2, "q4 {e4} q3 {e3} q2 {e2}");
     }
 
     #[test]

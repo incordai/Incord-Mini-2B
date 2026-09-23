@@ -11,7 +11,7 @@
 //! `k`, `v`, `o`, `gate`, `up`, `down`, DeltaNet `in_qkv`, `in_a`, `in_b`,
 //! `in_z`, `out`) or groups (`attn`, `qkv`, `mlp`, `table`, `all`). Layers are
 //! `N` or `A-B` (inclusive); rules with layers never match the embedding or
-//! head. Formats: `f16`, `q8`, `q4`.
+//! head. Formats: `f16`, `q8`, `q4`, `q3`, `q2`.
 
 use std::ops::RangeInclusive;
 
@@ -21,6 +21,8 @@ pub enum Fmt {
     F16,
     Q8,
     Q4,
+    Q3,
+    Q2,
 }
 
 impl Fmt {
@@ -30,6 +32,17 @@ impl Fmt {
             Fmt::F16 => 0,
             Fmt::Q4 => 1,
             Fmt::Q8 => 2,
+            Fmt::Q3 => 3,
+            Fmt::Q2 => 4,
+        }
+    }
+
+    /// The sub-4-bit layout, for Q3 / Q2.
+    pub fn low_bits(self) -> Option<crate::quant::LowBits> {
+        match self {
+            Fmt::Q3 => Some(crate::quant::LowBits::Q3),
+            Fmt::Q2 => Some(crate::quant::LowBits::Q2),
+            _ => None,
         }
     }
 }
@@ -41,7 +54,9 @@ impl std::str::FromStr for Fmt {
             "f16" => Ok(Fmt::F16),
             "q8" => Ok(Fmt::Q8),
             "q4" => Ok(Fmt::Q4),
-            _ => Err(format!("unknown format '{s}' (expected f16, q8 or q4)")),
+            "q3" => Ok(Fmt::Q3),
+            "q2" => Ok(Fmt::Q2),
+            _ => Err(format!("unknown format '{s}' (expected f16, q8, q4, q3 or q2)")),
         }
     }
 }
@@ -256,7 +271,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_specs() {
-        for bad in ["down", "down=q3", "dwn=q8", "down@5-2=q8", "down@x=q8"] {
+        for bad in ["down", "down=q5", "dwn=q8", "down@5-2=q8", "down@x=q8"] {
             assert!(Plan::parse(Fmt::Q4, bad).is_err(), "{bad} should be rejected");
         }
     }

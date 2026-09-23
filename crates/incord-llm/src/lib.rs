@@ -1,4 +1,5 @@
 pub mod config;
+pub mod e8;
 pub mod eval;
 pub mod gemv;
 pub mod gemv_batch;

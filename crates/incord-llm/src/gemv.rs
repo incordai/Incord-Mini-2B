@@ -46,12 +46,24 @@ pub struct Q8Weight {
     pub n: usize,
 }
 
-/// Polymorphic weight — either f16, Q4, or Q8.
+/// A weight matrix in a sub-4-bit format (Q3 / Q2, see `crate::quant`).
+/// Computed through the tiled paths via [`Weight::row_segment_f32`].
+#[derive(Clone)]
+pub struct LowBitWeight {
+    pub bits: crate::quant::LowBits,
+    pub packed: Vec<u8>,
+    pub scales: Vec<f16>,
+    pub k: usize,
+    pub n: usize,
+}
+
+/// Polymorphic weight — f16, Q4, Q8, or sub-4-bit.
 #[derive(Clone)]
 pub enum Weight {
     F16(F16Weight),
     Q4(Q4Weight),
     Q8(Q8Weight),
+    LowBit(LowBitWeight),
     /// The inner weight is stored in Hadamard-rotated input space
     /// (see `crate::rotate`): a matmul weight `[k, n]` holds `Rᵀ·W`, a head /
     /// embedding `[vocab, hidden]` holds every row times `R`. Every compute
@@ -68,6 +80,7 @@ impl Weight {
             Weight::F16(w) => w.n,
             Weight::Q4(w) => w.n,
             Weight::Q8(w) => w.n,
+            Weight::LowBit(w) => w.n,
             Weight::Rotated(w, _) => w.n(),
         }
     }
@@ -76,6 +89,7 @@ impl Weight {
             Weight::F16(w) => w.k,
             Weight::Q4(w) => w.k,
             Weight::Q8(w) => w.k,
+            Weight::LowBit(w) => w.k,
             Weight::Rotated(w, _) => w.k(),
         }
     }
@@ -84,17 +98,32 @@ impl Weight {
             Weight::F16(w) => w.data.len() * 2,
             Weight::Q4(w) => w.packed.len() + w.scales.len() * 2,
             Weight::Q8(w) => w.data.len() + w.scales.len() * 2,
+            Weight::LowBit(w) => w.packed.len() + w.scales.len() * 2,
             Weight::Rotated(w, _) => w.memory_bytes(),
         }
     }
 
-    /// Storage format id of the underlying data (0 = F16, 1 = Q4, 2 = Q8).
+    /// Storage format id of the underlying data (0 = F16, 1 = Q4, 2 = Q8,
+    /// 3 = Q3, 4 = Q2).
     pub fn format_id(&self) -> u8 {
         match self {
             Weight::F16(_) => 0,
             Weight::Q4(_) => 1,
             Weight::Q8(_) => 2,
+            Weight::LowBit(w) => match w.bits {
+                crate::quant::LowBits::Q3 => 3,
+                crate::quant::LowBits::Q2 => 4,
+            },
             Weight::Rotated(w, _) => w.format_id(),
+        }
+    }
+
+    /// True when this weight (or the weight inside a rotation) is sub-4-bit.
+    pub fn is_low_bit(&self) -> bool {
+        match self {
+            Weight::LowBit(_) => true,
+            Weight::Rotated(w, _) => w.is_low_bit(),
+            _ => false,
         }
     }
 
@@ -139,6 +168,14 @@ impl Weight {
                     for (d, &v) in gd.iter_mut().zip(q) {
                         *d = v as f32 * s;
                     }
+                }
+            }
+            Weight::LowBit(w) => {
+                let gb = w.bits.group_bytes();
+                let first = (i * w.n + c0) / crate::quant::GROUP;
+                for (gd, g) in dst.chunks_mut(crate::quant::GROUP).zip(first..) {
+                    let src = &w.packed[g * gb..(g + 1) * gb];
+                    crate::quant::unpack_low(w.bits, src, w.scales[g].to_f32(), gd);
                 }
             }
             // Raw stored (rotated-space) values; callers rotate the input.
@@ -432,6 +469,16 @@ impl ModelWeights {
                 .iter()
                 .any(|l| l.matmul_weights().iter().any(|w| w.is_rotated()))
     }
+
+    /// True when any weight uses a sub-4-bit format.
+    pub fn has_low_bit(&self) -> bool {
+        self.embed.is_low_bit()
+            || self.lm_head.is_low_bit()
+            || self
+                .layers
+                .iter()
+                .any(|l| l.matmul_weights().iter().any(|w| w.is_low_bit()))
+    }
 }
 
 // ============================================================
@@ -445,6 +492,8 @@ pub fn gemv(input: &[f32], weight: &Weight) -> Vec<f32> {
         Weight::F16(w) => gemv_f16(input, w),
         Weight::Q4(w) => gemv_q4(input, w),
         Weight::Q8(w) => gemv_q8(input, w),
+        // No dedicated kernel: the tiled path parallelises over columns.
+        Weight::LowBit(_) => gemm_tiled(input, 1, weight),
         Weight::Rotated(w, seed) => gemv(&rotated(input, *seed), w),
     }
 }
@@ -455,14 +504,14 @@ pub fn gemm(x: &[f32], seq_len: usize, weight: &Weight) -> Vec<f32> {
     if let Weight::Rotated(w, seed) = weight {
         return gemm(&rotated_rows(x, w.k(), *seed), seq_len, w);
     }
-    if seq_len >= GEMM_TILED_MIN_TOKENS {
+    if seq_len >= GEMM_TILED_MIN_TOKENS || matches!(weight, Weight::LowBit(_)) {
         return gemm_tiled(x, seq_len, weight);
     }
     match weight {
         Weight::F16(w) => gemm_f16(x, seq_len, w),
         Weight::Q4(w) => gemm_q4(x, seq_len, w),
         Weight::Q8(w) => gemm_q8(x, seq_len, w),
-        Weight::Rotated(..) => unreachable!("unwrapped above"),
+        Weight::LowBit(_) | Weight::Rotated(..) => unreachable!("handled above"),
     }
 }
 
@@ -502,6 +551,11 @@ pub fn embed_lookup(weight: &Weight, token_id: usize, hidden: usize) -> Vec<f32>
         }
         Weight::Q4(w) => embed_lookup_q4(w, token_id),
         Weight::Q8(w) => embed_lookup_q8(w, token_id),
+        Weight::LowBit(_) => {
+            let mut row = vec![0.0f32; hidden];
+            weight.row_segment_f32(token_id, 0, &mut row);
+            row
+        }
         Weight::Rotated(w, seed) => {
             let mut row = embed_lookup(w, token_id, hidden);
             crate::rotate::inverse(&mut row, *seed);
@@ -1308,6 +1362,9 @@ pub fn lm_head_parallel(input: &[f32], embed: &Weight, vocab: usize, hidden: usi
     if let Weight::Rotated(w, seed) = embed {
         return lm_head_parallel(&rotated(input, *seed), w, vocab, hidden);
     }
+    if let Weight::LowBit(_) = embed {
+        return lm_head_batch(input, 1, embed);
+    }
     match embed {
         Weight::F16(w) => {
             let mut output = vec![0.0f32; vocab];
@@ -1410,7 +1467,7 @@ pub fn lm_head_parallel(input: &[f32], embed: &Weight, vocab: usize, hidden: usi
                 });
             output
         }
-        Weight::Rotated(..) => unreachable!("unwrapped above"),
+        Weight::LowBit(_) | Weight::Rotated(..) => unreachable!("handled above"),
     }
 }
 
@@ -2855,6 +2912,43 @@ mod gemm_tiled_tests {
         close(&lm_head_batch(&hs, 3, &rotw), &lm_head_batch(&hs, 3, &plain), "head batch");
         for tok in [0, 7, 39] {
             close(&embed_lookup(&rotw, tok, hidden), &embed_lookup(&plain, tok, hidden), "embed");
+        }
+    }
+
+    /// Q3 / Q2 through every compute path must equal dense math on the
+    /// dequantized matrix (there is no separate kernel to drift).
+    #[test]
+    fn low_bit_weights_match_dequantized_dense() {
+        use crate::quant::{LowBits, dequantize_low, quantize_low};
+        for bits in [LowBits::Q3, LowBits::Q2] {
+            let (k, n) = (K, N);
+            let (packed, scales) = quantize_low(&data(k * n, 21), k, n, bits, Rounding::Mse);
+            let dense = dequantize_low(&packed, &scales, bits, k, n);
+            let w = Weight::LowBit(LowBitWeight { bits, packed, scales, k, n });
+            let near = |a: &[f32], b: &[f32], what: &str| {
+                for (i, (x, y)) in a.iter().zip(b).enumerate() {
+                    assert!((x - y).abs() <= 1e-4 * (1.0 + y.abs()), "{bits:?} {what} i={i}: {x} vs {y}");
+                }
+            };
+            let matmul = |xs: &[f32], rows: usize| -> Vec<f32> {
+                (0..rows * n)
+                    .map(|idx| {
+                        let (t, j) = (idx / n, idx % n);
+                        (0..k).map(|i| xs[t * k + i] * dense[i * n + j]).sum()
+                    })
+                    .collect()
+            };
+            let x = data(k, 22);
+            near(&gemv(&x, &w), &matmul(&x, 1), "gemv");
+            let xs = data(37 * k, 23);
+            near(&gemm(&xs, 37, &w), &matmul(&xs, 37), "gemm tiled");
+            near(&gemm(&xs[..3 * k], 3, &w), &matmul(&xs[..3 * k], 3), "gemm short");
+            // As a [vocab = k, hidden = n] table: head and embedding lookup.
+            let h = data(n, 24);
+            let logits: Vec<f32> =
+                (0..k).map(|v| (0..n).map(|j| h[j] * dense[v * n + j]).sum()).collect();
+            near(&lm_head_parallel(&h, &w, k, n), &logits, "head");
+            near(&embed_lookup(&w, 5, n), &dense[5 * n..6 * n], "embed");
         }
     }
 

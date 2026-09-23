@@ -1034,6 +1034,9 @@ pub fn generate_gpu(
         // The GPU forward does not apply the Hadamard input transform yet.
         return Err("model has rotated weights, not supported on the GPU path yet".into());
     }
+    if weights.has_low_bit() {
+        return Err("model has Q3/Q2 weights, not supported on the GPU path yet".into());
+    }
     let result = std::cell::RefCell::new(None);
 
     std::thread::scope(|s| {
