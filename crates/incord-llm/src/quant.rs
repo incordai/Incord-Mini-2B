@@ -82,6 +82,35 @@ const Q2: Format = Format {
     d_step: 1.0 / 16.0,
 };
 
+/// Scalar grid formats, for callers that quantize one group at a time
+/// (e.g. GPTQ with groups along the input dimension).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarFmt {
+    Q8,
+    Q4,
+}
+
+impl ScalarFmt {
+    fn format(self) -> &'static Format {
+        match self {
+            ScalarFmt::Q8 => &Q8,
+            ScalarFmt::Q4 => &Q4,
+        }
+    }
+
+    /// Integer level range (inclusive).
+    pub fn range(self) -> (i32, i32) {
+        let f = self.format();
+        (f.qmin, f.qmax)
+    }
+}
+
+/// Quantize one group of up to [`GROUP`] values: writes the levels into `q`
+/// and returns the stored (f16) scale, value = scale * level.
+pub fn quantize_scalar_group(group: &[f32], fmt: ScalarFmt, rounding: Rounding, q: &mut [i32]) -> f16 {
+    quantize_group(group, fmt.format(), rounding, &mut q[..group.len()])
+}
+
 /// Sub-4-bit formats (roadmap Milestone 6). Groups of [`GROUP`] along `n`,
 /// one f16 scale per group, value = scale * q:
 ///
