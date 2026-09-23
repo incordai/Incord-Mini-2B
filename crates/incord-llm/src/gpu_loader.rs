@@ -145,7 +145,7 @@ fn weight_to_gpu<B: Backend>(w: &Weight, device: &B::Device) -> Tensor<B, 2> {
         Weight::F16(fw) => f16_weight_to_gpu::<B>(&fw.data, fw.k, fw.n, device),
         Weight::Q4(qw) => q4_weight_to_gpu::<B>(&qw.packed, &qw.scales, qw.k, qw.n, device),
         Weight::Q8(qw) => q8_weight_to_gpu::<B>(&qw.data, &qw.scales, qw.k, qw.n, device),
-        Weight::Rotated(_) => unreachable!("generate_gpu rejects rotated models before upload"),
+        Weight::Rotated(..) => unreachable!("generate_gpu rejects rotated models before upload"),
     }
 }
 
@@ -207,7 +207,7 @@ pub fn load_model_gpu<B: Backend>(weights: &ModelWeights, device: &B::Device) ->
         Weight::F16(fw) => fw.data.iter().map(|v| v.to_f32()).collect(),
         Weight::Q4(qw) => dequant_q4_to_f32(&qw.packed, &qw.scales, qw.k, qw.n),
         Weight::Q8(qw) => dequant_q8_to_f32(&qw.data, &qw.scales, qw.k, qw.n),
-        Weight::Rotated(_) => unreachable!("generate_gpu rejects rotated models before upload"),
+        Weight::Rotated(..) => unreachable!("generate_gpu rejects rotated models before upload"),
     };
 
     let final_norm_gamma = norm_to_gpu::<B>(&weights.final_norm, device);
