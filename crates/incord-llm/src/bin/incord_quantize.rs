@@ -26,15 +26,15 @@ use std::time::Instant;
 use half::f16;
 use incord::eval::corpus_chunks;
 use incord::gemv::{
-    F16Weight, HybridCache, HybridLayerWeights, LinearObserver, LinearSite, ModelWeights,
-    NoObserver, Q4Weight, Q8Weight, Weight, embed_lookup, prefill_layer,
+    F16Weight, HybridCache, HybridLayerWeights, LinearObserver, LinearSite, LowBitWeight,
+    ModelWeights, NoObserver, Q4Weight, Q8Weight, Weight, embed_lookup, prefill_layer,
 };
 use incord::gptq::{GptqConfig, Hessian, RowQuantizer, gptq};
 use incord::plan::{Class, Fmt, Plan};
 use incord::rotate::DEFAULT_SEED;
 use incord::quant::{
-    GROUP, Rounding, dequantize_q4, dequantize_q8, quantize_q4, quantize_q4_row, quantize_q8,
-    quantize_q8_row,
+    GROUP, LowBits, Rounding, dequantize_low, dequantize_q4, dequantize_q8, quantize_low,
+    quantize_low_row, quantize_q4, quantize_q4_row, quantize_q8, quantize_q8_row,
 };
 
 const USAGE: &str = "usage: incord-quantize --model <f16.incord> --tokenizer <tokenizer.json> \
@@ -150,6 +150,20 @@ impl RowQuantizer for Q8Rows {
     }
 }
 
+struct LowRows(LowBits, Rounding);
+
+impl RowQuantizer for LowRows {
+    type Code = (Vec<u8>, Vec<f16>);
+    fn quantize(&self, row: &[f32], deq: &mut [f32]) -> Self::Code {
+        let n = row.len();
+        let mut p = vec![0u8; n / GROUP * self.0.group_bytes()];
+        let mut s = vec![f16::from_f32(0.0); n / GROUP];
+        quantize_low_row(row, self.0, self.1, &mut p, &mut s);
+        deq.copy_from_slice(&dequantize_low(&p, &s, self.0, 1, n));
+        (p, s)
+    }
+}
+
 /// f32 copy of an unrotated F16 weight.
 fn f16_data(w: &Weight, what: &str) -> Result<(Vec<f32>, usize, usize), String> {
     match w {
@@ -183,6 +197,12 @@ fn quantize_matmul(w: &Weight, h: &Hessian, fmt: Fmt, o: &Opts, what: &str) -> R
             let (data, scales): (Vec<Vec<i8>>, Vec<Vec<f16>>) = res.rows.into_iter().unzip();
             Weight::Q8(Q8Weight { data: data.concat(), scales: scales.concat(), k, n })
         }
+        Fmt::Q3 | Fmt::Q2 => {
+            let bits = fmt.low_bits().expect("Q3/Q2 have a low-bit layout");
+            let res = gptq(&data, k, n, h, o.gptq, &LowRows(bits, o.rounding))?;
+            let (packed, scales): (Vec<Vec<u8>>, Vec<Vec<f16>>) = res.rows.into_iter().unzip();
+            Weight::LowBit(LowBitWeight { bits, packed: packed.concat(), scales: scales.concat(), k, n })
+        }
         Fmt::F16 => unreachable!(),
     };
     Ok(wrap(q, o.rotate))
@@ -207,6 +227,11 @@ fn quantize_table(w: &Weight, fmt: Fmt, o: &Opts, what: &str) -> Result<Weight, 
         Fmt::Q8 => {
             let (data, scales) = quantize_q8(&data, k, n, o.rounding);
             Weight::Q8(Q8Weight { data, scales, k, n })
+        }
+        Fmt::Q3 | Fmt::Q2 => {
+            let bits = fmt.low_bits().expect("Q3/Q2 have a low-bit layout");
+            let (packed, scales) = quantize_low(&data, k, n, bits, o.rounding);
+            Weight::LowBit(LowBitWeight { bits, packed, scales, k, n })
         }
     };
     Ok(wrap(q, o.rotate))

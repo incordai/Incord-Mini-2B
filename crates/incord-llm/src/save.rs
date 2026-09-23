@@ -158,6 +158,10 @@ fn write_weight(w: &mut impl Write, weight: &Weight) -> io::Result<()> {
             write_bytes(w, bytes)?;
             write_f16_vec(w, &qw.scales)?;
         }
+        Weight::LowBit(lw) => {
+            write_bytes(w, &lw.packed)?;
+            write_f16_vec(w, &lw.scales)?;
+        }
         Weight::Rotated(..) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -240,6 +244,23 @@ fn read_weight_body(r: &mut impl Read, per_weight_fmt: u8, k: usize, n: usize) -
                 k,
                 n,
             }))
+        }
+        3 | 4 => {
+            let bits = if per_weight_fmt == 3 {
+                crate::quant::LowBits::Q3
+            } else {
+                crate::quant::LowBits::Q2
+            };
+            let packed = read_bytes_vec(r)?;
+            let scales = read_f16_vec(r)?;
+            let groups = k * n / crate::quant::GROUP;
+            if scales.len() != groups || packed.len() != groups * bits.group_bytes() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{bits:?} weight [{k}, {n}] has inconsistent packed/scale sizes"),
+                ));
+            }
+            Ok(Weight::LowBit(LowBitWeight { bits, packed, scales, k, n }))
         }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -598,6 +619,8 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
         0 => "F16",
         1 => "Q4",
         2 => "Q8",
+        3 => "Q3",
+        4 => "Q2",
         _ => "unknown",
     };
     eprintln!(

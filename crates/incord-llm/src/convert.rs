@@ -101,11 +101,8 @@ fn main() {
         i += 1;
     }
 
-    let default_fmt = match format.as_str() {
-        "f16" => Fmt::F16,
-        "q8" => Fmt::Q8,
-        _ => Fmt::Q4,
-    };
+    // Historical behaviour: an unrecognised --format means Q4.
+    let default_fmt: Fmt = format.parse().unwrap_or(Fmt::Q4);
     let format_id = default_fmt.id();
     let plan = Plan::parse(default_fmt, &plan_spec).unwrap_or_else(|e| {
         eprintln!("ERROR: --plan: {e}");
@@ -663,8 +660,9 @@ fn write_tensor_weight(
     write_u64(w, n as u64);
 
     // For Q4: fall back to f16 if n not divisible by 32 (can't quantize small matrices)
-    let effective_format = if format_id == 1 && (n % 32 != 0) {
-        eprintln!("    {name}: n={n} not divisible by 32, storing as F16 instead of Q4");
+    // Grouped formats need n divisible by the 32-value group; others fall back.
+    let effective_format = if format_id != 0 && (n % 32 != 0) {
+        eprintln!("    {name}: n={n} not divisible by 32, storing as F16");
         0u8
     } else {
         format_id
@@ -700,6 +698,11 @@ fn write_tensor_weight(
                 std::slice::from_raw_parts(q8_data.as_ptr() as *const u8, q8_data.len())
             };
             write_bytes(w, bytes);
+            write_f16_vec(w, &scales);
+        }
+        3 | 4 => {
+            let (packed, scales) = quantize_low(&f32_data, k, n, effective_format);
+            write_bytes(w, &packed);
             write_f16_vec(w, &scales);
         }
         _ => panic!("Unknown format {effective_format}"),
@@ -760,6 +763,11 @@ fn write_embedding_weight(
             write_bytes(w, bytes);
             write_f16_vec(w, &scales);
         }
+        3 | 4 => {
+            let (packed, scales) = quantize_low(&f32_data, k, n, format_id);
+            write_bytes(w, &packed);
+            write_f16_vec(w, &scales);
+        }
         _ => panic!("Unknown format {format_id}"),
     }
 }
@@ -800,6 +808,16 @@ fn quantize_q4(data: &[f32], k: usize, n: usize) -> (Vec<u8>, Vec<f16>) {
 /// Returns (Vec<i8>, Vec<f16>).
 fn quantize_q8(data: &[f32], k: usize, n: usize) -> (Vec<i8>, Vec<f16>) {
     incord::quant::quantize_q8(data, k, n, rounding())
+}
+
+/// Quantize f32 data to Q3 (format id 3) or Q2 (format id 4).
+fn quantize_low(data: &[f32], k: usize, n: usize, format_id: u8) -> (Vec<u8>, Vec<f16>) {
+    let bits = if format_id == 3 {
+        incord::quant::LowBits::Q3
+    } else {
+        incord::quant::LowBits::Q2
+    };
+    incord::quant::quantize_low(data, k, n, bits, rounding())
 }
 
 // ============================================================

@@ -30,6 +30,30 @@ Top-1 = % of positions where the candidate's most likely token equals the refere
 
 Reference perplexity on the evaluation text: 22.3615.
 
+## M5 — sensitivity map
+
+Base: every weight Q8 with MSE rounding + rotation (converter, no GPTQ).
+One part at a time dropped to Q4. "KL / GB" = KL added per GB saved —
+lower means cheaper to compress.
+
+| Q4 applied to | Size | Saves | KL mean | Top-1 | KL / GB |
+|---|---|---|---|---|---|
+| nothing (all Q8, MSE + rotation) | 2.678 GB | — | 0.000533 | 98.31% | — |
+| embedding | 2.545 GB | 0.133 GB | 0.001709 | 97.14% | 0.009 |
+| MLP, layers 14–27 | 2.414 GB | 0.264 GB | 0.017095 | 91.17% | 0.063 |
+| gate + up, all layers | 2.150 GB | 0.528 GB | 0.040670 | 87.70% | 0.076 |
+| MLP, layers 28–41 | 2.414 GB | 0.264 GB | 0.029689 | 89.73% | 0.11 |
+| MLP, layers 0–13 | 2.414 GB | 0.264 GB | 0.043223 | 88.14% | 0.16 |
+| output head | 2.545 GB | 0.133 GB | 0.021493 | 89.41% | 0.16 |
+| down, all layers | 2.414 GB | 0.264 GB | 0.047677 | 87.11% | 0.18 |
+| o | 2.590 GB | 0.088 GB | 0.022137 | 90.75% | 0.25 |
+| q, k, v | 2.568 GB | 0.110 GB | 0.036890 | 88.67% | 0.33 |
+
+Findings: the embedding and the middle-layer MLPs are cheap to compress;
+attention (q/k/v, o), the output head and the first layers are fragile.
+MSE rounding + rotation alone already halves the error of the shipped Q8
+(0.000994 → 0.000533) at the same size.
+
 ## Notes per milestone
 
 - **M0** — the shipped `model_q8.incord` is byte-identical to a fresh
