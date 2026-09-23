@@ -245,12 +245,8 @@ fn read_weight_body(r: &mut impl Read, per_weight_fmt: u8, k: usize, n: usize) -
                 n,
             }))
         }
-        3 | 4 => {
-            let bits = if per_weight_fmt == 3 {
-                crate::quant::LowBits::Q3
-            } else {
-                crate::quant::LowBits::Q2
-            };
+        id @ 3..=5 => {
+            let bits = crate::quant::LowBits::from_format_id(id).expect("3..=5 are low-bit ids");
             let packed = read_bytes_vec(r)?;
             let scales = read_f16_vec(r)?;
             let groups = k * n / crate::quant::GROUP;
@@ -258,6 +254,18 @@ fn read_weight_body(r: &mut impl Read, per_weight_fmt: u8, k: usize, n: usize) -
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("{bits:?} weight [{k}, {n}] has inconsistent packed/scale sizes"),
+                ));
+            }
+            // E8 codes index the codebook; reject out-of-range codes here so a
+            // corrupt file cannot make decoding read past the table.
+            if bits == crate::quant::LowBits::E8
+                && packed
+                    .chunks_exact(2)
+                    .any(|c| u16::from_le_bytes([c[0], c[1]]) as usize >= crate::e8::CODEBOOK_LEN)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("E8 weight [{k}, {n}] has a code outside the codebook"),
                 ));
             }
             Ok(Weight::LowBit(LowBitWeight { bits, packed, scales, k, n }))
@@ -621,6 +629,7 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
         2 => "Q8",
         3 => "Q3",
         4 => "Q2",
+        5 => "E8",
         _ => "unknown",
     };
     eprintln!(
@@ -687,6 +696,20 @@ mod tests {
         write_weight(&mut buf, &w).unwrap();
         assert_eq!(buf[16], 0, "format byte must stay 0 for plain F16");
         assert!(!roundtrip(&w, None).is_rotated());
+    }
+
+    /// An E8 code past the codebook must be rejected at load, never decoded.
+    #[test]
+    fn e8_code_outside_codebook_is_rejected() {
+        use crate::quant::{LowBits, Rounding, quantize_low};
+        let (mut packed, scales) = quantize_low(&vec![0.01f32; 64], 1, 64, LowBits::E8, Rounding::Mse);
+        let good = Weight::LowBit(LowBitWeight { bits: LowBits::E8, packed: packed.clone(), scales: scales.clone(), k: 1, n: 64 });
+        assert!(roundtrip(&good, None).is_low_bit());
+        packed[0..2].copy_from_slice(&(crate::e8::CODEBOOK_LEN as u16).to_le_bytes());
+        let bad = Weight::LowBit(LowBitWeight { bits: LowBits::E8, packed, scales, k: 1, n: 64 });
+        let mut buf = Vec::new();
+        write_weight(&mut buf, &bad).unwrap();
+        assert!(read_weight(&mut buf.as_slice(), None).is_err());
     }
 
     #[test]

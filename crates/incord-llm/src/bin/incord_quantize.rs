@@ -197,8 +197,8 @@ fn quantize_matmul(w: &Weight, h: &Hessian, fmt: Fmt, o: &Opts, what: &str) -> R
             let (data, scales): (Vec<Vec<i8>>, Vec<Vec<f16>>) = res.rows.into_iter().unzip();
             Weight::Q8(Q8Weight { data: data.concat(), scales: scales.concat(), k, n })
         }
-        Fmt::Q3 | Fmt::Q2 => {
-            let bits = fmt.low_bits().expect("Q3/Q2 have a low-bit layout");
+        Fmt::Q3 | Fmt::Q2 | Fmt::E8 => {
+            let bits = fmt.low_bits().expect("sub-4-bit formats have a low-bit layout");
             let res = gptq(&data, k, n, h, o.gptq, &LowRows(bits, o.rounding))?;
             let (packed, scales): (Vec<Vec<u8>>, Vec<Vec<f16>>) = res.rows.into_iter().unzip();
             Weight::LowBit(LowBitWeight { bits, packed: packed.concat(), scales: scales.concat(), k, n })
@@ -228,8 +228,8 @@ fn quantize_table(w: &Weight, fmt: Fmt, o: &Opts, what: &str) -> Result<Weight, 
             let (data, scales) = quantize_q8(&data, k, n, o.rounding);
             Weight::Q8(Q8Weight { data, scales, k, n })
         }
-        Fmt::Q3 | Fmt::Q2 => {
-            let bits = fmt.low_bits().expect("Q3/Q2 have a low-bit layout");
+        Fmt::Q3 | Fmt::Q2 | Fmt::E8 => {
+            let bits = fmt.low_bits().expect("sub-4-bit formats have a low-bit layout");
             let (packed, scales) = quantize_low(&data, k, n, bits, o.rounding);
             Weight::LowBit(LowBitWeight { bits, packed, scales, k, n })
         }

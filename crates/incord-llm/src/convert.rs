@@ -700,7 +700,7 @@ fn write_tensor_weight(
             write_bytes(w, bytes);
             write_f16_vec(w, &scales);
         }
-        3 | 4 => {
+        3..=5 => {
             let (packed, scales) = quantize_low(&f32_data, k, n, effective_format);
             write_bytes(w, &packed);
             write_f16_vec(w, &scales);
@@ -763,7 +763,7 @@ fn write_embedding_weight(
             write_bytes(w, bytes);
             write_f16_vec(w, &scales);
         }
-        3 | 4 => {
+        3..=5 => {
             let (packed, scales) = quantize_low(&f32_data, k, n, format_id);
             write_bytes(w, &packed);
             write_f16_vec(w, &scales);
@@ -810,13 +810,9 @@ fn quantize_q8(data: &[f32], k: usize, n: usize) -> (Vec<i8>, Vec<f16>) {
     incord::quant::quantize_q8(data, k, n, rounding())
 }
 
-/// Quantize f32 data to Q3 (format id 3) or Q2 (format id 4).
+/// Quantize f32 data to a sub-4-bit format (Q3 = 3, Q2 = 4, E8 = 5).
 fn quantize_low(data: &[f32], k: usize, n: usize, format_id: u8) -> (Vec<u8>, Vec<f16>) {
-    let bits = if format_id == 3 {
-        incord::quant::LowBits::Q3
-    } else {
-        incord::quant::LowBits::Q2
-    };
+    let bits = incord::quant::LowBits::from_format_id(format_id).expect("sub-4-bit format id");
     incord::quant::quantize_low(data, k, n, bits, rounding())
 }
 

@@ -104,16 +104,13 @@ impl Weight {
     }
 
     /// Storage format id of the underlying data (0 = F16, 1 = Q4, 2 = Q8,
-    /// 3 = Q3, 4 = Q2).
+    /// 3 = Q3, 4 = Q2, 5 = E8).
     pub fn format_id(&self) -> u8 {
         match self {
             Weight::F16(_) => 0,
             Weight::Q4(_) => 1,
             Weight::Q8(_) => 2,
-            Weight::LowBit(w) => match w.bits {
-                crate::quant::LowBits::Q3 => 3,
-                crate::quant::LowBits::Q2 => 4,
-            },
+            Weight::LowBit(w) => w.bits.format_id(),
             Weight::Rotated(w, _) => w.format_id(),
         }
     }
@@ -2920,7 +2917,7 @@ mod gemm_tiled_tests {
     #[test]
     fn low_bit_weights_match_dequantized_dense() {
         use crate::quant::{LowBits, dequantize_low, quantize_low};
-        for bits in [LowBits::Q3, LowBits::Q2] {
+        for bits in [LowBits::Q3, LowBits::Q2, LowBits::E8] {
             let (k, n) = (K, N);
             let (packed, scales) = quantize_low(&data(k * n, 21), k, n, bits, Rounding::Mse);
             let dense = dequantize_low(&packed, &scales, bits, k, n);
