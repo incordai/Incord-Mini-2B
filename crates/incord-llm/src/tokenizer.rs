@@ -63,6 +63,20 @@ impl IncordTokenizer {
         tokens
     }
 
+    /// A single user turn with thinking off and no system prompt. Unlike
+    /// `format_chat` it carries no date or length hint, so the same message
+    /// always gives the same tokens (used by the benchmarks).
+    pub fn format_plain_chat(&self, user_message: &str) -> Vec<u32> {
+        let mut tokens = self.encode(&format!(
+            "<|im_start|>user\n{user_message}<|im_end|>\n<|im_start|>assistant\n"
+        ));
+        tokens.push(THINK_START);
+        tokens.extend(self.encode("\n\n"));
+        tokens.push(THINK_END);
+        tokens.extend(self.encode("\n\n"));
+        tokens
+    }
+
     /// Build a chat prompt with image for Incord-Mini-2B.
     /// `num_vision_tokens` is the number of merged vision tokens from the encoder.
     /// Format: <|im_start|>system\n...<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|>×N<|vision_end|>\n{text}<|im_end|>\n<|im_start|>assistant\n
