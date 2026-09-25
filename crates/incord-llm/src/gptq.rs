@@ -106,6 +106,90 @@ pub fn gptq<Q: RowQuantizer>(
     cfg: GptqConfig,
     q: &Q,
 ) -> Result<GptqResult<Q::Code>, String> {
+    let mut codes: Vec<Option<Q::Code>> = (0..k).map(|_| None).collect();
+    let damp_used = gptq_core(w, k, n, h, cfg, |orig, row, _rest, deq| {
+        codes[orig] = Some(q.quantize(row, deq));
+    })?;
+    Ok(GptqResult {
+        rows: codes.into_iter().map(|c| c.expect("every row quantized")).collect(),
+        damp_used,
+    })
+}
+
+/// Result of [`gptq_column_groups`]: integer levels `[k, n]` in input-row
+/// order and one scale per (group of `GROUP` input rows, column),
+/// `[k / GROUP, n]`.
+pub struct ColumnGroupResult {
+    pub q: Vec<i8>,
+    pub scales: Vec<half::f16>,
+    pub damp_used: f64,
+}
+
+/// GPTQ where the quantization groups run along the *input* dimension:
+/// `GROUP` consecutive input rows share one scale per column. This is the
+/// layout of the output head (stored `[vocab, hidden]`, groups along
+/// `hidden`), passed here transposed as `[hidden, vocab]`. Each group's
+/// scales are fixed when its first row is reached — after earlier errors
+/// were folded in — which is the standard grouped GPTQ. Rows are processed
+/// in order (act-order would split groups).
+pub fn gptq_column_groups(
+    w: &[f32],
+    k: usize,
+    n: usize,
+    h: &Hessian,
+    cfg: GptqConfig,
+    fmt: crate::quant::ScalarFmt,
+    rounding: crate::quant::Rounding,
+) -> Result<ColumnGroupResult, String> {
+    use crate::quant::GROUP;
+    assert!(k.is_multiple_of(GROUP), "k={k} not a multiple of {GROUP}");
+    let cfg = GptqConfig {
+        act_order: false,
+        block: cfg.block.div_ceil(GROUP) * GROUP,
+        ..cfg
+    };
+    let mut q = vec![0i8; k * n];
+    let mut scales = vec![half::f16::from_f32(0.0); k / GROUP * n];
+    let mut cur = vec![0.0f32; n]; // current group's scale per column
+    let mut ints = vec![0i32; GROUP];
+    let mut col = vec![0.0f32; GROUP];
+    let damp_used = gptq_core(w, k, n, h, cfg, |i, row, rest, deq| {
+        if i.is_multiple_of(GROUP) {
+            // Group start: the group's rows are this one plus the next 31
+            // (same block, since blocks are multiples of GROUP).
+            let g = i / GROUP;
+            for c in 0..n {
+                col[0] = row[c];
+                for (r, v) in col.iter_mut().enumerate().skip(1) {
+                    *v = rest[(r - 1) * n + c];
+                }
+                let s = crate::quant::quantize_scalar_group(&col, fmt, rounding, &mut ints);
+                scales[g * n + c] = s;
+                cur[c] = s.to_f32();
+            }
+        }
+        let (lo, hi) = fmt.range();
+        for c in 0..n {
+            let s = cur[c];
+            let qi = if s > 0.0 { ((row[c] / s).round() as i32).clamp(lo, hi) } else { 0 };
+            q[i * n + c] = qi as i8;
+            deq[c] = s * qi as f32;
+        }
+    })?;
+    Ok(ColumnGroupResult { q, scales, damp_used })
+}
+
+/// Shared GPTQ loop. Calls `step(original_row, row, later_rows_in_block,
+/// dequantized_out)` for every row in processing order; `step` must write
+/// the row's dequantized values. Returns the damping actually used.
+fn gptq_core(
+    w: &[f32],
+    k: usize,
+    n: usize,
+    h: &Hessian,
+    cfg: GptqConfig,
+    mut step: impl FnMut(usize, &[f32], &[f32], &mut [f32]),
+) -> Result<f64, String> {
     assert_eq!(w.len(), k * n);
     assert_eq!(h.k, k, "Hessian size {} != weight rows {k}", h.k);
 
@@ -149,7 +233,6 @@ pub fn gptq<Q: RowQuantizer>(
     };
     let uf = Mat::<f32>::from_fn(k, k, |i, j| u[(i, j)] as f32);
 
-    let mut codes: Vec<Option<Q::Code>> = (0..k).map(|_| None).collect();
     let mut deq = vec![0.0f32; n];
     let block = cfg.block.max(1);
     for i1 in (0..k).step_by(block) {
@@ -162,7 +245,7 @@ pub fn gptq<Q: RowQuantizer>(
                 let i = i1 + r;
                 let (done, rest) = wb.split_at_mut((r + 1) * n);
                 let row = &done[r * n..];
-                codes[perm[i]] = Some(q.quantize(row, &mut deq));
+                step(perm[i], row, rest, &mut deq);
                 let d = uf[(i, i)];
                 let e = &mut err[r * n..(r + 1) * n];
                 for c in 0..n {
@@ -185,11 +268,7 @@ pub fn gptq<Q: RowQuantizer>(
             matmul(dst, Accum::Add, lhs, rhs, -1.0f32, Par::rayon(0));
         }
     }
-
-    Ok(GptqResult {
-        rows: codes.into_iter().map(|c| c.expect("every row quantized")).collect(),
-        damp_used: damp,
-    })
+    Ok(damp)
 }
 
 #[cfg(test)]
@@ -327,6 +406,40 @@ mod tests {
             let e = out_err(&x, rows, k, n, &w, &q);
             assert!(e < e_rtn, "block {block} act_order {act_order}: {e} vs {e_rtn}");
         }
+    }
+
+    /// Groups along the input dimension (the output-head layout): must beat
+    /// plain per-group rounding on output error, and every stored level must
+    /// be consistent with its group's scale.
+    #[test]
+    fn column_groups_beat_rtn_and_are_consistent() {
+        use crate::quant::{GROUP, Rounding, ScalarFmt, quantize_scalar_group};
+        let (rows, k, n) = (512, 64, 24); // k = 2 groups of 32 input rows
+        let x = inputs(rows, k);
+        let w: Vec<f32> = data(k * n, 8).iter().map(|v| v * 0.05).collect();
+        let mut h = Hessian::new(k);
+        h.add(&x, rows);
+        let res = gptq_column_groups(&w, k, n, &h, GptqConfig::default(), ScalarFmt::Q4, Rounding::Mse)
+            .unwrap();
+        assert_eq!(res.scales.len(), k / GROUP * n);
+        let deq: Vec<f32> = (0..k * n)
+            .map(|idx| res.q[idx] as f32 * res.scales[(idx / n) / GROUP * n + idx % n].to_f32())
+            .collect();
+        // Plain rounding with the same grouping (32 input rows per column).
+        let mut rtn = vec![0.0f32; k * n];
+        let mut ints = [0i32; GROUP];
+        for g in 0..k / GROUP {
+            for c in 0..n {
+                let col: Vec<f32> = (0..GROUP).map(|r| w[(g * GROUP + r) * n + c]).collect();
+                let s = quantize_scalar_group(&col, ScalarFmt::Q4, Rounding::Mse, &mut ints).to_f32();
+                for r in 0..GROUP {
+                    rtn[(g * GROUP + r) * n + c] = s * ints[r] as f32;
+                }
+            }
+        }
+        let (e_rtn, e_gptq) = (out_err(&x, rows, k, n, &w, &rtn), out_err(&x, rows, k, n, &w, &deq));
+        assert!(e_gptq < 0.7 * e_rtn, "column-group gptq {e_gptq} vs rtn {e_rtn}");
+        assert!(res.q.iter().all(|&v| (-8..=7).contains(&v)));
     }
 
     #[test]

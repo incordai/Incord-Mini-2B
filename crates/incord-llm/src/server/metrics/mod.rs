@@ -46,3 +46,33 @@ pub fn render_metrics() -> String {
     encoder.encode(&metrics, &mut buf).unwrap();
     String::from_utf8(buf).unwrap()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every metric registers and renders in the Prometheus text format that
+    /// `/metrics` serves.
+    #[test]
+    fn metrics_render_as_prometheus_text() {
+        REQUESTS_TOTAL.with_label_values(&["chat", "200"]).inc();
+        TOKENS_EMITTED.inc_by(3.0);
+        REQUEST_DURATION.with_label_values(&["chat"]).observe(0.2);
+        ACTIVE_SLOTS.set(2.0);
+        QUEUE_DEPTH.set(1.0);
+        ERRORS_TOTAL.with_label_values(&["timeout"]).inc();
+
+        let text = render_metrics();
+        for line in [
+            "# TYPE incord_requests_total counter",
+            "incord_requests_total{endpoint=\"chat\",status=\"200\"}",
+            "incord_tokens_emitted_total",
+            "incord_request_duration_seconds_bucket{endpoint=\"chat\",le=\"0.5\"}",
+            "incord_active_slots 2",
+            "incord_queue_depth 1",
+            "incord_errors_total{error_type=\"timeout\"}",
+        ] {
+            assert!(text.contains(line), "missing {line:?} in:\n{text}");
+        }
+    }
+}

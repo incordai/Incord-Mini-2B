@@ -5,7 +5,8 @@
 //! incord-quantize --model model_f16.incord --tokenizer tokenizer.json \
 //!     --calib eval/calib --out model_q4_gptq.incord \
 //!     [--format q4|q8|f16] [--plan SPEC] [--rotate] [--rounding mse|rtn] \
-//!     [--seq-len 512] [--chunks-per-file 64] [--damp 0.01] [--block 128] [--no-act-order]
+//!     [--seq-len 512] [--chunks-per-file 64] [--damp 0.01] [--block 128] [--no-act-order] \
+//!     [--no-head-gptq]
 //! ```
 //!
 //! `--plan` overrides `--format` per tensor, e.g. `table=q8,down@0-3=q8`
@@ -16,8 +17,11 @@
 //! Hessian `H = XᵀX` per input site; the layer's weights are then quantized
 //! with GPTQ, and the activations are pushed through the *quantized* layer
 //! so layer `i + 1` is calibrated on what it will really receive. The
-//! embedding is quantized first for the same reason. The output head and
-//! embedding use plain (MSE) rounding. Input must be an unrotated F16 model.
+//! embedding is quantized first for the same reason (plain MSE rounding: a
+//! lookup table has no input to calibrate on). A Q4/Q8 output head gets
+//! GPTQ with groups along its input dimension, using the final-normed hidden
+//! states (`--no-head-gptq` falls back to plain rounding). Input must be an
+//! unrotated F16 model.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,20 +31,20 @@ use half::f16;
 use incord::eval::corpus_chunks;
 use incord::gemv::{
     F16Weight, HybridCache, HybridLayerWeights, LinearObserver, LinearSite, LowBitWeight,
-    ModelWeights, NoObserver, Q4Weight, Q8Weight, Weight, embed_lookup, prefill_layer,
+    ModelWeights, NoObserver, Q4Weight, Q8Weight, Weight, embed_lookup, prefill_layer, rms_norm,
 };
-use incord::gptq::{GptqConfig, Hessian, RowQuantizer, gptq};
+use incord::gptq::{GptqConfig, Hessian, RowQuantizer, gptq, gptq_column_groups};
 use incord::plan::{Class, Fmt, Plan};
 use incord::rotate::DEFAULT_SEED;
 use incord::quant::{
-    GROUP, LowBits, Rounding, dequantize_low, dequantize_q4, dequantize_q8, quantize_low,
-    quantize_low_row, quantize_q4, quantize_q4_row, quantize_q8, quantize_q8_row,
+    GROUP, LowBits, Rounding, ScalarFmt, dequantize_low, dequantize_q4, dequantize_q8,
+    quantize_low, quantize_low_row, quantize_q4, quantize_q4_row, quantize_q8, quantize_q8_row,
 };
 
 const USAGE: &str = "usage: incord-quantize --model <f16.incord> --tokenizer <tokenizer.json> \
---calib <dir|file> --out <out.incord> [--format q4|q8|f16] [--plan SPEC] [--rotate] \
+--calib <dir|file> --out <out.incord> [--format q4|q8|f16|q3|q2|e8] [--plan SPEC] [--rotate] \
 [--rounding mse|rtn] [--seq-len 512] [--chunks-per-file 64] [--damp 0.01] [--block 128] \
-[--no-act-order]";
+[--no-act-order] [--no-head-gptq]";
 
 struct Opts {
     model: String,
@@ -54,6 +58,8 @@ struct Opts {
     seq_len: usize,
     per_file: usize,
     gptq: GptqConfig,
+    /// GPTQ the output head (Q4/Q8) instead of plain rounding.
+    head_gptq: bool,
 }
 
 fn opt<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
@@ -98,6 +104,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             block: parsed(args, "--block", 128usize)?,
             act_order: !args.iter().any(|a| a == "--no-act-order"),
         },
+        head_gptq: !args.iter().any(|a| a == "--no-head-gptq"),
     })
 }
 
@@ -190,18 +197,18 @@ fn quantize_matmul(w: &Weight, h: &Hessian, fmt: Fmt, o: &Opts, what: &str) -> R
         Fmt::Q4 => {
             let res = gptq(&data, k, n, h, o.gptq, &Q4Rows(o.rounding))?;
             let (packed, scales): (Vec<Vec<u8>>, Vec<Vec<f16>>) = res.rows.into_iter().unzip();
-            Weight::Q4(Q4Weight { packed: packed.concat(), scales: scales.concat(), k, n })
+            Weight::Q4(Q4Weight { packed: packed.concat().into(), scales: scales.concat().into(), k, n })
         }
         Fmt::Q8 => {
             let res = gptq(&data, k, n, h, o.gptq, &Q8Rows(o.rounding))?;
             let (data, scales): (Vec<Vec<i8>>, Vec<Vec<f16>>) = res.rows.into_iter().unzip();
-            Weight::Q8(Q8Weight { data: data.concat(), scales: scales.concat(), k, n })
+            Weight::Q8(Q8Weight { data: data.concat().into(), scales: scales.concat().into(), k, n })
         }
-        Fmt::Q3 | Fmt::Q2 => {
-            let bits = fmt.low_bits().expect("Q3/Q2 have a low-bit layout");
+        Fmt::Q3 | Fmt::Q2 | Fmt::E8 => {
+            let bits = fmt.low_bits().expect("sub-4-bit formats have a low-bit layout");
             let res = gptq(&data, k, n, h, o.gptq, &LowRows(bits, o.rounding))?;
             let (packed, scales): (Vec<Vec<u8>>, Vec<Vec<f16>>) = res.rows.into_iter().unzip();
-            Weight::LowBit(LowBitWeight { bits, packed: packed.concat(), scales: scales.concat(), k, n })
+            Weight::LowBit(LowBitWeight { bits, packed: packed.concat().into(), scales: scales.concat().into(), k, n })
         }
         Fmt::F16 => unreachable!(),
     };
@@ -222,16 +229,71 @@ fn quantize_table(w: &Weight, fmt: Fmt, o: &Opts, what: &str) -> Result<Weight, 
         }),
         Fmt::Q4 => {
             let (packed, scales) = quantize_q4(&data, k, n, o.rounding);
-            Weight::Q4(Q4Weight { packed, scales, k, n })
+            Weight::Q4(Q4Weight { packed: packed.into(), scales: scales.into(), k, n })
         }
         Fmt::Q8 => {
             let (data, scales) = quantize_q8(&data, k, n, o.rounding);
-            Weight::Q8(Q8Weight { data, scales, k, n })
+            Weight::Q8(Q8Weight { data: data.into(), scales: scales.into(), k, n })
         }
-        Fmt::Q3 | Fmt::Q2 => {
-            let bits = fmt.low_bits().expect("Q3/Q2 have a low-bit layout");
+        Fmt::Q3 | Fmt::Q2 | Fmt::E8 => {
+            let bits = fmt.low_bits().expect("sub-4-bit formats have a low-bit layout");
             let (packed, scales) = quantize_low(&data, k, n, bits, o.rounding);
-            Weight::LowBit(LowBitWeight { bits, packed, scales, k, n })
+            Weight::LowBit(LowBitWeight { bits, packed: packed.into(), scales: scales.into(), k, n })
+        }
+    };
+    Ok(wrap(q, o.rotate))
+}
+
+/// GPTQ for the output head `[vocab, hidden]`, whose quant groups run along
+/// `hidden` — its input dimension. Works on the transpose `[hidden, vocab]`
+/// with groups along the input rows, then packs back to the head layout.
+fn quantize_head_gptq(w: &Weight, h: &Hessian, sf: ScalarFmt, o: &Opts) -> Result<Weight, String> {
+    let (data, vocab, hidden) = f16_data(w, "output head")?;
+    if !hidden.is_multiple_of(GROUP) {
+        return Err(format!("output head hidden {hidden} not a multiple of {GROUP}"));
+    }
+    let mut t = vec![0.0f32; hidden * vocab];
+    for v in 0..vocab {
+        for j in 0..hidden {
+            t[j * vocab + v] = data[v * hidden + j];
+        }
+    }
+    drop(data);
+    if o.rotate {
+        // Rotating every head row along hidden = rotating the columns of the
+        // transpose.
+        incord::rotate::rotate_columns(&mut t, hidden, vocab, DEFAULT_SEED);
+    }
+    let res = gptq_column_groups(&t, hidden, vocab, h, o.gptq, sf, o.rounding)?;
+    drop(t);
+    let gpr = hidden / GROUP;
+    let mut scales = vec![f16::from_f32(0.0); vocab * gpr];
+    for g in 0..gpr {
+        for v in 0..vocab {
+            scales[v * gpr + g] = res.scales[g * vocab + v];
+        }
+    }
+    let level = |v: usize, j: usize| res.q[j * vocab + v];
+    let q = match sf {
+        ScalarFmt::Q8 => {
+            let mut data = vec![0i8; vocab * hidden];
+            for v in 0..vocab {
+                for j in 0..hidden {
+                    data[v * hidden + j] = level(v, j);
+                }
+            }
+            Weight::Q8(Q8Weight { data: data.into(), scales: scales.into(), k: vocab, n: hidden })
+        }
+        ScalarFmt::Q4 => {
+            let mut packed = vec![0u8; vocab * hidden / 2];
+            for v in 0..vocab {
+                for j in (0..hidden).step_by(2) {
+                    let lo = (level(v, j) as i32 + 8) as u8;
+                    let hi = (level(v, j + 1) as i32 + 8) as u8;
+                    packed[(v * hidden + j) / 2] = lo | (hi << 4);
+                }
+            }
+            Weight::Q4(Q4Weight { packed: packed.into(), scales: scales.into(), k: vocab, n: hidden })
         }
     };
     Ok(wrap(q, o.rotate))
@@ -333,7 +395,33 @@ fn run(o: &Opts) -> Result<(), String> {
     }
 
     let head_fmt = o.plan.format_for(Class::Head, None);
-    w.lm_head = quantize_table(&w.lm_head, head_fmt, o, "output head")?;
+    let head_scalar = match head_fmt {
+        Fmt::Q4 => Some(ScalarFmt::Q4),
+        Fmt::Q8 => Some(ScalarFmt::Q8),
+        _ => None,
+    };
+    w.lm_head = match head_scalar {
+        Some(sf) if o.head_gptq => {
+            let t0 = Instant::now();
+            // Hessian of the head input: final-normed hidden states of the
+            // (quantized) model on the calibration text.
+            let mut h = Hessian::new(hidden);
+            for x in &xs {
+                let mut normed: Vec<f32> = x
+                    .chunks(hidden)
+                    .flat_map(|row| rms_norm(row, &w.final_norm))
+                    .collect();
+                if o.rotate {
+                    normed.chunks_mut(hidden).for_each(|r| incord::rotate::forward(r, DEFAULT_SEED));
+                }
+                h.add(&normed, normed.len() / hidden);
+            }
+            let head = quantize_head_gptq(&w.lm_head, &h, sf, o)?;
+            eprintln!("Output head: GPTQ {sf:?} in {:.1?}", t0.elapsed());
+            head
+        }
+        _ => quantize_table(&w.lm_head, head_fmt, o, "output head")?,
+    };
     incord::save::save_model(&w, Path::new(&o.out)).map_err(|e| format!("save {}: {e}", o.out))?;
     eprintln!("Wrote {} in {:.1?}", o.out, t_all.elapsed());
     Ok(())
@@ -344,5 +432,139 @@ fn main() {
     if let Err(e) = parse(&args).and_then(|o| run(&o)) {
         eprintln!("{e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(rotate: bool) -> Opts {
+        Opts {
+            model: String::new(),
+            tokenizer: String::new(),
+            calib: String::new(),
+            out: String::new(),
+            plan: Plan::parse(Fmt::Q4, "").unwrap(),
+            plan_spec: String::new(),
+            rotate,
+            rounding: Rounding::Mse,
+            seq_len: 0,
+            per_file: 0,
+            gptq: GptqConfig::default(),
+            head_gptq: true,
+        }
+    }
+
+    /// Deterministic values in [-1, 1).
+    fn noise(len: usize, seed: u64) -> Vec<f32> {
+        let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        (0..len)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s >> 40) as f32 / (1u64 << 23) as f32 - 1.0
+            })
+            .collect()
+    }
+
+    fn f16_weight(data: &[f32], k: usize, n: usize) -> Weight {
+        Weight::F16(F16Weight { data: data.iter().map(|&v| f16::from_f32(v)).collect(), k, n })
+    }
+
+    /// f32 values of a weight as stored (f16-rounded for F16).
+    fn stored(data: &[f32]) -> Vec<f32> {
+        data.iter().map(|&v| f16::from_f32(v).to_f32()).collect()
+    }
+
+    fn rel_err(got: &[f32], want: &[f32]) -> f64 {
+        let num: f64 = got.iter().zip(want).map(|(a, b)| ((a - b) as f64).powi(2)).sum();
+        let den: f64 = want.iter().map(|&b| (b as f64).powi(2)).sum();
+        (num / den).sqrt()
+    }
+
+    fn dequant(w: &Weight) -> Vec<f32> {
+        match w {
+            Weight::Q4(q) => dequantize_q4(&q.packed, &q.scales, q.k, q.n),
+            Weight::Q8(q) => dequantize_q8(&q.data, &q.scales, q.k, q.n),
+            Weight::LowBit(q) => dequantize_low(&q.packed, &q.scales, q.bits, q.k, q.n),
+            _ => panic!("not a quantized weight"),
+        }
+    }
+
+    /// `x · W` for `x: [rows, k]`, `W: [k, n]`.
+    fn matmul(x: &[f32], rows: usize, w: &[f32], k: usize, n: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; rows * n];
+        for r in 0..rows {
+            for i in 0..k {
+                let xv = x[r * k + i];
+                for j in 0..n {
+                    out[r * n + j] += xv * w[i * n + j];
+                }
+            }
+        }
+        out
+    }
+
+    /// A table quantizes exactly like the library quantizer for its format.
+    #[test]
+    fn table_matches_library_quantizers() {
+        let (k, n) = (8, 64);
+        let data = noise(k * n, 1);
+        let src = stored(&data);
+        let o = opts(false);
+        let w = f16_weight(&data, k, n);
+        let Weight::Q4(q) = quantize_table(&w, Fmt::Q4, &o, "t").unwrap() else { panic!() };
+        let (p, s) = quantize_q4(&src, k, n, o.rounding);
+        assert_eq!((&q.packed[..], &q.scales[..], q.k, q.n), (&p[..], &s[..], k, n));
+        let Weight::Q8(q) = quantize_table(&w, Fmt::Q8, &o, "t").unwrap() else { panic!() };
+        let (d, s) = quantize_q8(&src, k, n, o.rounding);
+        assert_eq!((&q.data[..], &q.scales[..]), (&d[..], &s[..]));
+        let Weight::LowBit(q) = quantize_table(&w, Fmt::E8, &o, "t").unwrap() else { panic!() };
+        let (p, s) = quantize_low(&src, k, n, LowBits::E8, o.rounding);
+        assert_eq!((q.bits, &q.packed[..], &q.scales[..]), (LowBits::E8, &p[..], &s[..]));
+        let r = quantize_table(&w, Fmt::Q4, &opts(true), "t").unwrap();
+        assert_eq!(r.rotation_seed(), Some(DEFAULT_SEED));
+    }
+
+    /// GPTQ output reproduces the layer's matmul within each format's error,
+    /// and more bits give less error.
+    #[test]
+    fn gptq_matmul_reconstructs_the_layer() {
+        let (k, n, rows) = (64, 64, 96);
+        let data = noise(k * n, 2);
+        let x = noise(rows * k, 3);
+        let mut h = Hessian::new(k);
+        h.add(&x, rows);
+        let want = matmul(&x, rows, &stored(&data), k, n);
+        let w = f16_weight(&data, k, n);
+        let err = |fmt| {
+            let q = quantize_matmul(&w, &h, fmt, &opts(false), "m").unwrap();
+            assert_eq!((q.k(), q.n()), (k, n));
+            rel_err(&matmul(&x, rows, &dequant(&q), k, n), &want)
+        };
+        let (e8, e4, e2) = (err(Fmt::Q8), err(Fmt::Q4), err(Fmt::Q2));
+        assert!(e8 < 0.02, "Q8 error {e8}");
+        assert!(e4 < 0.2, "Q4 error {e4}");
+        assert!(e8 < e4 && e4 < e2, "error must grow as bits shrink: {e8} {e4} {e2}");
+    }
+
+    /// Head GPTQ repacks transposed levels back to `[vocab, hidden]`: the
+    /// dequantized head must match the original rows.
+    #[test]
+    fn head_gptq_repacks_to_head_layout() {
+        let (vocab, hidden, rows) = (48, 64, 96);
+        let data = noise(vocab * hidden, 4);
+        let x = noise(rows * hidden, 5);
+        let mut h = Hessian::new(hidden);
+        h.add(&x, rows);
+        let w = f16_weight(&data, vocab, hidden);
+        for (sf, bound) in [(ScalarFmt::Q8, 0.02), (ScalarFmt::Q4, 0.2)] {
+            let q = quantize_head_gptq(&w, &h, sf, &opts(false)).unwrap();
+            assert_eq!((q.k(), q.n()), (vocab, hidden));
+            let e = rel_err(&dequant(&q), &stored(&data));
+            assert!(e < bound, "{sf:?} head error {e}");
+        }
     }
 }

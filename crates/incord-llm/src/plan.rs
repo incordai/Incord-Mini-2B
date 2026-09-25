@@ -11,7 +11,7 @@
 //! `k`, `v`, `o`, `gate`, `up`, `down`, DeltaNet `in_qkv`, `in_a`, `in_b`,
 //! `in_z`, `out`) or groups (`attn`, `qkv`, `mlp`, `table`, `all`). Layers are
 //! `N` or `A-B` (inclusive); rules with layers never match the embedding or
-//! head. Formats: `f16`, `q8`, `q4`, `q3`, `q2`.
+//! head. Formats: `f16`, `q8`, `q4`, `q3`, `q2`, `e8` (E8-lattice 2-bit).
 
 use std::ops::RangeInclusive;
 
@@ -23,6 +23,7 @@ pub enum Fmt {
     Q4,
     Q3,
     Q2,
+    E8,
 }
 
 impl Fmt {
@@ -32,16 +33,16 @@ impl Fmt {
             Fmt::F16 => 0,
             Fmt::Q4 => 1,
             Fmt::Q8 => 2,
-            Fmt::Q3 => 3,
-            Fmt::Q2 => 4,
+            other => other.low_bits().expect("sub-4-bit format").format_id(),
         }
     }
 
-    /// The sub-4-bit layout, for Q3 / Q2.
+    /// The sub-4-bit layout, for Q3 / Q2 / E8.
     pub fn low_bits(self) -> Option<crate::quant::LowBits> {
         match self {
             Fmt::Q3 => Some(crate::quant::LowBits::Q3),
             Fmt::Q2 => Some(crate::quant::LowBits::Q2),
+            Fmt::E8 => Some(crate::quant::LowBits::E8),
             _ => None,
         }
     }
@@ -56,7 +57,8 @@ impl std::str::FromStr for Fmt {
             "q4" => Ok(Fmt::Q4),
             "q3" => Ok(Fmt::Q3),
             "q2" => Ok(Fmt::Q2),
-            _ => Err(format!("unknown format '{s}' (expected f16, q8, q4, q3 or q2)")),
+            "e8" => Ok(Fmt::E8),
+            _ => Err(format!("unknown format '{s}' (expected f16, q8, q4, q3, q2 or e8)")),
         }
     }
 }

@@ -9,22 +9,38 @@
 //! ```
 //!
 //! Metrics and file format: see `incord::eval`.
+//!
+//! Task benchmarks (ARC, MMLU, HellaSwag, WinoGrande, GSM8K; see
+//! `incord::tasks`) run per model and are then compared question by question:
+//!
+//! ```text
+//! incord-eval tasks --model model_f16.incord --tokenizer tokenizer.json \
+//!     --items eval-data/tasks-f16.jsonl [--tasks arc,mmlu] [--limit 200]
+//! incord-eval compare --ref eval-data/tasks-f16.jsonl --cand eval-data/tasks-q4.jsonl
+//! ```
 
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::time::Instant;
 
 use incord::eval::{
     DEFAULT_TOP_K, RefFile, RefPosition, ScoreAccumulator, corpus_chunks, log_softmax,
 };
-use incord::gemv::{HybridCache, ModelWeights, lm_head_batch, prefill_hidden_all};
+use incord::gemv::{
+    HybridCache, ModelWeights, forward_decode, lm_head_batch, prefill, prefill_hidden_all,
+};
+use incord::tasks::{self, GenItem, Items, McItem, Task};
+use incord::tokenizer::IncordTokenizer;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let result = match args.get(1).map(String::as_str) {
         Some("reference") => cmd_reference(&args[2..]),
         Some("score") => cmd_score(&args[2..]),
+        Some("tasks") => cmd_tasks(&args[2..]),
+        Some("compare") => cmd_compare(&args[2..]),
         _ => Err(USAGE.to_string()),
     };
     if let Err(e) = result {
@@ -36,7 +52,11 @@ fn main() {
 const USAGE: &str = "usage:
   incord-eval reference --model <f16.incord> --tokenizer <tokenizer.json> --corpus <dir|file> --out <ref.bin>
                         [--seq-len 512] [--chunks-per-file 2] [--top-k 256]
-  incord-eval score --model <candidate.incord> --ref <ref.bin> [--json <results.jsonl>] [--label <name>]";
+  incord-eval score --model <candidate.incord> --ref <ref.bin> [--json <results.jsonl>] [--label <name>]
+  incord-eval tasks --model <m.incord> --tokenizer <tokenizer.json> --items <items.jsonl>
+                    [--data eval-data/tasks] [--tasks arc,mmlu,hellaswag,winogrande,gsm8k]
+                    [--limit N] [--max-new 384] [--json <summary.jsonl>] [--label <name>]
+  incord-eval compare --ref <items.jsonl> --cand <items.jsonl>";
 
 /// `--key value` lookup.
 fn opt<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
@@ -210,6 +230,265 @@ fn cmd_score(args: &[String]) -> Result<(), String> {
             .open(json)
             .map_err(|e| format!("open {json}: {e}"))?;
         writeln!(f, "{line}").map_err(|e| format!("write {json}: {e}"))?;
+    }
+    Ok(())
+}
+
+// ============================================================
+// Task benchmarks
+// ============================================================
+
+/// Questions per task when `--limit` is not given: enough that one standard
+/// error is about 2-3 points, small enough for a CPU run.
+fn default_limit(task: Task) -> usize {
+    match task {
+        Task::Arc => 300,
+        Task::Mmlu => 570, // 10 per subject on average
+        Task::Hellaswag => 400,
+        Task::Winogrande => 400,
+        Task::Gsm8k => 100,
+    }
+}
+
+/// Log-likelihood of each choice (per character when `per_char`).
+fn score_mc(
+    w: &ModelWeights,
+    tok: &IncordTokenizer,
+    item: &McItem,
+    per_char: bool,
+) -> Result<Vec<f64>, String> {
+    let bos = w.config.bos_token_id;
+    let encode_ctx = |s: &str| {
+        let mut ids = vec![bos];
+        ids.extend(tok.encode(s));
+        ids
+    };
+    let conts: Vec<Vec<u32>> = item.continuations.iter().map(|c| tok.encode(c)).collect();
+    if conts.iter().any(Vec::is_empty) {
+        return Err(format!("{}: empty continuation", item.id));
+    }
+
+    // One shared context and single-token answers (lettered choices): one
+    // prefill scores every choice from the last position's distribution.
+    if item.contexts.len() == 1 && conts.iter().all(|c| c.len() == 1) {
+        let mut cache = HybridCache::new(&w.config);
+        let mut lp = prefill(w, &encode_ctx(item.context(0)), &mut cache);
+        log_softmax(&mut lp);
+        return Ok(conts.iter().map(|c| lp[c[0] as usize] as f64).collect());
+    }
+
+    let mut scores = Vec::with_capacity(item.choices());
+    for (i, cont) in conts.iter().enumerate() {
+        let mut seq = encode_ctx(item.context(i));
+        let ctx_len = seq.len();
+        seq.extend(cont);
+        let mut cache = HybridCache::new(&w.config);
+        let hidden = prefill_hidden_all(w, &seq, &mut cache);
+        // Position ctx_len-1+j predicts continuation token j.
+        let rows = &hidden[(ctx_len - 1) * w.hidden..(seq.len() - 1) * w.hidden];
+        let mut logits = lm_head_batch(rows, cont.len(), &w.lm_head);
+        let mut sum = 0.0f64;
+        for (row, &t) in logits.chunks_mut(w.vocab).zip(cont) {
+            log_softmax(row);
+            sum += row[t as usize] as f64;
+        }
+        if per_char {
+            sum /= item.continuations[i].trim_start().chars().count().max(1) as f64;
+        }
+        scores.push(sum);
+    }
+    Ok(scores)
+}
+
+/// Greedy answer to a chat prompt (thinking off).
+fn generate_greedy(w: &ModelWeights, tok: &IncordTokenizer, prompt: &str, max_new: usize) -> String {
+    let ids = tok.format_plain_chat(prompt);
+    let mut cache = HybridCache::new(&w.config);
+    let mut logits = prefill(w, &ids, &mut cache);
+    let mut out: Vec<u32> = Vec::new();
+    for _ in 0..max_new {
+        let next = tasks::argmax(&logits.iter().map(|&v| v as f64).collect::<Vec<_>>()) as u32;
+        if next == incord::tokenizer::EOS || next == incord::tokenizer::IM_END {
+            break;
+        }
+        out.push(next);
+        if incord::generate::is_stuck_in_loop(&out) {
+            break;
+        }
+        logits = forward_decode(w, next as usize, &mut cache);
+    }
+    tok.decode(&out)
+}
+
+/// `(task, id)` pairs already present in an items file, so an interrupted
+/// run resumes where it stopped.
+fn read_items(path: &str) -> Result<Vec<serde_json::Value>, String> {
+    let f = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("open {path}: {e}")),
+    };
+    BufReader::new(f)
+        .lines()
+        .filter(|l| l.as_ref().map_or(true, |l| !l.trim().is_empty()))
+        .map(|l| {
+            let l = l.map_err(|e| format!("read {path}: {e}"))?;
+            serde_json::from_str(&l).map_err(|e| format!("{path}: bad line: {e}"))
+        })
+        .collect()
+}
+
+fn item_key(v: &serde_json::Value) -> (String, String) {
+    (
+        v["task"].as_str().unwrap_or_default().to_string(),
+        v["id"].as_str().unwrap_or_default().to_string(),
+    )
+}
+
+fn cmd_tasks(args: &[String]) -> Result<(), String> {
+    let model = req(args, "--model")?;
+    let tok_path = req(args, "--tokenizer")?;
+    let items_path = req(args, "--items")?;
+    let data = Path::new(opt(args, "--data").unwrap_or("eval-data/tasks"));
+    let label = opt(args, "--label").unwrap_or(model);
+    let max_new = num(args, "--max-new", 384)?;
+    let limit = opt(args, "--limit")
+        .map(|v| v.parse::<usize>().map_err(|_| format!("--limit: not a number: {v}")))
+        .transpose()?;
+    let task_list: Vec<Task> = match opt(args, "--tasks") {
+        Some(s) => s.split(',').map(|t| Task::parse(t.trim())).collect::<Result<_, _>>()?,
+        None => Task::ALL.to_vec(),
+    };
+
+    let tok = IncordTokenizer::from_file(tok_path).map_err(|e| format!("load tokenizer {tok_path}: {e}"))?;
+    let w = load_model(model)?;
+    let done: HashSet<(String, String)> = read_items(items_path)?.iter().map(item_key).collect();
+    if let Some(dir) = Path::new(items_path).parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(items_path)
+        .map_err(|e| format!("open {items_path}: {e}"))?;
+
+    for task in task_list {
+        let items = tasks::load(data, task)?.subsample(limit.unwrap_or_else(|| default_limit(task)));
+        let total = items.len();
+        let t0 = Instant::now();
+        let mut ran = 0usize;
+        let mut write = |v: serde_json::Value| -> Result<(), String> {
+            writeln!(out, "{v}")
+                .and_then(|_| out.flush())
+                .map_err(|e| format!("write {items_path}: {e}"))
+        };
+        let pending = |id: &str| !done.contains(&(task.name().to_string(), id.to_string()));
+        match items {
+            Items::Mc(list) => {
+                for (n, it) in list.iter().enumerate().filter(|(_, it)| pending(&it.id)) {
+                    let scores = score_mc(&w, &tok, it, task.length_normalized())?;
+                    let pred = tasks::argmax(&scores);
+                    write(serde_json::json!({
+                        "task": task.name(), "id": it.id, "pred": pred, "gold": it.gold,
+                        "correct": pred == it.gold, "scores": scores,
+                    }))?;
+                    ran += 1;
+                    eprint!("\r  {} {}/{total}  ", task.name(), n + 1);
+                }
+            }
+            Items::Gen(list) => {
+                for (n, it) in list.iter().enumerate().filter(|(_, it)| pending(&it.id)) {
+                    let GenItem { id, question, answer } = it;
+                    let text = generate_greedy(&w, &tok, &tasks::gsm8k_prompt(question), max_new);
+                    let pred = tasks::extract_answer(&text);
+                    write(serde_json::json!({
+                        "task": task.name(), "id": id, "pred": pred, "gold": answer,
+                        "correct": pred.is_some_and(|p| tasks::same_number(p, *answer)),
+                        "text": text,
+                    }))?;
+                    ran += 1;
+                    eprint!("\r  {} {}/{total}  ", task.name(), n + 1);
+                }
+            }
+        }
+        eprintln!("\r  {}: {ran} new of {total} in {:.1?}", task.name(), t0.elapsed());
+    }
+
+    // Summary over everything in the items file (earlier runs included).
+    let all = read_items(items_path)?;
+    let mut by_task: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for v in &all {
+        let e = by_task.entry(item_key(v).0).or_default();
+        e.0 += 1;
+        e.1 += v["correct"].as_bool().unwrap_or(false) as usize;
+    }
+    println!("model  {label}");
+    let mut summary = serde_json::Map::new();
+    summary.insert("label".into(), label.into());
+    summary.insert("model".into(), model.into());
+    for (task, (n, correct)) in &by_task {
+        let acc = *correct as f64 / *n as f64;
+        let se = (acc * (1.0 - acc) / *n as f64).sqrt();
+        println!("{task:<11} {:>6.2}% ± {:.2}  ({correct}/{n})", acc * 100.0, se * 100.0);
+        summary.insert(task.clone(), serde_json::json!({"n": n, "correct": correct, "acc": acc}));
+    }
+    if let Some(json) = opt(args, "--json") {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(json)
+            .map_err(|e| format!("open {json}: {e}"))?;
+        writeln!(f, "{}", serde_json::Value::Object(summary))
+            .map_err(|e| format!("write {json}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Question-by-question comparison of two `tasks` runs over the questions
+/// both answered.
+fn cmd_compare(args: &[String]) -> Result<(), String> {
+    let ref_path = req(args, "--ref")?;
+    let cand_path = req(args, "--cand")?;
+    let reference: BTreeMap<_, _> = read_items(ref_path)?.into_iter().map(|v| (item_key(&v), v)).collect();
+
+    #[derive(Default)]
+    struct Row {
+        n: usize,
+        ref_ok: usize,
+        cand_ok: usize,
+        same: usize,
+        lost: usize,
+        gained: usize,
+    }
+    let mut rows: BTreeMap<String, Row> = BTreeMap::new();
+    for c in read_items(cand_path)? {
+        let key = item_key(&c);
+        let Some(r) = reference.get(&key) else { continue };
+        let (ro, co) = (r["correct"].as_bool() == Some(true), c["correct"].as_bool() == Some(true));
+        let row = rows.entry(key.0).or_default();
+        row.n += 1;
+        row.ref_ok += ro as usize;
+        row.cand_ok += co as usize;
+        row.same += (r["pred"] == c["pred"]) as usize;
+        row.lost += (ro && !co) as usize;
+        row.gained += (!ro && co) as usize;
+    }
+    if rows.is_empty() {
+        return Err(format!("{ref_path} and {cand_path} share no questions"));
+    }
+    println!("ref   {ref_path}\ncand  {cand_path}");
+    println!("{:<11} {:>5} {:>8} {:>8} {:>8} {:>6} {:>6}", "task", "n", "ref", "cand", "same", "lost", "gained");
+    let pct = |a: usize, n: usize| a as f64 * 100.0 / n as f64;
+    for (task, r) in &rows {
+        println!(
+            "{task:<11} {:>5} {:>7.2}% {:>7.2}% {:>7.2}% {:>6} {:>6}",
+            r.n,
+            pct(r.ref_ok, r.n),
+            pct(r.cand_ok, r.n),
+            pct(r.same, r.n),
+            r.lost,
+            r.gained
+        );
     }
     Ok(())
 }

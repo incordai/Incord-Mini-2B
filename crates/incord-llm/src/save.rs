@@ -9,11 +9,13 @@
 
 use half::f16;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::config::{LayerType, IncordConfig};
 use crate::gemv::*;
+use crate::store::{Backing, Buf, Plain};
 
 const MAGIC: &[u8; 4] = b"QOR4";
 const VERSION: u32 = 2; // v2: vision weights stored as f16 (was f32 in v1)
@@ -126,11 +128,51 @@ fn read_f16_as_f32(r: &mut impl Read) -> io::Result<Vec<f32>> {
     Ok(f16_data.iter().map(|v| v.to_f32()).collect())
 }
 
-fn read_bytes_vec(r: &mut impl Read) -> io::Result<Vec<u8>> {
-    let len = read_u64(r)? as usize;
-    let mut buf = vec![0u8; len];
-    r.read_exact(&mut buf)?;
-    Ok(buf)
+/// Reads a model file held in a [`Backing`]: header fields are copied out,
+/// weight data becomes [`Buf`] views into the backing (see `crate::store`).
+struct FileCursor {
+    backing: Backing,
+    pos: usize,
+    /// Weight bytes viewed in place / decoded into copies (misaligned data).
+    viewed: usize,
+    copied: usize,
+}
+
+impl FileCursor {
+    fn new(backing: Backing) -> Self {
+        Self { backing, pos: 0, viewed: 0, copied: 0 }
+    }
+
+    /// `count` elements of `T` at the current position.
+    fn take<T: Plain>(&mut self, count: usize) -> io::Result<Buf<T>> {
+        let buf = Buf::from_backing(&self.backing, self.pos, count).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "weight data runs past the end of the file")
+        })?;
+        self.pos += buf.byte_len();
+        if buf.is_view() {
+            self.viewed += buf.byte_len();
+        } else {
+            self.copied += buf.byte_len();
+        }
+        Ok(buf)
+    }
+
+    /// A length-prefixed array, as written by `write_f16_vec` / `write_bytes`
+    /// (the prefix counts elements; bytes for u8/i8).
+    fn array<T: Plain>(&mut self) -> io::Result<Buf<T>> {
+        let len = read_u64(self)? as usize;
+        self.take(len)
+    }
+}
+
+impl Read for FileCursor {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let rest = self.backing.get(self.pos..).unwrap_or(&[]);
+        let n = rest.len().min(buf.len());
+        buf[..n].copy_from_slice(&rest[..n]);
+        self.pos += n;
+        Ok(n)
+    }
 }
 
 // ============================================================
@@ -174,7 +216,7 @@ fn write_weight(w: &mut impl Write, weight: &Weight) -> io::Result<()> {
 
 /// `rot_seed` is the file's rotation seed (None for files without rotation
 /// metadata, where a rotated weight is invalid).
-fn read_weight(r: &mut impl Read, rot_seed: Option<u64>) -> io::Result<Weight> {
+fn read_weight(r: &mut FileCursor, rot_seed: Option<u64>) -> io::Result<Weight> {
     let k = read_u64(r)? as usize;
     let n = read_u64(r)? as usize;
     let per_weight_fmt = read_u8(r)?;
@@ -218,15 +260,15 @@ pub fn write_rotation_meta(w: &mut impl Write, seed: u64) -> io::Result<()> {
     write_u64(w, seed)
 }
 
-fn read_weight_body(r: &mut impl Read, per_weight_fmt: u8, k: usize, n: usize) -> io::Result<Weight> {
+fn read_weight_body(r: &mut FileCursor, per_weight_fmt: u8, k: usize, n: usize) -> io::Result<Weight> {
     match per_weight_fmt {
         0 => {
-            let data = read_f16_vec(r)?;
+            let data = r.array()?;
             Ok(Weight::F16(F16Weight { data, k, n }))
         }
         1 => {
-            let packed = read_bytes_vec(r)?;
-            let scales = read_f16_vec(r)?;
+            let packed = r.array()?;
+            let scales = r.array()?;
             Ok(Weight::Q4(Q4Weight {
                 packed,
                 scales,
@@ -235,9 +277,8 @@ fn read_weight_body(r: &mut impl Read, per_weight_fmt: u8, k: usize, n: usize) -
             }))
         }
         2 => {
-            let raw_bytes = read_bytes_vec(r)?;
-            let data: Vec<i8> = raw_bytes.into_iter().map(|b| b as i8).collect();
-            let scales = read_f16_vec(r)?;
+            let data = r.array()?;
+            let scales = r.array()?;
             Ok(Weight::Q8(Q8Weight {
                 data,
                 scales,
@@ -245,19 +286,27 @@ fn read_weight_body(r: &mut impl Read, per_weight_fmt: u8, k: usize, n: usize) -
                 n,
             }))
         }
-        3 | 4 => {
-            let bits = if per_weight_fmt == 3 {
-                crate::quant::LowBits::Q3
-            } else {
-                crate::quant::LowBits::Q2
-            };
-            let packed = read_bytes_vec(r)?;
-            let scales = read_f16_vec(r)?;
+        id @ 3..=5 => {
+            let bits = crate::quant::LowBits::from_format_id(id).expect("3..=5 are low-bit ids");
+            let packed: Buf<u8> = r.array()?;
+            let scales: Buf<f16> = r.array()?;
             let groups = k * n / crate::quant::GROUP;
             if scales.len() != groups || packed.len() != groups * bits.group_bytes() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("{bits:?} weight [{k}, {n}] has inconsistent packed/scale sizes"),
+                ));
+            }
+            // E8 codes index the codebook; reject out-of-range codes here so a
+            // corrupt file cannot make decoding read past the table.
+            if bits == crate::quant::LowBits::E8
+                && packed
+                    .chunks_exact(2)
+                    .any(|c| u16::from_le_bytes([c[0], c[1]]) as usize >= crate::e8::CODEBOOK_LEN)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("E8 weight [{k}, {n}] has a code outside the codebook"),
                 ));
             }
             Ok(Weight::LowBit(LowBitWeight { bits, packed, scales, k, n }))
@@ -395,8 +444,23 @@ pub fn save_model(weights: &ModelWeights, path: &Path) -> io::Result<()> {
 // Load
 // ============================================================
 
+/// Load a `.incord` model.
+///
+/// The file is memory-mapped and weight data is viewed in place, so the OS can
+/// page it out under memory pressure and read it back from the file.
+/// Set `INCORD_NO_MMAP=1` to read the whole file into memory instead (e.g. on
+/// a network drive). While a model is loaded its file must not be modified or
+/// truncated: the mapped weights would change underneath the engine.
 pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
-    let mut r = BufReader::with_capacity(8 * 1024 * 1024, File::open(path)?);
+    let file = File::open(path)?;
+    let backing: Backing = if std::env::var_os("INCORD_NO_MMAP").is_some_and(|v| v != "0") {
+        Arc::new(std::fs::read(path)?)
+    } else {
+        // SAFETY: the map is read-only, and the documented contract above is
+        // that the file is not modified while the model is loaded.
+        Arc::new(unsafe { memmap2::Mmap::map(&file)? })
+    };
+    let mut r = FileCursor::new(backing);
 
     // Header. Accept QOR4 (4B) and QR08 (0.8B). Same Qwen3 family, identical
     // layer-config layout after the magic — but the vision encoder dims
@@ -569,7 +633,7 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
         eprintln!("  Loading vision encoder...");
         use crate::vision::*;
         // Helper closure: read vision vec based on file version
-        let read_vis = |r: &mut BufReader<File>| -> io::Result<Vec<f32>> {
+        let read_vis = |r: &mut FileCursor| -> io::Result<Vec<f32>> {
             if version >= 2 {
                 read_f16_as_f32(r)
             } else {
@@ -621,10 +685,14 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
         2 => "Q8",
         3 => "Q3",
         4 => "Q2",
+        5 => "E8",
         _ => "unknown",
     };
     eprintln!(
-        "  Loaded {format_name} model: {num_layers} layers, vocab={vocab_size}, hidden={hidden_size}"
+        "  Loaded {format_name} model: {num_layers} layers, vocab={vocab_size}, hidden={hidden_size} \
+         (weights: {} MB in place, {} MB copied)",
+        r.viewed >> 20,
+        r.copied >> 20
     );
 
     Ok(ModelWeights {
@@ -646,10 +714,15 @@ pub fn load_model(path: &Path) -> io::Result<ModelWeights> {
 mod tests {
     use super::*;
 
+    /// Cursor over an in-memory file.
+    fn cursor(bytes: Vec<u8>) -> FileCursor {
+        FileCursor::new(Arc::new(bytes))
+    }
+
     fn roundtrip(weight: &Weight, seed: Option<u64>) -> Weight {
         let mut buf = Vec::new();
         write_weight(&mut buf, weight).unwrap();
-        read_weight(&mut buf.as_slice(), seed).unwrap()
+        read_weight(&mut cursor(buf), seed).unwrap()
     }
 
     fn q4(k: usize, n: usize) -> Weight {
@@ -659,7 +732,33 @@ mod tests {
             n,
             crate::quant::Rounding::Mse,
         );
-        Weight::Q4(Q4Weight { packed, scales, k, n })
+        Weight::Q4(Q4Weight { packed: packed.into(), scales: scales.into(), k, n })
+    }
+
+    /// Loaded weights must be views into the file, not copies (the point of
+    /// mapping it), and must hold the same values that were written.
+    #[test]
+    fn loaded_weights_are_views_into_the_file() {
+        let w = q4(64, 32);
+        let mut buf = Vec::new();
+        write_weight(&mut buf, &w).unwrap();
+        let mut r = cursor(buf);
+        let back = read_weight(&mut r, None).unwrap();
+        let (Weight::Q4(a), Weight::Q4(b)) = (&w, &back) else { panic!("format changed") };
+        assert_eq!(&a.packed[..], &b.packed[..]);
+        assert_eq!(&a.scales[..], &b.scales[..]);
+        assert!(b.packed.is_view(), "u8 data is always viewed in place");
+        assert_eq!(r.viewed + r.copied, a.packed.len() + 2 * a.scales.len());
+    }
+
+    /// A length prefix past the end of the file is an error, never a read
+    /// out of bounds.
+    #[test]
+    fn truncated_weight_is_rejected() {
+        let mut buf = Vec::new();
+        write_weight(&mut buf, &q4(32, 32)).unwrap();
+        buf.truncate(buf.len() - 1);
+        assert!(read_weight(&mut cursor(buf), None).is_err());
     }
 
     #[test]
@@ -671,8 +770,8 @@ mod tests {
         match (&w, &back) {
             (Weight::Rotated(a, _), Weight::Rotated(b, _)) => match (a.as_ref(), b.as_ref()) {
                 (Weight::Q4(a), Weight::Q4(b)) => {
-                    assert_eq!(a.packed, b.packed);
-                    assert_eq!(a.scales, b.scales);
+                    assert_eq!(&a.packed[..], &b.packed[..]);
+                    assert_eq!(&a.scales[..], &b.scales[..]);
                 }
                 _ => panic!("inner format changed"),
             },
@@ -682,18 +781,32 @@ mod tests {
 
     #[test]
     fn plain_weight_has_no_rotation_flag() {
-        let w = Weight::F16(F16Weight { data: vec![f16::from_f32(1.0); 32], k: 1, n: 32 });
+        let w = Weight::F16(F16Weight { data: vec![f16::from_f32(1.0); 32].into(), k: 1, n: 32 });
         let mut buf = Vec::new();
         write_weight(&mut buf, &w).unwrap();
         assert_eq!(buf[16], 0, "format byte must stay 0 for plain F16");
         assert!(!roundtrip(&w, None).is_rotated());
     }
 
+    /// An E8 code past the codebook must be rejected at load, never decoded.
+    #[test]
+    fn e8_code_outside_codebook_is_rejected() {
+        use crate::quant::{LowBits, Rounding, quantize_low};
+        let (mut packed, scales) = quantize_low(&vec![0.01f32; 64], 1, 64, LowBits::E8, Rounding::Mse);
+        let good = Weight::LowBit(LowBitWeight { bits: LowBits::E8, packed: packed.clone().into(), scales: scales.clone().into(), k: 1, n: 64 });
+        assert!(roundtrip(&good, None).is_low_bit());
+        packed[0..2].copy_from_slice(&(crate::e8::CODEBOOK_LEN as u16).to_le_bytes());
+        let bad = Weight::LowBit(LowBitWeight { bits: LowBits::E8, packed: packed.into(), scales: scales.into(), k: 1, n: 64 });
+        let mut buf = Vec::new();
+        write_weight(&mut buf, &bad).unwrap();
+        assert!(read_weight(&mut cursor(buf), None).is_err());
+    }
+
     #[test]
     fn rotated_weight_without_metadata_is_rejected() {
         let mut buf = Vec::new();
         write_weight(&mut buf, &Weight::Rotated(Box::new(q4(32, 32)), 7)).unwrap();
-        assert!(read_weight(&mut buf.as_slice(), None).is_err());
+        assert!(read_weight(&mut cursor(buf), None).is_err());
     }
 
     /// Whole-model round trip: the seed must come back from the v4 header,

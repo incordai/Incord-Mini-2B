@@ -89,69 +89,77 @@ impl GeoDb {
     }
 
     fn lookup_city(&self, reader: &Reader<Vec<u8>>, ip: IpAddr) -> Option<GeoLookup> {
-        let record: maxminddb::geoip2::City<'_> = reader.lookup(ip).ok()?;
-
-        let country = record
-            .country
-            .as_ref()
-            .and_then(|c| c.iso_code)
-            .map(|s| s.to_string());
-
-        let country_name = record
-            .country
-            .as_ref()
-            .and_then(|c| c.names.as_ref())
-            .and_then(|n| n.get("en"))
-            .map(|s| s.to_string());
-
-        let city = record
-            .city
-            .as_ref()
-            .and_then(|c| c.names.as_ref())
-            .and_then(|n| n.get("en"))
-            .map(|s| s.to_string());
-
-        let region = record
-            .subdivisions
-            .as_ref()
-            .and_then(|subs| subs.first())
-            .and_then(|s| s.names.as_ref())
-            .and_then(|n| n.get("en"))
-            .map(|s| s.to_string());
-
-        let latitude = record.location.as_ref().and_then(|l| l.latitude);
-        let longitude = record.location.as_ref().and_then(|l| l.longitude);
+        let record: maxminddb::geoip2::City<'_> = reader.lookup(ip).ok()?.decode().ok()??;
 
         Some(GeoLookup {
-            country,
-            country_name,
-            city,
-            region,
-            latitude,
-            longitude,
+            country: record.country.iso_code.map(str::to_string),
+            country_name: record.country.names.english.map(str::to_string),
+            city: record.city.names.english.map(str::to_string),
+            region: record
+                .subdivisions
+                .first()
+                .and_then(|s| s.names.english)
+                .map(str::to_string),
+            latitude: record.location.latitude,
+            longitude: record.location.longitude,
         })
     }
 
     fn lookup_country(&self, reader: &Reader<Vec<u8>>, ip: IpAddr) -> Option<GeoLookup> {
-        let record: maxminddb::geoip2::Country<'_> = reader.lookup(ip).ok()?;
-
-        let country = record
-            .country
-            .as_ref()
-            .and_then(|c| c.iso_code)
-            .map(|s| s.to_string());
-
-        let country_name = record
-            .country
-            .as_ref()
-            .and_then(|c| c.names.as_ref())
-            .and_then(|n| n.get("en"))
-            .map(|s| s.to_string());
+        let record: maxminddb::geoip2::Country<'_> = reader.lookup(ip).ok()?.decode().ok()??;
 
         Some(GeoLookup {
-            country,
-            country_name,
+            country: record.country.iso_code.map(str::to_string),
+            country_name: record.country.names.english.map(str::to_string),
             ..Default::default()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_db_returns_none() {
+        let db = GeoDb::empty();
+        assert!(db.lookup("89.160.20.112").is_none());
+        assert!(db.lookup("not an ip").is_none());
+        assert!(GeoDb::try_load(None).lookup("89.160.20.112").is_none());
+    }
+
+    #[test]
+    fn unreadable_db_is_an_error_and_try_load_falls_back() {
+        let dir = std::env::temp_dir().join(format!("incord-geoip-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let garbage = dir.join("garbage.mmdb");
+        std::fs::write(&garbage, b"not a maxmind database").unwrap();
+        assert!(GeoDb::load(&garbage).is_err());
+        assert!(GeoDb::load(&dir.join("missing.mmdb")).is_err());
+        assert!(GeoDb::try_load(Some(&garbage)).lookup("89.160.20.112").is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Decodes a real database. Needs MaxMind's public test databases
+    /// (github.com/maxmind/MaxMind-DB, test-data/): set
+    /// INCORD_GEOIP_TEST_DIR to the folder holding GeoIP2-City-Test.mmdb and
+    /// GeoIP2-Country-Test.mmdb, then run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn decodes_maxmind_test_databases() {
+        let dir = std::path::PathBuf::from(
+            std::env::var("INCORD_GEOIP_TEST_DIR").expect("set INCORD_GEOIP_TEST_DIR"),
+        );
+        let city = GeoDb::load(&dir.join("GeoIP2-City-Test.mmdb")).unwrap();
+        let hit = city.lookup("89.160.20.112").expect("IP is in the City test database");
+        assert_eq!(hit.country.as_deref(), Some("SE"));
+        assert_eq!(hit.country_name.as_deref(), Some("Sweden"));
+        assert!(hit.latitude.is_some() && hit.longitude.is_some());
+        assert!(city.lookup("10.0.0.1").is_none(), "private IP is not in the database");
+
+        let country = GeoDb::load(&dir.join("GeoIP2-Country-Test.mmdb")).unwrap();
+        let hit = country.lookup("89.160.20.112").expect("IP is in the Country test database");
+        assert_eq!(hit.country.as_deref(), Some("SE"));
+        assert!(hit.city.is_none());
     }
 }

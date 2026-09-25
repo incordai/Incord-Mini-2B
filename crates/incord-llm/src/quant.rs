@@ -82,6 +82,35 @@ const Q2: Format = Format {
     d_step: 1.0 / 16.0,
 };
 
+/// Scalar grid formats, for callers that quantize one group at a time
+/// (e.g. GPTQ with groups along the input dimension).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarFmt {
+    Q8,
+    Q4,
+}
+
+impl ScalarFmt {
+    fn format(self) -> &'static Format {
+        match self {
+            ScalarFmt::Q8 => &Q8,
+            ScalarFmt::Q4 => &Q4,
+        }
+    }
+
+    /// Integer level range (inclusive).
+    pub fn range(self) -> (i32, i32) {
+        let f = self.format();
+        (f.qmin, f.qmax)
+    }
+}
+
+/// Quantize one group of up to [`GROUP`] values: writes the levels into `q`
+/// and returns the stored (f16) scale, value = scale * level.
+pub fn quantize_scalar_group(group: &[f32], fmt: ScalarFmt, rounding: Rounding, q: &mut [i32]) -> f16 {
+    quantize_group(group, fmt.format(), rounding, &mut q[..group.len()])
+}
+
 /// Sub-4-bit formats (roadmap Milestone 6). Groups of [`GROUP`] along `n`,
 /// one f16 scale per group, value = scale * q:
 ///
@@ -94,6 +123,10 @@ const Q2: Format = Format {
 pub enum LowBits {
     Q3,
     Q2,
+    /// E8-lattice vector quantization (see `crate::e8`): each 8 values are
+    /// one 16-bit codeword index (little-endian), four per group, value =
+    /// scale * codeword. 2.5 bits/weight with the per-group scale.
+    E8,
 }
 
 impl LowBits {
@@ -101,20 +134,102 @@ impl LowBits {
     pub fn group_bytes(self) -> usize {
         match self {
             LowBits::Q3 => 12,
-            LowBits::Q2 => 8,
+            LowBits::Q2 | LowBits::E8 => 8,
         }
     }
 
+    /// Per-weight format byte in `.incord` files.
+    pub fn format_id(self) -> u8 {
+        match self {
+            LowBits::Q3 => 3,
+            LowBits::Q2 => 4,
+            LowBits::E8 => 5,
+        }
+    }
+
+    /// Inverse of [`LowBits::format_id`].
+    pub fn from_format_id(id: u8) -> Option<LowBits> {
+        match id {
+            3 => Some(LowBits::Q3),
+            4 => Some(LowBits::Q2),
+            5 => Some(LowBits::E8),
+            _ => None,
+        }
+    }
+
+    /// Scalar level grid (Q3 / Q2 only).
     fn format(self) -> &'static Format {
         match self {
             LowBits::Q3 => &Q3,
             LowBits::Q2 => &Q2,
+            LowBits::E8 => unreachable!("E8 is a vector format"),
         }
     }
 
     fn offset(self) -> i32 {
         -self.format().qmin
     }
+}
+
+/// Codewords per group for E8.
+const E8_PER_GROUP: usize = GROUP / crate::e8::DIM;
+
+/// Quantize one group to E8: search the scale that minimises the group's
+/// squared error (candidates around the group's RMS, then a least-squares
+/// refit for the chosen codewords), evaluated with the f16-rounded scale as
+/// stored. Writes the codes little-endian into `dst`; returns the scale.
+fn quantize_group_e8(group: &[f32], dst: &mut [u8]) -> f16 {
+    use crate::e8::{DIM, decode, encode, encode_fast};
+    let vecs = |s: f32| -> [[f32; DIM]; E8_PER_GROUP] {
+        std::array::from_fn(|v| std::array::from_fn(|i| group[v * DIM + i] / s))
+    };
+    let rms = (group.iter().map(|x| x * x).sum::<f32>() / group.len() as f32).sqrt();
+    if rms == 0.0 {
+        let zero = encode(&[0.0; DIM]).0.to_le_bytes();
+        for c in dst.chunks_mut(2) {
+            c.copy_from_slice(&zero);
+        }
+        return f16::from_f32(0.0);
+    }
+    // Error of scale s in weight units: s² · Σ lattice distances².
+    let err_fast = |s: f32| -> f32 { s * s * vecs(s).iter().map(|v| encode_fast(v).1).sum::<f32>() };
+    let mut best_s = f16::from_f32(rms);
+    let mut best_e = f32::INFINITY;
+    for t in 0..=16 {
+        // Lattice-unit RMS per coordinate from 0.55 to 1.35.
+        let s = f16::from_f32(rms / (0.55 + 0.05 * t as f32));
+        let sv = s.to_f32();
+        if sv > 0.0 && sv.is_finite() {
+            let e = err_fast(sv);
+            if e < best_e {
+                best_e = e;
+                best_s = s;
+            }
+        }
+    }
+    // Least-squares refit of the scale for the chosen codewords.
+    let s0 = best_s.to_f32();
+    let codes: Vec<u16> = vecs(s0).iter().map(|v| encode(v).0).collect();
+    let (mut num, mut den) = (0.0f64, 0.0f64);
+    for (v, &c) in codes.iter().enumerate() {
+        for (i, &p) in decode(c).iter().enumerate() {
+            num += group[v * DIM + i] as f64 * p as f64;
+            den += (p * p) as f64;
+        }
+    }
+    let mut final_s = best_s;
+    if den > 0.0 {
+        let refit = f16::from_f32((num / den) as f32);
+        let rv = refit.to_f32();
+        if rv > 0.0 && rv.is_finite() && err_fast(rv) < err_fast(s0) {
+            final_s = refit;
+        }
+    }
+    let s = final_s.to_f32();
+    for (v, c) in vecs(s).iter().zip(dst.chunks_mut(2)) {
+        c.copy_from_slice(&encode(v).0.to_le_bytes());
+    }
+    final_s
 }
 
 /// Pack one group's ints (`q` in the format's range) into `dst`
@@ -133,6 +248,16 @@ fn pack_low(bits: LowBits, q: &[i32], dst: &mut [u8]) {
 
 /// Dequantize one packed group (`GROUP` values) with scale `s` into `dst`.
 pub fn unpack_low(bits: LowBits, src: &[u8], s: f32, dst: &mut [f32]) {
+    if bits == LowBits::E8 {
+        let cb = crate::e8::codebook();
+        for (d8, c) in dst.chunks_mut(crate::e8::DIM).zip(src.chunks(2)) {
+            let p = &cb.points[u16::from_le_bytes([c[0], c[1]]) as usize];
+            for (d, &v) in d8.iter_mut().zip(p) {
+                *d = v as f32 * 0.5 * s; // codebook stores doubled coordinates
+            }
+        }
+        return;
+    }
     let off = bits.offset();
     for (i, d) in dst.iter_mut().enumerate() {
         let mut u = ((src[i / 4] >> (2 * (i % 4))) & 0b11) as i32;
@@ -152,6 +277,13 @@ pub fn quantize_low_row(
     srow: &mut [f16],
 ) {
     let gb = bits.group_bytes();
+    if bits == LowBits::E8 {
+        // The scale search is always MSE for E8 (there is no RTN grid).
+        for (g, (grp, s)) in row.chunks(GROUP).zip(srow.iter_mut()).enumerate() {
+            *s = quantize_group_e8(grp, &mut prow[g * gb..(g + 1) * gb]);
+        }
+        return;
+    }
     let mut q = [0i32; GROUP];
     for (g, (grp, s)) in row.chunks(GROUP).zip(srow.iter_mut()).enumerate() {
         *s = quantize_group(grp, bits.format(), rounding, &mut q);
@@ -454,6 +586,35 @@ mod tests {
         }
     }
 
+    /// E8 round-trips through pack/unpack exactly and, at the same 2.5
+    /// bits/weight as scalar Q2, has lower error on Gaussian-like data (the
+    /// point of lattice quantization).
+    #[test]
+    fn e8_beats_scalar_q2_at_equal_bits() {
+        let (k, n) = (32, 256);
+        // Unit-variance Gaussian (what rotated weights look like), no outliers.
+        let mut s = 0x5DEE_CE66_D1CE_4E5Bu64;
+        let mut u = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            ((s >> 11) as f64 / (1u64 << 53) as f64).max(1e-12)
+        };
+        let w: Vec<f32> = (0..k * n)
+            .map(|_| ((-2.0 * u().ln()).sqrt() * (2.0 * std::f64::consts::PI * u()).cos()) as f32 * 0.02)
+            .collect();
+        let (pe, se) = quantize_low(&w, k, n, LowBits::E8, Rounding::Mse);
+        let de = dequantize_low(&pe, &se, LowBits::E8, k, n);
+        let (p2, s2) = quantize_low(&w, k, n, LowBits::Q2, Rounding::Mse);
+        let d2 = dequantize_low(&p2, &s2, LowBits::Q2, k, n);
+        let (e_e8, e_q2) = (sse(&w, &de), sse(&w, &d2));
+        assert!(e_e8 < 0.9 * e_q2, "E8 {e_e8} vs Q2 {e_q2}");
+        // Unpacking the codes must reproduce the dequantized values exactly.
+        let mut group = vec![0.0f32; GROUP];
+        unpack_low(LowBits::E8, &pe[..8], se[0].to_f32(), &mut group);
+        assert_eq!(group, de[..GROUP].to_vec());
+    }
+
     /// Fewer bits, more error: Q2 > Q3 > Q4 on the same data.
     #[test]
     fn error_grows_as_bits_shrink() {
@@ -490,14 +651,14 @@ mod tests {
 
         let (packed, scales) = quantize_q4(&w, k, n, Rounding::Mse);
         let expect = dense(&dequantize_q4(&packed, &scales, k, n));
-        let got = gemv(&x, &Weight::Q4(Q4Weight { packed, scales, k, n }));
+        let got = gemv(&x, &Weight::Q4(Q4Weight { packed: packed.into(), scales: scales.into(), k, n }));
         for (a, b) in got.iter().zip(&expect) {
             assert!((a - b).abs() <= 1e-3 * (1.0 + b.abs()), "q4 {a} vs {b}");
         }
 
         let (data, scales) = quantize_q8(&w, k, n, Rounding::Mse);
         let expect = dense(&dequantize_q8(&data, &scales, k, n));
-        let got = gemv(&x, &Weight::Q8(Q8Weight { data, scales, k, n }));
+        let got = gemv(&x, &Weight::Q8(Q8Weight { data: data.into(), scales: scales.into(), k, n }));
         for (a, b) in got.iter().zip(&expect) {
             assert!((a - b).abs() <= 1e-3 * (1.0 + b.abs()), "q8 {a} vs {b}");
         }
