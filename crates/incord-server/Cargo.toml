@@ -48,7 +48,7 @@ once_cell = "1"
 regex = "1"
 prometheus = "0.13"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-maxminddb = "0.24"
+maxminddb = "0.32"
 
 [dev-dependencies]
 incord = { path = "../incord-llm", features = ["mock-weights"] }
