@@ -9,19 +9,23 @@
 //!   Dequant: val = (q - 8) * scale
 
 use crate::config::{LayerType, IncordConfig};
+use crate::store::Buf;
 use half::f16;
 use rayon::prelude::*;
 
 // ============================================================
 // Weight format types
 // ============================================================
+//
+// Weight data is a `Buf`: owned, or a view into the memory-mapped model file
+// (see `crate::store`). Both read as a slice.
 
 const Q4_GROUP_SIZE: usize = 32;
 
 /// A weight matrix stored as f16 with shape metadata.
 #[derive(Clone)]
 pub struct F16Weight {
-    pub data: Vec<f16>,
+    pub data: Buf<f16>,
     pub k: usize, // rows (input dim)
     pub n: usize, // cols (output dim)
 }
@@ -29,8 +33,8 @@ pub struct F16Weight {
 /// A weight matrix stored in 4-bit symmetric quantization.
 #[derive(Clone)]
 pub struct Q4Weight {
-    pub packed: Vec<u8>,
-    pub scales: Vec<f16>,
+    pub packed: Buf<u8>,
+    pub scales: Buf<f16>,
     pub k: usize,
     pub n: usize,
 }
@@ -40,8 +44,8 @@ pub const Q8_GROUP_SIZE: usize = 32;
 /// A weight matrix stored in 8-bit symmetric quantization.
 #[derive(Clone)]
 pub struct Q8Weight {
-    pub data: Vec<i8>,
-    pub scales: Vec<f16>,
+    pub data: Buf<i8>,
+    pub scales: Buf<f16>,
     pub k: usize,
     pub n: usize,
 }
@@ -51,8 +55,8 @@ pub struct Q8Weight {
 #[derive(Clone)]
 pub struct LowBitWeight {
     pub bits: crate::quant::LowBits,
-    pub packed: Vec<u8>,
-    pub scales: Vec<f16>,
+    pub packed: Buf<u8>,
+    pub scales: Buf<f16>,
     pub k: usize,
     pub n: usize,
 }
@@ -2561,7 +2565,7 @@ pub mod mock {
     /// Helper: zero-filled F16 weight of shape [k, n].
     fn f16_zeros(k: usize, n: usize) -> Weight {
         Weight::F16(F16Weight {
-            data: vec![f16::from_f32(0.0); k * n],
+            data: vec![f16::from_f32(0.0); k * n].into(),
             k,
             n,
         })
@@ -2703,8 +2707,8 @@ pub mod mock {
             // Quantize to Q8
             let (q8_data, scales) = quantize_q8(&data, k, n);
             let weight = Q8Weight {
-                data: q8_data,
-                scales,
+                data: q8_data.into(),
+                scales: scales.into(),
                 k,
                 n,
             };
@@ -2732,8 +2736,8 @@ pub mod mock {
 
             let (q8_data, scales) = quantize_q8(&data, vocab, hidden);
             let weight = Q8Weight {
-                data: q8_data,
-                scales,
+                data: q8_data.into(),
+                scales: scales.into(),
                 k: vocab,
                 n: hidden,
             };
@@ -2791,13 +2795,13 @@ mod gemm_tiled_tests {
     #[test]
     fn tiled_q4_matches_gemv() {
         let (packed, scales) = quantize_q4(&data(K * N, 2), K, N, Rounding::Mse);
-        check(&Weight::Q4(Q4Weight { packed, scales, k: K, n: N }));
+        check(&Weight::Q4(Q4Weight { packed: packed.into(), scales: scales.into(), k: K, n: N }));
     }
 
     #[test]
     fn tiled_q8_matches_gemv() {
         let (data, scales) = quantize_q8(&data(K * N, 3), K, N, Rounding::Mse);
-        check(&Weight::Q8(Q8Weight { data, scales, k: K, n: N }));
+        check(&Weight::Q8(Q8Weight { data: data.into(), scales: scales.into(), k: K, n: N }));
     }
 
     /// Batched head must equal the per-position head. Vocab 600 is not a
@@ -2828,7 +2832,7 @@ mod gemm_tiled_tests {
     #[test]
     fn head_batch_q4_matches() {
         let (packed, scales) = quantize_q4(&data(VOCAB * HIDDEN, 5), VOCAB, HIDDEN, Rounding::Mse);
-        check_head(&Weight::Q4(Q4Weight { packed, scales, k: VOCAB, n: HIDDEN }));
+        check_head(&Weight::Q4(Q4Weight { packed: packed.into(), scales: scales.into(), k: VOCAB, n: HIDDEN }));
     }
 
     /// A Rotated weight must give the same result as the plain weight on
@@ -2921,7 +2925,7 @@ mod gemm_tiled_tests {
             let (k, n) = (K, N);
             let (packed, scales) = quantize_low(&data(k * n, 21), k, n, bits, Rounding::Mse);
             let dense = dequantize_low(&packed, &scales, bits, k, n);
-            let w = Weight::LowBit(LowBitWeight { bits, packed, scales, k, n });
+            let w = Weight::LowBit(LowBitWeight { bits, packed: packed.into(), scales: scales.into(), k, n });
             let near = |a: &[f32], b: &[f32], what: &str| {
                 for (i, (x, y)) in a.iter().zip(b).enumerate() {
                     assert!((x - y).abs() <= 1e-4 * (1.0 + y.abs()), "{bits:?} {what} i={i}: {x} vs {y}");
@@ -2952,6 +2956,6 @@ mod gemm_tiled_tests {
     #[test]
     fn head_batch_q8_matches() {
         let (data, scales) = quantize_q8(&data(VOCAB * HIDDEN, 6), VOCAB, HIDDEN, Rounding::Mse);
-        check_head(&Weight::Q8(Q8Weight { data, scales, k: VOCAB, n: HIDDEN }));
+        check_head(&Weight::Q8(Q8Weight { data: data.into(), scales: scales.into(), k: VOCAB, n: HIDDEN }));
     }
 }

@@ -651,14 +651,14 @@ mod tests {
 
         let (packed, scales) = quantize_q4(&w, k, n, Rounding::Mse);
         let expect = dense(&dequantize_q4(&packed, &scales, k, n));
-        let got = gemv(&x, &Weight::Q4(Q4Weight { packed, scales, k, n }));
+        let got = gemv(&x, &Weight::Q4(Q4Weight { packed: packed.into(), scales: scales.into(), k, n }));
         for (a, b) in got.iter().zip(&expect) {
             assert!((a - b).abs() <= 1e-3 * (1.0 + b.abs()), "q4 {a} vs {b}");
         }
 
         let (data, scales) = quantize_q8(&w, k, n, Rounding::Mse);
         let expect = dense(&dequantize_q8(&data, &scales, k, n));
-        let got = gemv(&x, &Weight::Q8(Q8Weight { data, scales, k, n }));
+        let got = gemv(&x, &Weight::Q8(Q8Weight { data: data.into(), scales: scales.into(), k, n }));
         for (a, b) in got.iter().zip(&expect) {
             assert!((a - b).abs() <= 1e-3 * (1.0 + b.abs()), "q8 {a} vs {b}");
         }

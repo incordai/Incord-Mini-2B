@@ -11,6 +11,7 @@ pub mod quant;
 pub mod rotate;
 pub mod save;
 pub mod simd;
+pub mod store;
 pub mod system;
 pub mod tasks;
 pub mod tokenizer;
