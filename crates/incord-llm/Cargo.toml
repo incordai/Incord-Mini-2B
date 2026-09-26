@@ -90,10 +90,12 @@ parking_lot = { version = "0.12", optional = true }
 # GPTQ quantizer only — never linked into the server or CLI.
 faer = { version = "0.24", default-features = false, features = ["std", "rayon"], optional = true }
 
+# GPU tensors (cortex-v2: runtime `Device`, native Q4/Q8 block quantization).
 [dependencies.cortex]
-git = "https://github.com/incordlabs/cortex"
+git = "https://github.com/incordai/cortex.git"
+rev = "7d9b04c5e6a8d07eb87e138e0187f58fd651b518"
 default-features = false
-features = ["ndarray"]
+features = ["std"]
 optional = true
 
 [dev-dependencies]
@@ -120,8 +122,9 @@ server = [
   "dep:prometheus", "dep:once_cell", "dep:parking_lot",
 ]
 
-gpu = ["dep:cortex", "cortex/wgpu", "cortex/autotune", "cortex/fusion", "cortex/std"]
-gpu-metal = ["dep:cortex", "cortex/metal", "cortex/autotune", "cortex/fusion", "cortex/std"]
+gpu = ["dep:cortex", "cortex/wgpu", "cortex/autotune"]
+gpu-cuda = ["dep:cortex", "cortex/cuda", "cortex/autotune"]
+gpu-metal = ["dep:cortex", "cortex/metal", "cortex/autotune"]
 mock-weights = []
 
 # Offline GPTQ quantizer (`incord-quantize`).

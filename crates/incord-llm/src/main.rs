@@ -8,8 +8,11 @@ fn main() {
     let no_think = args.iter().any(|a| a == "--no-think");
     let greedy = args.iter().any(|a| a == "--greedy");
     let show_think = args.iter().any(|a| a == "--show-think");
-    #[cfg(any(feature = "gpu", feature = "gpu-metal"))]
+    #[cfg(any(feature = "gpu", feature = "gpu-cuda", feature = "gpu-metal"))]
     let force_cpu = args.iter().any(|a| a == "--cpu");
+    // `--gpu`: the GPU is required; a GPU failure is an error, not a CPU run.
+    #[cfg(any(feature = "gpu", feature = "gpu-cuda", feature = "gpu-metal"))]
+    let require_gpu = args.iter().any(|a| a == "--gpu");
 
     // Track whether user explicitly set these
     let mut max_tokens_explicit = false;
@@ -193,12 +196,16 @@ fn main() {
     };
 
     // Try GPU for text-only mode
-    #[cfg(any(feature = "gpu", feature = "gpu-metal"))]
+    #[cfg(any(feature = "gpu", feature = "gpu-cuda", feature = "gpu-metal"))]
     if !force_cpu && image_path.is_none() && video_path.is_none() {
         eprintln!("Attempting GPU inference...");
         match incord::gpu_inference::generate_gpu(&weights, &tokenizer, &prompt, &params) {
             Ok(()) => return,
-            Err(e) => eprintln!("GPU not available ({}), falling back to CPU", e),
+            Err(e) if require_gpu => {
+                eprintln!("GPU inference failed (--gpu given, not falling back): {e}");
+                std::process::exit(1);
+            }
+            Err(e) => eprintln!("=== GPU FAILED, RUNNING ON CPU INSTEAD === ({e})"),
         }
     }
 

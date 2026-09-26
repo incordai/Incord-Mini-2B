@@ -1,73 +1,69 @@
-//! GPU inference for Incord-Mini-2B.
+//! GPU inference for Incord on cortex-v2.
 //!
-//! Implements single-token decode using Cortex GPU tensors for the hybrid
-//! DeltaNet + Full Attention architecture.
+//! Prefill and single-token decode run every layer on the GPU for the hybrid
+//! DeltaNet + full-attention architecture. Each step mirrors the CPU path in
+//! `gemv.rs` (the reference): plain-gamma RMSNorm, gated or plain attention
+//! detected from q_proj's width, QK norms only when the model has them, and
+//! split-half partial RoPE. The output head runs on the GPU too; only the
+//! embedding row lookup stays on the CPU (`embed_lookup`).
 
-use cortex::prelude::*;
 use cortex::tensor::activation;
+use cortex::tensor::{Device, Tensor, TensorData};
 use std::io::Write;
 use std::time::Instant;
 
 use crate::config::IncordConfig;
-use crate::gemv::ModelWeights;
+use crate::gemv::{ModelWeights, embed_lookup};
 use crate::generate::GenerateParams;
-use crate::gpu_loader::{
-    GpuDeltaNetLayer, GpuFullAttnLayer, GpuHybridLayer, GpuModel, load_model_gpu,
-};
+use crate::gpu_loader::{GpuDeltaNetLayer, GpuFullAttnLayer, GpuHybridLayer, GpuModel, load_model_gpu};
 use crate::tokenizer::IncordTokenizer;
 
 // ============================================================
-// GPU Cache
+// GPU cache
 // ============================================================
 
-pub struct GpuHybridCache<B: Backend> {
-    pub entries: Vec<GpuCacheEntry<B>>,
+pub struct GpuHybridCache {
+    pub entries: Vec<GpuCacheEntry>,
 }
 
-pub enum GpuCacheEntry<B: Backend> {
-    DeltaNet(GpuDeltaNetState<B>),
-    KvCache(GpuKvCacheEntry<B>),
+pub enum GpuCacheEntry {
+    DeltaNet(GpuDeltaNetState),
+    KvCache(GpuKvCacheEntry),
 }
 
-pub struct GpuDeltaNetState<B: Backend> {
-    /// State matrices: [num_v_heads, head_dim, head_dim]
-    pub s: Tensor<B, 3>,
-    /// Conv buffer: [qkv_dim, kernel_size-1]
-    pub conv_buf: Tensor<B, 2>,
+pub struct GpuDeltaNetState {
+    /// State matrices `[num_v_heads, head_dim, head_dim]`.
+    pub s: Tensor<3>,
+    /// Conv buffer `[qkv_dim, kernel_size - 1]`.
+    pub conv_buf: Tensor<2>,
     pub conv_pos: usize,
 }
 
-pub struct GpuKvCacheEntry<B: Backend> {
-    pub k: Option<Tensor<B, 3>>, // [kv_heads, seq_len, head_dim]
-    pub v: Option<Tensor<B, 3>>,
+pub struct GpuKvCacheEntry {
+    pub k: Option<Tensor<3>>, // [kv_heads, seq_len, head_dim]
+    pub v: Option<Tensor<3>>,
     pub seq_len: usize,
 }
 
-impl<B: Backend> GpuHybridCache<B> {
-    pub fn new(config: &IncordConfig, device: &B::Device) -> Self {
-        let mut entries = Vec::with_capacity(config.num_layers);
-        for lt in &config.layer_types {
-            match lt {
+impl GpuHybridCache {
+    pub fn new(config: &IncordConfig, device: &Device) -> Self {
+        let entries = config
+            .layer_types
+            .iter()
+            .map(|lt| match lt {
                 crate::config::LayerType::DeltaNet => {
-                    let num_v = config.num_v_heads;
                     let hd = config.deltanet_head_dim;
-                    let qkv_dim = config.deltanet_qkv_dim();
-                    let buf_len = config.conv_kernel_size - 1;
-                    entries.push(GpuCacheEntry::DeltaNet(GpuDeltaNetState {
-                        s: Tensor::zeros([num_v, hd, hd], device),
-                        conv_buf: Tensor::zeros([qkv_dim, buf_len], device),
+                    GpuCacheEntry::DeltaNet(GpuDeltaNetState {
+                        s: Tensor::zeros([config.num_v_heads, hd, hd], device),
+                        conv_buf: Tensor::zeros([config.deltanet_qkv_dim(), config.conv_kernel_size - 1], device),
                         conv_pos: 0,
-                    }));
+                    })
                 }
                 crate::config::LayerType::FullAttn => {
-                    entries.push(GpuCacheEntry::KvCache(GpuKvCacheEntry {
-                        k: None,
-                        v: None,
-                        seq_len: 0,
-                    }));
+                    GpuCacheEntry::KvCache(GpuKvCacheEntry { k: None, v: None, seq_len: 0 })
                 }
-            }
-        }
+            })
+            .collect();
         Self { entries }
     }
 }
@@ -76,61 +72,49 @@ impl<B: Backend> GpuHybridCache<B> {
 // Helper ops
 // ============================================================
 
-/// RMS norm with (1 + gamma) scaling — used for all layer norms.
-fn rms_norm_1plus<B: Backend>(x: Tensor<B, 2>, gamma: &Tensor<B, 1>) -> Tensor<B, 2> {
-    let eps = 1e-6;
-    let x_sq = x.clone().powf_scalar(2.0);
-    let mean_sq = x_sq.mean_dim(1);
-    let rms = (mean_sq + eps).sqrt();
-    let normed = x / rms;
-    // (1 + gamma) scaling
-    let g = gamma.clone().unsqueeze::<2>() + 1.0;
-    normed * g
+/// Row-wise RMSNorm with plain gamma, eps 1e-6 (`gemv::rms_norm`).
+fn rms_norm<const D: usize>(x: Tensor<D>, gamma: &Tensor<1>) -> Tensor<D> {
+    let rms = (x.clone().powf_scalar(2.0).mean_dim(D - 1) + 1e-6).sqrt();
+    (x / rms) * gamma.clone().unsqueeze::<D>()
 }
 
-/// RMS norm with plain gamma scaling — used for DeltaNet per-head attention norm.
-fn rms_norm_plain<B: Backend>(x: Tensor<B, 2>, gamma: &Tensor<B, 1>) -> Tensor<B, 2> {
-    let eps = 1e-6;
-    let x_sq = x.clone().powf_scalar(2.0);
-    let mean_sq = x_sq.mean_dim(1);
-    let rms = (mean_sq + eps).sqrt();
-    let normed = x / rms;
-    normed * gamma.clone().unsqueeze::<2>()
-}
-
-/// L2 normalize each row: x / ||x||
-fn l2_normalize_rows<B: Backend>(x: Tensor<B, 2>) -> Tensor<B, 2> {
-    let eps = 1e-12;
-    let norm = x.clone().powf_scalar(2.0).sum_dim(1).sqrt() + eps;
+/// L2-normalize each row: x / (||x|| + 1e-12).
+fn l2_normalize_rows(x: Tensor<2>) -> Tensor<2> {
+    let norm = x.clone().powf_scalar(2.0).sum_dim(1).sqrt() + 1e-12;
     x / norm
 }
 
-/// SiLU activation: x * sigmoid(x)
-fn silu_2d<B: Backend>(x: Tensor<B, 2>) -> Tensor<B, 2> {
-    activation::silu(x)
-}
-
-/// Sigmoid
-fn sigmoid_2d<B: Backend>(x: Tensor<B, 2>) -> Tensor<B, 2> {
-    activation::sigmoid(x)
-}
-
-/// Softplus: log(1 + exp(x))
-fn softplus_1d<B: Backend>(x: Tensor<B, 1>) -> Tensor<B, 1> {
+/// Softplus: log(1 + exp(x)).
+fn softplus_1d(x: Tensor<1>) -> Tensor<1> {
     (x.exp() + 1.0).log()
 }
 
+/// SwiGLU MLP with its pre-norm and residual.
+fn mlp_block(out: Tensor<2>, norm: &Tensor<1>, gate: &Tensor<2>, up: &Tensor<2>, down: &Tensor<2>) -> Tensor<2> {
+    let x_norm = rms_norm(out.clone(), norm);
+    let g = x_norm.clone().matmul(gate.clone());
+    let u = x_norm.matmul(up.clone());
+    out + activation::silu(g).mul(u).matmul(down.clone())
+}
+
+/// Split q_proj output `[rows, width]` into Q `[rows, q_dim]` and, for gated
+/// attention, the gate `[rows, q_dim]` (per head: `[Q(head_dim), gate(head_dim)]`).
+fn split_q_gate(q_out: Tensor<2>, layer: &GpuFullAttnLayer, rows: usize, heads: usize, head_dim: usize) -> (Tensor<2>, Option<Tensor<2>>) {
+    let q_dim = heads * head_dim;
+    if !layer.gated {
+        return (q_out, None);
+    }
+    let q4 = q_out.reshape([rows, heads, 2, head_dim]);
+    let q = q4.clone().slice([0..rows, 0..heads, 0..1, 0..head_dim]).reshape([rows, q_dim]);
+    let gate = q4.slice([0..rows, 0..heads, 1..2, 0..head_dim]).reshape([rows, q_dim]);
+    (q, Some(gate))
+}
+
 // ============================================================
-// DeltaNet GPU forward (single token)
+// DeltaNet: single token
 // ============================================================
 
-fn forward_deltanet_decode_gpu<B: Backend>(
-    x: Tensor<B, 2>, // [1, hidden]
-    layer: &GpuDeltaNetLayer<B>,
-    state: &mut GpuDeltaNetState<B>,
-    config: &IncordConfig,
-) -> Tensor<B, 2> {
-    let _device = x.device();
+fn forward_deltanet_decode_gpu(x: Tensor<2>, layer: &GpuDeltaNetLayer, state: &mut GpuDeltaNetState, config: &IncordConfig) -> Tensor<2> {
     let num_qk = config.num_qk_heads;
     let num_v = config.num_v_heads;
     let hd = config.deltanet_head_dim;
@@ -142,328 +126,159 @@ fn forward_deltanet_decode_gpu<B: Backend>(
     let v_per_qk = num_v / num_qk;
     let scale = 1.0 / (hd as f32).sqrt();
 
-    // 1. Pre-attention RmsNorm (1+gamma)
-    let x_norm = rms_norm_1plus(x.clone(), &layer.input_norm_gamma);
-
-    // 2. QKV projection: [1, hidden] @ [hidden, qkv_dim] → [1, qkv_dim]
+    let x_norm = rms_norm(x.clone(), &layer.input_norm_gamma);
     let qkv = x_norm.clone().matmul(layer.in_proj_qkv.clone());
 
-    // 3. Conv1d: depthwise causal conv over qkv_dim channels
-    //    conv_buf: [qkv_dim, buf_len=3], qkv: [1, qkv_dim] → [qkv_dim, 1]
-    let qkv_col = qkv.clone().reshape([qkv_dim, 1]); // current token as column
-    // Cat with buffer: [qkv_dim, buf_len] cat [qkv_dim, 1] → [qkv_dim, ks=4]
-    let conv_input = Tensor::cat(vec![state.conv_buf.clone(), qkv_col.clone()], 1);
-    // Elementwise multiply with conv weights and sum: [qkv_dim, ks] * [qkv_dim, ks] → sum dim 1 → [qkv_dim]
-    let qkv_conv = (conv_input.clone() * layer.conv1d_weight.clone())
-        .sum_dim(1)
-        .reshape([1, qkv_dim]);
-
-    // Update conv buffer: shift left, append new
-    state.conv_buf = conv_input.slice([0..qkv_dim, 1..ks]); // take last buf_len columns
+    // Depthwise causal conv over the last `ks` inputs of every channel.
+    let conv_input = Tensor::cat(vec![state.conv_buf.clone(), qkv.reshape([qkv_dim, 1])], 1);
+    let qkv_conv = (conv_input.clone() * layer.conv1d_weight.clone()).sum_dim(1).reshape([1, qkv_dim]);
+    state.conv_buf = conv_input.slice([0..qkv_dim, 1..ks]);
     state.conv_pos += 1;
 
-    // 4. SiLU on all channels
     let qkv_act = activation::silu(qkv_conv);
-
-    // 5. Split Q, K, V
-    let q = qkv_act.clone().slice([0..1, 0..q_dim]); // [1, 2048]
-    let k = qkv_act.clone().slice([0..1, q_dim..q_dim + k_dim]); // [1, 2048]
-    let v = qkv_act.slice([0..1, q_dim + k_dim..qkv_dim]); // [1, 4096]
-
-    // 6. L2 normalize Q, K per head, scale Q
-    let q = q.reshape([num_qk, hd]);
-    let k = k.reshape([num_qk, hd]);
+    let q = qkv_act.clone().slice([0..1, 0..q_dim]).reshape([num_qk, hd]);
+    let k = qkv_act.clone().slice([0..1, q_dim..q_dim + k_dim]).reshape([num_qk, hd]);
+    let v = qkv_act.slice([0..1, q_dim + k_dim..qkv_dim]).reshape([num_v, hd]);
     let q = l2_normalize_rows(q).mul_scalar(scale);
     let k = l2_normalize_rows(k);
 
-    // 7. Alpha and beta
-    let a_proj = x_norm
-        .clone()
-        .matmul(layer.in_proj_a.clone())
-        .reshape([num_v]); // [32]
-    let b_proj = x_norm
-        .clone()
-        .matmul(layer.in_proj_b.clone())
-        .reshape([num_v]); // [32]
+    let a_proj = x_norm.clone().matmul(layer.in_proj_a.clone()).reshape([num_v]);
+    let b_proj = x_norm.clone().matmul(layer.in_proj_b.clone()).reshape([num_v]);
+    let alpha = (layer.a_log.clone().exp() * softplus_1d(a_proj + layer.dt_bias.clone())).neg().exp();
+    let beta = activation::sigmoid(b_proj);
 
-    // alpha = exp(-exp(a_log) * softplus(a_proj + dt_bias))
-    let a_exp = layer.a_log.clone().exp(); // [32]
-    let sp = softplus_1d(a_proj + layer.dt_bias.clone()); // [32]
-    let alpha = (a_exp * sp).neg().exp(); // [32]
-    // beta = sigmoid(b_proj)
-    let beta = activation::sigmoid(b_proj); // [32]
+    // Each QK head serves `v_per_qk` V heads.
+    let q_exp = q.unsqueeze_dim::<3>(1).repeat_dim(1, v_per_qk).reshape([num_v, hd]);
+    let k_exp = k.unsqueeze_dim::<3>(1).repeat_dim(1, v_per_qk).reshape([num_v, hd]);
 
-    // 8. GVA expansion: repeat QK heads from num_qk to num_v
-    //    Each QK head maps to v_per_qk V heads
-    //    [num_qk, hd] → [num_qk, 1, hd] → [num_qk, v_per_qk, hd] → [num_v, hd]
-    let q_exp: Tensor<B, 3> = q.unsqueeze_dim::<3>(1).repeat_dim(1, v_per_qk);
-    let q_exp = q_exp.reshape([num_v, hd]);
-    let k_exp: Tensor<B, 3> = k.unsqueeze_dim::<3>(1).repeat_dim(1, v_per_qk);
-    let k_exp = k_exp.reshape([num_v, hd]);
-    let v_2d = v.reshape([num_v, hd]); // [32, 128]
+    // Delta rule: S *= alpha; S += beta (V - S k) kᵀ; y = S q.
+    state.s = state.s.clone() * alpha.reshape([num_v, 1, 1]);
+    let pred = state.s.clone().matmul(k_exp.clone().unsqueeze_dim::<3>(2)).reshape([num_v, hd]);
+    let delta_v = (v - pred) * beta.reshape([num_v, 1]);
+    state.s = state.s.clone() + delta_v.unsqueeze_dim::<3>(2).matmul(k_exp.unsqueeze_dim::<3>(1));
+    let y = state.s.clone().matmul(q_exp.unsqueeze_dim::<3>(2)).reshape([num_v, hd]);
 
-    // 9. Delta rule state update (batched across all 32 V heads)
-    // S: [32, 128, 128], K: [32, 128], Q: [32, 128], V: [32, 128]
+    let y_normed = rms_norm(y, &layer.attn_norm_weight);
+    let z = activation::silu(x_norm.matmul(layer.in_proj_z.clone())).reshape([num_v, hd]);
+    let out = x + (y_normed * z).reshape([1, v_dim]).matmul(layer.out_proj.clone());
 
-    // Decay: S *= alpha (broadcast [32,1,1])
-    let alpha_3d: Tensor<B, 3> = alpha.clone().reshape([num_v, 1, 1]);
-    state.s = state.s.clone() * alpha_3d;
-
-    // Retrieve: pred = S @ K → [32, 128]
-    // S: [32, 128, 128], K: [32, 128, 1] → bmm → [32, 128, 1] → squeeze → [32, 128]
-    let k_col: Tensor<B, 3> = k_exp.clone().unsqueeze_dim::<3>(2); // [32, 128, 1]
-    let pred = state.s.clone().matmul(k_col).reshape([num_v, hd]); // [32, 128]
-
-    // Delta update: S += beta * outer(V - pred, K)
-    // delta_v = beta * (V - pred): [32, 128]
-    let beta_2d: Tensor<B, 2> = beta.reshape([num_v, 1]);
-    let delta_v = (v_2d - pred) * beta_2d;
-    // outer: [32, 128, 1] @ [32, 1, 128] → [32, 128, 128]
-    let delta_col: Tensor<B, 3> = delta_v.unsqueeze_dim::<3>(2); // [32, 128, 1]
-    let k_row: Tensor<B, 3> = k_exp.unsqueeze_dim::<3>(1); // [32, 1, 128]
-    let outer = delta_col.matmul(k_row); // [32, 128, 128]
-    state.s = state.s.clone() + outer;
-
-    // Output: y = S @ Q → [32, 128]
-    let q_col: Tensor<B, 3> = q_exp.unsqueeze_dim::<3>(2); // [32, 128, 1]
-    let y = state.s.clone().matmul(q_col).reshape([num_v, hd]); // [32, 128]
-
-    // 10. Per-head RMS norm (plain gamma, NOT 1+gamma)
-    let y_normed = rms_norm_plain(y, &layer.attn_norm_weight); // [32, 128]
-
-    // 11. Output gating: z = silu(z_proj(x)), output = y_normed * z
-    let z = x_norm.clone().matmul(layer.in_proj_z.clone()); // [1, v_dim=4096]
-    let z = activation::silu(z).reshape([num_v, hd]); // [32, 128]
-    let gated = y_normed * z; // [32, 128]
-
-    // 12. Out projection + residual
-    let gated_flat = gated.reshape([1, v_dim]); // [1, 4096]
-    let attn_out = gated_flat.matmul(layer.out_proj.clone()); // [1, hidden]
-    let out = x + attn_out;
-
-    // 13. MLP: silu(gate) * up → down
-    let x_norm2 = rms_norm_1plus(out.clone(), &layer.post_attn_norm_gamma);
-    let gate = x_norm2.clone().matmul(layer.gate_proj.clone());
-    let up = x_norm2.matmul(layer.up_proj.clone());
-    let mlp_out = silu_2d(gate).mul(up).matmul(layer.down_proj.clone());
-
-    out + mlp_out
+    mlp_block(out, &layer.post_attn_norm_gamma, &layer.gate_proj, &layer.up_proj, &layer.down_proj)
 }
 
 // ============================================================
-// Full Attention GPU forward (single token)
+// Full attention: single token
 // ============================================================
 
-fn forward_attn_decode_gpu<B: Backend>(
-    x: Tensor<B, 2>, // [1, hidden]
-    layer: &GpuFullAttnLayer<B>,
-    kv: &mut GpuKvCacheEntry<B>,
-    config: &IncordConfig,
-    rope_cos: &Tensor<B, 2>, // [max_pos, half_dim]
-    rope_sin: &Tensor<B, 2>,
-) -> Tensor<B, 2> {
-    let num_heads = config.num_attn_heads; // 16
-    let num_kv_heads = config.num_kv_heads; // 4
-    let head_dim = config.attn_head_dim; // 256
-    let q_dim = config.attn_q_dim(); // 4096
-    let num_kv_groups = config.num_kv_groups(); // 4
-    let rotary_dim = config.rope_dim(); // 64
-    let half_rot = rotary_dim / 2; // 32
-    let offset = kv.seq_len;
-
-    // 1. Pre-attention RmsNorm (1+gamma)
-    let x_norm = rms_norm_1plus(x.clone(), &layer.input_norm_gamma);
-
-    // 2. Q+Gate projection: [1, hidden] → [1, 2*q_dim=8192]
-    //    Interleaved: [Q_h0(256), Gate_h0(256), Q_h1(256), Gate_h1(256), ...]
-    let q_gate = x_norm.clone().matmul(layer.q_proj.clone()); // [1, 8192]
-    // Reshape to [num_heads, 2*head_dim] → split
-    let q_gate_3d = q_gate.reshape([num_heads, 2 * head_dim]);
-    let q_raw = q_gate_3d.clone().slice([0..num_heads, 0..head_dim]); // [16, 256]
-    let gate = q_gate_3d.slice([0..num_heads, head_dim..2 * head_dim]); // [16, 256]
-
-    // 3. K, V projections
-    let k_raw = x_norm.clone().matmul(layer.k_proj.clone()); // [1, 1024]
-    let k_raw = k_raw.reshape([num_kv_heads, head_dim]); // [4, 256]
-    let v_new = x_norm.matmul(layer.v_proj.clone()); // [1, 1024]
-    let v_new = v_new.reshape([num_kv_heads, head_dim]); // [4, 256]
-
-    // 4. Per-head QK-norm (1+gamma)
-    let q_normed = rms_norm_1plus(q_raw, &layer.q_norm); // [16, 256]
-    let k_normed = rms_norm_1plus(k_raw, &layer.k_norm); // [4, 256]
-
-    // 5. Partial RoPE: rotate first rotary_dim=64 dims of each head
-    let q_rot = q_normed.clone().slice([0..num_heads, 0..rotary_dim]); // [16, 64]
-    let q_pass = q_normed.slice([0..num_heads, rotary_dim..head_dim]); // [16, 192]
-    let k_rot = k_normed.clone().slice([0..num_kv_heads, 0..rotary_dim]); // [4, 64]
-    let k_pass = k_normed.slice([0..num_kv_heads, rotary_dim..head_dim]); // [4, 192]
-
-    // Split-half RoPE on rotary part
-    let q_rotated = apply_partial_rope_gpu(q_rot, rope_cos, rope_sin, num_heads, half_rot, offset);
-    let k_rotated =
-        apply_partial_rope_gpu(k_rot, rope_cos, rope_sin, num_kv_heads, half_rot, offset);
-
-    // Reassemble: [rotated, pass_through]
-    let q_final = Tensor::cat(vec![q_rotated, q_pass], 1); // [16, 256]
-    let k_final = Tensor::cat(vec![k_rotated, k_pass], 1); // [4, 256]
-
-    // 6. KV cache update: reshape to [heads, 1, head_dim] and cat
-    let k_new_3d: Tensor<B, 3> = k_final.unsqueeze_dim::<3>(1); // [4, 1, 256]
-    let v_new_3d: Tensor<B, 3> = v_new.unsqueeze_dim::<3>(1); // [4, 1, 256]
-
-    let (k_cache, v_cache) = if let (Some(prev_k), Some(prev_v)) = (kv.k.take(), kv.v.take()) {
-        (
-            Tensor::cat(vec![prev_k, k_new_3d], 1),
-            Tensor::cat(vec![prev_v, v_new_3d], 1),
-        )
-    } else {
-        (k_new_3d, v_new_3d)
-    };
-    kv.seq_len = offset + 1;
-    let kv_seq_len = kv.seq_len;
-
-    // 7. GQA attention
-    let scale = 1.0 / (head_dim as f32).sqrt();
-
-    // Q: [16, 256] → [16, 1, 256]
-    let q_3d: Tensor<B, 3> = q_final.unsqueeze_dim::<3>(1);
-
-    // Expand KV heads: [4, seq, 256] → [16, seq, 256]
-    let k_exp = if num_kv_groups > 1 {
-        let k4: Tensor<B, 4> = k_cache
-            .clone()
-            .unsqueeze_dim::<4>(1)
-            .repeat_dim(1, num_kv_groups);
-        k4.reshape([num_heads, kv_seq_len, head_dim])
-    } else {
-        k_cache.clone()
-    };
-    let v_exp = if num_kv_groups > 1 {
-        let v4: Tensor<B, 4> = v_cache
-            .clone()
-            .unsqueeze_dim::<4>(1)
-            .repeat_dim(1, num_kv_groups);
-        v4.reshape([num_heads, kv_seq_len, head_dim])
-    } else {
-        v_cache.clone()
-    };
-
-    // scores: [16, 1, 256] @ [16, 256, seq] → [16, 1, seq]
-    let scores = q_3d.matmul(k_exp.swap_dims(1, 2)).mul_scalar(scale);
-    let attn_weights = activation::softmax(scores, 2);
-    // context: [16, 1, seq] @ [16, seq, 256] → [16, 1, 256]
-    let context = attn_weights.matmul(v_exp);
-
-    // Store cache
-    kv.k = Some(k_cache);
-    kv.v = Some(v_cache);
-
-    // Reshape: [16, 1, 256] → [1, 4096]
-    let attn_out = context.reshape([1, q_dim]);
-
-    // 8. Output gate: attn_out *= sigmoid(gate)
-    let gate_flat = gate.reshape([1, q_dim]);
-    let attn_gated = attn_out * sigmoid_2d(gate_flat);
-
-    // 9. O projection + residual
-    let o_out = attn_gated.matmul(layer.o_proj.clone());
-    let out = x + o_out;
-
-    // 10. MLP
-    let x_norm2 = rms_norm_1plus(out.clone(), &layer.post_attn_norm_gamma);
-    let gate_mlp = x_norm2.clone().matmul(layer.gate_proj.clone());
-    let up = x_norm2.matmul(layer.up_proj.clone());
-    let mlp_out = silu_2d(gate_mlp).mul(up).matmul(layer.down_proj.clone());
-
-    out + mlp_out
+/// Split-half RoPE on `x: [rows, rotary_dim]` with one cos/sin row per x row.
+fn rope_rows(x: Tensor<2>, cos: Tensor<2>, sin: Tensor<2>, half: usize) -> Tensor<2> {
+    let rows = x.dims()[0];
+    let first = x.clone().slice([0..rows, 0..half]);
+    let second = x.slice([0..rows, half..2 * half]);
+    let new_first = first.clone() * cos.clone() - second.clone() * sin.clone();
+    let new_second = second * cos + first * sin;
+    Tensor::cat(vec![new_first, new_second], 1)
 }
 
-/// Apply split-half RoPE on rotary portion.
-/// x: [num_heads, rotary_dim], cos/sin tables: [max_pos, half_rot]
-fn apply_partial_rope_gpu<B: Backend>(
-    x: Tensor<B, 2>,
-    cos_table: &Tensor<B, 2>,
-    sin_table: &Tensor<B, 2>,
-    num_heads: usize,
-    half_rot: usize,
-    offset: usize,
-) -> Tensor<B, 2> {
-    let rotary_dim = half_rot * 2;
-    // Split into first half and second half per head
-    let x_first = x.clone().slice([0..num_heads, 0..half_rot]); // [heads, 32]
-    let x_second = x.slice([0..num_heads, half_rot..rotary_dim]); // [heads, 32]
-
-    // cos, sin for this position: [1, half_rot] → broadcast over heads
-    let cos = cos_table.clone().slice([offset..offset + 1, 0..half_rot]); // [1, 32]
-    let sin = sin_table.clone().slice([offset..offset + 1, 0..half_rot]); // [1, 32]
-
-    let new_first = x_first.clone() * cos.clone() - x_second.clone() * sin.clone();
-    let new_second = x_second * cos + x_first * sin;
-
-    Tensor::cat(vec![new_first, new_second], 1) // [heads, rotary_dim]
-}
-
-// ============================================================
-// Forward decode (full model, single token)
-// ============================================================
-
-fn forward_decode_gpu<B: Backend>(
-    model: &GpuModel<B>,
-    token_id: usize,
-    cache: &mut GpuHybridCache<B>,
-) -> Vec<f32> {
-    let device = model.final_norm_gamma.device();
-    let hidden = model.embed_hidden;
-    let config = &model.config;
-
-    // Embed: lookup from CPU, upload to GPU
-    let embed_start = token_id * hidden;
-    let embed_slice = &model.embed_f32[embed_start..embed_start + hidden];
-    let mut x: Tensor<B, 2> = Tensor::from_data(
-        cortex::tensor::TensorData::new(embed_slice.to_vec(), [1, hidden]),
-        &device,
-    );
-
-    for (i, (layer, entry)) in model
-        .layers
-        .iter()
-        .zip(cache.entries.iter_mut())
-        .enumerate()
-    {
-        x = match (layer, entry) {
-            (GpuHybridLayer::DeltaNet(dl), GpuCacheEntry::DeltaNet(ds)) => {
-                forward_deltanet_decode_gpu(x, dl, ds, config)
-            }
-            (GpuHybridLayer::FullAttn(fl), GpuCacheEntry::KvCache(kv)) => {
-                forward_attn_decode_gpu(x, fl, kv, config, &model.rope_cos, &model.rope_sin)
-            }
-            _ => panic!("Layer/cache type mismatch at layer {i}"),
-        };
+/// Partial RoPE on every head of `x: [positions * heads, head_dim]` for the
+/// consecutive positions `start..start + positions`.
+fn apply_partial_rope(x: Tensor<2>, rope_cos: &Tensor<2>, rope_sin: &Tensor<2>, start: usize, positions: usize, heads: usize, head_dim: usize, rotary_dim: usize) -> Tensor<2> {
+    if rotary_dim == 0 {
+        return x;
     }
-
-    // Final norm (1+gamma)
-    x = rms_norm_1plus(x, &model.final_norm_gamma);
-
-    // lm_head on CPU (vocab=248K too large for VRAM)
-    let x_data = x.to_data().to_vec::<f32>().unwrap();
-    lm_head_cpu(&x_data, &model.embed_f32, model.embed_vocab, hidden)
+    let half = rotary_dim / 2;
+    let rows = positions * heads;
+    let expand = |t: &Tensor<2>| {
+        t.clone()
+            .slice([start..start + positions, 0..half])
+            .unsqueeze_dim::<3>(1)
+            .repeat_dim(1, heads)
+            .reshape([rows, half])
+    };
+    let rotated = rope_rows(x.clone().slice([0..rows, 0..rotary_dim]), expand(rope_cos), expand(rope_sin), half);
+    if rotary_dim == head_dim {
+        return rotated;
+    }
+    Tensor::cat(vec![rotated, x.slice([0..rows, rotary_dim..head_dim])], 1)
 }
 
-/// Batched DeltaNet prefill: GPU batch matmuls + CPU sequential state update.
-///
-/// Strategy: batch all expensive projections on GPU, download results,
-/// run the lightweight conv1d + recurrent state update on CPU, then
-/// upload outputs back to GPU for the remaining batch ops (gating, out_proj, MLP).
-/// This avoids seq_len GPU round-trips and achieves ~10x fewer PCIe transfers.
-fn prefill_deltanet_layer_gpu<B: Backend>(
-    x: Tensor<B, 2>, // [seq_len, hidden] on GPU
-    layer: &GpuDeltaNetLayer<B>,
-    state: &mut GpuDeltaNetState<B>,
-    config: &IncordConfig,
-) -> Tensor<B, 2> {
+/// Expand KV heads `[kv_heads, seq, hd]` to `[heads, seq, hd]` (GQA).
+fn expand_kv(t: Tensor<3>, heads: usize, groups: usize) -> Tensor<3> {
+    if groups == 1 {
+        return t;
+    }
+    let [kvh, seq, hd] = t.dims();
+    debug_assert_eq!(kvh * groups, heads);
+    t.unsqueeze_dim::<4>(1).repeat_dim(1, groups).reshape([heads, seq, hd])
+}
+
+/// Attention over `seq` new positions starting at `start` (prefill when
+/// start == 0, decode when seq == 1). Updates the KV cache.
+fn attention_block(x: Tensor<2>, layer: &GpuFullAttnLayer, kv: &mut GpuKvCacheEntry, config: &IncordConfig, rope_cos: &Tensor<2>, rope_sin: &Tensor<2>) -> Tensor<2> {
+    let seq = x.dims()[0];
+    let heads = config.num_attn_heads;
+    let kv_heads = config.num_kv_heads;
+    let hd = config.attn_head_dim;
+    let q_dim = heads * hd;
+    let rotary_dim = config.rope_dim();
+    let start = kv.seq_len;
+
+    let x_norm = rms_norm(x.clone(), &layer.input_norm_gamma);
+    let (q, gate) = split_q_gate(x_norm.clone().matmul(layer.q_proj.clone()), layer, seq, heads, hd);
+    let k = x_norm.clone().matmul(layer.k_proj.clone());
+    let v = x_norm.matmul(layer.v_proj.clone());
+
+    let mut q = q.reshape([seq * heads, hd]);
+    let mut k = k.reshape([seq * kv_heads, hd]);
+    if let Some(g) = &layer.q_norm {
+        q = rms_norm(q, g);
+    }
+    if let Some(g) = &layer.k_norm {
+        k = rms_norm(k, g);
+    }
+    let q = apply_partial_rope(q, rope_cos, rope_sin, start, seq, heads, hd, rotary_dim);
+    let k = apply_partial_rope(k, rope_cos, rope_sin, start, seq, kv_heads, hd, rotary_dim);
+
+    // [seq, heads, hd] -> [heads, seq, hd]
+    let q = q.reshape([seq, heads, hd]).swap_dims(0, 1);
+    let k_new = k.reshape([seq, kv_heads, hd]).swap_dims(0, 1);
+    let v_new = v.reshape([seq, kv_heads, hd]).swap_dims(0, 1);
+    let (k_all, v_all) = match (kv.k.take(), kv.v.take()) {
+        (Some(pk), Some(pv)) => (Tensor::cat(vec![pk, k_new], 1), Tensor::cat(vec![pv, v_new], 1)),
+        _ => (k_new, v_new),
+    };
+    kv.seq_len = start + seq;
+    let total = kv.seq_len;
+    kv.k = Some(k_all.clone());
+    kv.v = Some(v_all.clone());
+
+    let groups = config.num_kv_groups();
+    let k_exp = expand_kv(k_all, heads, groups);
+    let v_exp = expand_kv(v_all, heads, groups);
+    let mut scores = q.matmul(k_exp.swap_dims(1, 2)).mul_scalar(1.0 / (hd as f32).sqrt()); // [heads, seq, total]
+    if seq > 1 {
+        // New position i (absolute start + i) may not see absolute positions > start + i.
+        let mask = Tensor::<2>::ones([seq, total], &x.device()).triu(start as i64 + 1).mul_scalar(-1e9f32);
+        scores = scores + mask.unsqueeze_dim::<3>(0);
+    }
+    let context = activation::softmax(scores, 2).matmul(v_exp); // [heads, seq, hd]
+    let mut attn = context.swap_dims(0, 1).reshape([seq, q_dim]);
+    if let Some(g) = gate {
+        attn = attn * activation::sigmoid(g);
+    }
+    let out = x + attn.matmul(layer.o_proj.clone());
+
+    mlp_block(out, &layer.post_attn_norm_gamma, &layer.gate_proj, &layer.up_proj, &layer.down_proj)
+}
+
+// ============================================================
+// DeltaNet: prefill (GPU projections, CPU recurrence)
+// ============================================================
+
+/// Batched DeltaNet prefill: projections on the GPU, the sequential conv +
+/// state recurrence on the CPU, then gating, out_proj and MLP on the GPU.
+fn prefill_deltanet_layer_gpu(x: Tensor<2>, layer: &GpuDeltaNetLayer, state: &mut GpuDeltaNetState, config: &IncordConfig) -> Tensor<2> {
     let device = x.device();
     let seq_len = x.dims()[0];
-    let _hidden = config.hidden_size;
     let num_qk = config.num_qk_heads;
     let num_v = config.num_v_heads;
     let hd = config.deltanet_head_dim;
@@ -476,41 +291,21 @@ fn prefill_deltanet_layer_gpu<B: Backend>(
     let v_per_qk = num_v / num_qk;
     let scale = 1.0 / (hd as f32).sqrt();
 
-    // ==== GPU BATCH PHASE 1: all projections ====
-    let x_norm = rms_norm_1plus(x.clone(), &layer.input_norm_gamma);
-    let qkv_all = x_norm.clone().matmul(layer.in_proj_qkv.clone()); // [seq, qkv_dim]
-    let a_all = x_norm.clone().matmul(layer.in_proj_a.clone()); // [seq, num_v]
-    let b_all = x_norm.clone().matmul(layer.in_proj_b.clone()); // [seq, num_v]
-    let z_all = x_norm.matmul(layer.in_proj_z.clone()); // [seq, v_dim]
+    let x_norm = rms_norm(x.clone(), &layer.input_norm_gamma);
+    let to_vec1 = |t: Tensor<1>| t.into_data().to_vec::<f32>().unwrap();
+    let to_vec2 = |t: Tensor<2>| t.into_data().to_vec::<f32>().unwrap();
+    let qkv_cpu = to_vec2(x_norm.clone().matmul(layer.in_proj_qkv.clone()));
+    let a_cpu = to_vec2(x_norm.clone().matmul(layer.in_proj_a.clone()));
+    let b_cpu = to_vec2(x_norm.clone().matmul(layer.in_proj_b.clone()));
+    let z_all = x_norm.matmul(layer.in_proj_z.clone());
 
-    // Download batch results + small layer weights to CPU
-    let qkv_cpu: Vec<f32> = qkv_all.to_data().to_vec::<f32>().unwrap();
-    let a_cpu: Vec<f32> = a_all.to_data().to_vec::<f32>().unwrap();
-    let b_cpu: Vec<f32> = b_all.to_data().to_vec::<f32>().unwrap();
+    let conv_w = to_vec2(layer.conv1d_weight.clone());
+    let a_exp_table: Vec<f32> = to_vec1(layer.a_log.clone()).iter().map(|v| v.exp()).collect();
+    let dt_bias = to_vec1(layer.dt_bias.clone());
+    let attn_norm_w = to_vec1(layer.attn_norm_weight.clone());
+    let mut s: Vec<f32> = state.s.clone().into_data().to_vec::<f32>().unwrap();
+    let mut conv_buf: Vec<f32> = to_vec2(state.conv_buf.clone());
 
-    let conv_w: Vec<f32> = layer
-        .conv1d_weight
-        .clone()
-        .to_data()
-        .to_vec::<f32>()
-        .unwrap();
-    let a_log_data: Vec<f32> = layer.a_log.clone().to_data().to_vec::<f32>().unwrap();
-    let dt_bias_data: Vec<f32> = layer.dt_bias.clone().to_data().to_vec::<f32>().unwrap();
-    let attn_norm_w: Vec<f32> = layer
-        .attn_norm_weight
-        .clone()
-        .to_data()
-        .to_vec::<f32>()
-        .unwrap();
-
-    // Download state to CPU
-    let mut s: Vec<f32> = state.s.clone().to_data().to_vec::<f32>().unwrap();
-    let mut conv_buf: Vec<f32> = state.conv_buf.clone().to_data().to_vec::<f32>().unwrap();
-
-    // Precompute a_exp table
-    let a_exp_table: Vec<f32> = a_log_data.iter().map(|&al| al.exp()).collect();
-
-    // ==== CPU SEQUENTIAL PHASE: conv1d + state update ====
     let mut output_y = vec![0.0f32; seq_len * v_dim];
     let mut qkv_conv = vec![0.0f32; qkv_dim];
     let mut q_exp = vec![0.0f32; num_v * hd];
@@ -522,104 +317,62 @@ fn prefill_deltanet_layer_gpu<B: Backend>(
         let a_t = &a_cpu[t * num_v..(t + 1) * num_v];
         let b_t = &b_cpu[t * num_v..(t + 1) * num_v];
 
-        // Conv1d: depthwise causal convolution
         for ch in 0..qkv_dim {
             let buf_off = ch * buf_len;
             let w_off = ch * ks;
-            let mut sum = 0.0f32;
+            let mut sum = qkv_t[ch] * conv_w[w_off + buf_len];
             for j in 0..buf_len {
                 sum += conv_buf[buf_off + j] * conv_w[w_off + j];
             }
-            sum += qkv_t[ch] * conv_w[w_off + buf_len];
-            qkv_conv[ch] = sum;
-            // Shift buffer left, append new token
-            for j in 0..buf_len - 1 {
-                conv_buf[buf_off + j] = conv_buf[buf_off + j + 1];
-            }
+            let v = sum;
+            qkv_conv[ch] = v * (1.0 / (1.0 + (-v).exp()));
+            conv_buf.copy_within(buf_off + 1..buf_off + buf_len, buf_off);
             conv_buf[buf_off + buf_len - 1] = qkv_t[ch];
         }
 
-        // SiLU
-        for v in qkv_conv.iter_mut() {
-            *v = *v * (1.0 / (1.0 + (-*v).exp()));
-        }
-
-        // Split Q, K, V and L2 normalize + GVA expand
         let q = &qkv_conv[0..q_dim];
         let k = &qkv_conv[q_dim..q_dim + k_dim];
         let v_data = &qkv_conv[q_dim + k_dim..qkv_dim];
-
-        for qk_h in 0..num_qk {
-            let qs = qk_h * hd;
-            let ks_off = qk_h * hd;
-            let mut q_sq = 0.0f32;
-            let mut k_sq = 0.0f32;
-            for d in 0..hd {
-                q_sq += q[qs + d] * q[qs + d];
-                k_sq += k[ks_off + d] * k[ks_off + d];
-            }
+        for h in 0..num_qk {
+            let o = h * hd;
+            let q_sq: f32 = q[o..o + hd].iter().map(|x| x * x).sum();
+            let k_sq: f32 = k[o..o + hd].iter().map(|x| x * x).sum();
             let q_inv = scale / (q_sq.sqrt() + 1e-12);
             let k_inv = 1.0 / (k_sq.sqrt() + 1e-12);
             for g in 0..v_per_qk {
-                let vh = qk_h * v_per_qk + g;
-                let o = vh * hd;
+                let e = (h * v_per_qk + g) * hd;
                 for d in 0..hd {
-                    q_exp[o + d] = q[qs + d] * q_inv;
-                    k_exp[o + d] = k[ks_off + d] * k_inv;
+                    q_exp[e + d] = q[o + d] * q_inv;
+                    k_exp[e + d] = k[o + d] * k_inv;
                 }
             }
         }
 
-        // State update per V head
         for h in 0..num_v {
-            let sp_in = a_t[h] + dt_bias_data[h];
-            let sp = (1.0 + sp_in.exp()).ln();
+            let sp = (1.0 + (a_t[h] + dt_bias[h]).exp()).ln();
             let alpha = (-a_exp_table[h] * sp).exp();
             let beta = 1.0 / (1.0 + (-b_t[h]).exp());
-
-            let s_off = h * hd * hd;
+            let so = h * hd * hd;
             let ho = h * hd;
-
-            // Decay
-            for i in 0..hd * hd {
-                s[s_off + i] *= alpha;
-            }
-
-            // pred = S @ K
+            s[so..so + hd * hd].iter_mut().for_each(|x| *x *= alpha);
             for i in 0..hd {
-                let mut dot = 0.0f32;
-                for j in 0..hd {
-                    dot += s[s_off + i * hd + j] * k_exp[ho + j];
-                }
-                pred[ho + i] = dot;
+                pred[ho + i] = (0..hd).map(|j| s[so + i * hd + j] * k_exp[ho + j]).sum();
             }
-
-            // S += outer(beta*(V - pred), K)
             for i in 0..hd {
-                let delta_i = beta * (v_data[ho + i] - pred[ho + i]);
+                let delta = beta * (v_data[ho + i] - pred[ho + i]);
                 for j in 0..hd {
-                    s[s_off + i * hd + j] += delta_i * k_exp[ho + j];
+                    s[so + i * hd + j] += delta * k_exp[ho + j];
                 }
             }
-
-            // y = S @ Q
             for i in 0..hd {
-                let mut dot = 0.0f32;
-                for j in 0..hd {
-                    dot += s[s_off + i * hd + j] * q_exp[ho + j];
-                }
-                pred[ho + i] = dot;
+                pred[ho + i] = (0..hd).map(|j| s[so + i * hd + j] * q_exp[ho + j]).sum();
             }
         }
 
-        // Per-head RMS norm (plain gamma, NOT 1+gamma)
         let y_out = &mut output_y[t * v_dim..(t + 1) * v_dim];
         for h in 0..num_v {
             let ho = h * hd;
-            let mut sum_sq = 0.0f32;
-            for d in 0..hd {
-                sum_sq += pred[ho + d] * pred[ho + d];
-            }
+            let sum_sq: f32 = pred[ho..ho + hd].iter().map(|x| x * x).sum();
             let inv_rms = 1.0 / (sum_sq / hd as f32 + 1e-6).sqrt();
             for d in 0..hd {
                 y_out[ho + d] = pred[ho + d] * inv_rms * attn_norm_w[d];
@@ -627,275 +380,112 @@ fn prefill_deltanet_layer_gpu<B: Backend>(
         }
     }
 
-    // ==== GPU BATCH PHASE 2: gating + out_proj + MLP ====
-    // Upload y and state back to GPU
-    let y_gpu: Tensor<B, 2> = Tensor::from_data(
-        cortex::tensor::TensorData::new(output_y, [seq_len, v_dim]),
-        &device,
-    );
-    state.s = Tensor::from_data(cortex::tensor::TensorData::new(s, [num_v, hd, hd]), &device);
-    state.conv_buf = Tensor::from_data(
-        cortex::tensor::TensorData::new(conv_buf, [qkv_dim, buf_len]),
-        &device,
-    );
+    let y_gpu: Tensor<2> = Tensor::from_data(TensorData::new(output_y, [seq_len, v_dim]), &device);
+    state.s = Tensor::from_data(TensorData::new(s, [num_v, hd, hd]), &device);
+    state.conv_buf = Tensor::from_data(TensorData::new(conv_buf, [qkv_dim, buf_len]), &device);
     state.conv_pos += seq_len;
 
-    // Output gating: y * silu(z)
-    let z_act = activation::silu(z_all);
-    let gated = y_gpu * z_act;
-
-    // Out projection + residual
-    let attn_out = gated.matmul(layer.out_proj.clone());
-    let out = x + attn_out;
-
-    // MLP: norm → silu(gate) * up → down → residual
-    let x_norm2 = rms_norm_1plus(out.clone(), &layer.post_attn_norm_gamma);
-    let gate = x_norm2.clone().matmul(layer.gate_proj.clone());
-    let up = x_norm2.matmul(layer.up_proj.clone());
-    let mlp_out = silu_2d(gate).mul(up).matmul(layer.down_proj.clone());
-
-    out + mlp_out
+    let out = x + (y_gpu * activation::silu(z_all)).matmul(layer.out_proj.clone());
+    mlp_block(out, &layer.post_attn_norm_gamma, &layer.gate_proj, &layer.up_proj, &layer.down_proj)
 }
 
-/// Prefill on GPU — keeps x as GPU tensor throughout all layers.
-fn forward_prefill_gpu<B: Backend>(
-    model: &GpuModel<B>,
-    token_ids: &[u32],
-    cache: &mut GpuHybridCache<B>,
-) -> Vec<f32> {
-    let device = model.final_norm_gamma.device();
-    let hidden = model.embed_hidden;
-    let config = &model.config;
-    let seq_len = token_ids.len();
+// ============================================================
+// Whole-model forward
+// ============================================================
 
-    // Embed all tokens on CPU, upload to GPU once
-    let mut embed_data = vec![0.0f32; seq_len * hidden];
-    for (t, &tid) in token_ids.iter().enumerate() {
-        let start = tid as usize * hidden;
-        embed_data[t * hidden..(t + 1) * hidden]
-            .copy_from_slice(&model.embed_f32[start..start + hidden]);
+/// Final norm and output head on the GPU: `lm_head [vocab, hidden] · hᵀ`.
+fn head_logits(model: &GpuModel, last: Tensor<2>) -> Vec<f32> {
+    let h = rms_norm(last, &model.final_norm_gamma); // [1, hidden]
+    let logits = model.lm_head.clone().matmul(h.swap_dims(0, 1)); // [vocab, 1]
+    logits.into_data().to_vec::<f32>().unwrap()
+}
+
+fn embed_rows(model: &GpuModel, weights: &ModelWeights, tokens: &[u32]) -> Tensor<2> {
+    let mut data = Vec::with_capacity(tokens.len() * model.hidden);
+    for &t in tokens {
+        data.extend(embed_lookup(&weights.embed, t as usize, model.hidden));
     }
-    let mut x: Tensor<B, 2> = Tensor::from_data(
-        cortex::tensor::TensorData::new(embed_data, [seq_len, hidden]),
-        &device,
-    );
+    Tensor::from_data(TensorData::new(data, [tokens.len(), model.hidden]), &model.device)
+}
 
-    // Process layer by layer (x stays on GPU)
-    for (i, (layer, entry)) in model
-        .layers
-        .iter()
-        .zip(cache.entries.iter_mut())
-        .enumerate()
-    {
+fn run_layers(model: &GpuModel, mut x: Tensor<2>, cache: &mut GpuHybridCache, prefill: bool) -> Tensor<2> {
+    let config = &model.config;
+    for (i, (layer, entry)) in model.layers.iter().zip(cache.entries.iter_mut()).enumerate() {
         x = match (layer, entry) {
             (GpuHybridLayer::DeltaNet(dl), GpuCacheEntry::DeltaNet(ds)) => {
-                prefill_deltanet_layer_gpu(x, dl, ds, config)
+                if prefill {
+                    prefill_deltanet_layer_gpu(x, dl, ds, config)
+                } else {
+                    forward_deltanet_decode_gpu(x, dl, ds, config)
+                }
             }
             (GpuHybridLayer::FullAttn(fl), GpuCacheEntry::KvCache(kv)) => {
-                prefill_attn_layer_gpu(x, fl, kv, config, &model.rope_cos, &model.rope_sin)
+                attention_block(x, fl, kv, config, &model.rope_cos, &model.rope_sin)
             }
             _ => panic!("Layer/cache type mismatch at layer {i}"),
         };
-        eprint!("\r  Prefill: layer {}/{}  ", i + 1, config.num_layers);
-        std::io::stderr().flush().ok();
     }
-    eprintln!();
-
-    // Final norm (last token only)
-    let last = x.slice([seq_len - 1..seq_len, 0..hidden]);
-    let normed = rms_norm_1plus(last, &model.final_norm_gamma);
-    let x_data = normed.to_data().to_vec::<f32>().unwrap();
-    lm_head_cpu(&x_data, &model.embed_f32, model.embed_vocab, hidden)
+    x
 }
 
-/// Prefill one full attention layer with all tokens (causal masked attention).
-fn prefill_attn_layer_gpu<B: Backend>(
-    x: Tensor<B, 2>, // [seq_len, hidden]
-    layer: &GpuFullAttnLayer<B>,
-    kv: &mut GpuKvCacheEntry<B>,
-    config: &IncordConfig,
-    rope_cos: &Tensor<B, 2>,
-    rope_sin: &Tensor<B, 2>,
-) -> Tensor<B, 2> {
-    let seq_len = x.dims()[0];
-    let num_heads = config.num_attn_heads;
-    let num_kv_heads = config.num_kv_heads;
-    let head_dim = config.attn_head_dim;
-    let q_dim = config.attn_q_dim();
-    let num_kv_groups = config.num_kv_groups();
-    let rotary_dim = config.rope_dim();
-    let half_rot = rotary_dim / 2;
-
-    // 1. RmsNorm
-    let x_norm = rms_norm_1plus(x.clone(), &layer.input_norm_gamma);
-
-    // 2. Q+Gate projection
-    let q_gate = x_norm.clone().matmul(layer.q_proj.clone()); // [seq, 8192]
-    let q_gate_4d = q_gate.reshape([seq_len, num_heads, 2, head_dim]);
-    let q_raw = q_gate_4d
-        .clone()
-        .slice([0..seq_len, 0..num_heads, 0..1, 0..head_dim])
-        .reshape([seq_len * num_heads, head_dim]); // [seq*16, 256]
-    let gate = q_gate_4d
-        .slice([0..seq_len, 0..num_heads, 1..2, 0..head_dim])
-        .reshape([seq_len, q_dim]); // [seq, 4096]
-
-    // 3. K, V projections
-    let k_raw = x_norm
-        .clone()
-        .matmul(layer.k_proj.clone())
-        .reshape([seq_len * num_kv_heads, head_dim]); // [seq*4, 256]
-    let v_new = x_norm.matmul(layer.v_proj.clone()); // [seq, kv_dim]
-
-    // 4. Per-head QK-norm
-    let q_normed = rms_norm_1plus(q_raw, &layer.q_norm); // [seq*16, 256]
-    let k_normed = rms_norm_1plus(k_raw, &layer.k_norm); // [seq*4, 256]
-
-    // 5. Partial RoPE for each position
-    let q_3d = q_normed.reshape([seq_len, num_heads, head_dim]);
-    let k_3d = k_normed.reshape([seq_len, num_kv_heads, head_dim]);
-
-    // Apply RoPE position by position across sequence
-    let q_rot = q_3d
-        .clone()
-        .slice([0..seq_len, 0..num_heads, 0..rotary_dim])
-        .reshape([seq_len * num_heads, rotary_dim]);
-    let q_pass = q_3d
-        .slice([0..seq_len, 0..num_heads, rotary_dim..head_dim])
-        .reshape([seq_len * num_heads, head_dim - rotary_dim]);
-    let k_rot = k_3d
-        .clone()
-        .slice([0..seq_len, 0..num_kv_heads, 0..rotary_dim])
-        .reshape([seq_len * num_kv_heads, rotary_dim]);
-    let k_pass = k_3d
-        .slice([0..seq_len, 0..num_kv_heads, rotary_dim..head_dim])
-        .reshape([seq_len * num_kv_heads, head_dim - rotary_dim]);
-
-    // RoPE for prefill: each position gets its own cos/sin
-    let q_rotated = apply_prefill_rope_gpu(q_rot, rope_cos, rope_sin, seq_len, num_heads, half_rot);
-    let k_rotated =
-        apply_prefill_rope_gpu(k_rot, rope_cos, rope_sin, seq_len, num_kv_heads, half_rot);
-
-    let q_final = Tensor::cat(vec![q_rotated, q_pass], 1).reshape([seq_len, num_heads, head_dim]);
-    let k_final =
-        Tensor::cat(vec![k_rotated, k_pass], 1).reshape([seq_len, num_kv_heads, head_dim]);
-
-    // 6. Store KV cache
-    let k_cache = k_final.swap_dims(0, 1); // [kv_heads, seq, head_dim]
-    let v_cache = v_new
-        .reshape([seq_len, num_kv_heads, head_dim])
-        .swap_dims(0, 1);
-    kv.k = Some(k_cache.clone());
-    kv.v = Some(v_cache.clone());
-    kv.seq_len = seq_len;
-
-    // 7. GQA with causal mask
-    let scale = 1.0 / (head_dim as f32).sqrt();
-    let q_4d = q_final.swap_dims(0, 1); // [num_heads, seq, head_dim]
-
-    let k_exp = if num_kv_groups > 1 {
-        let k4: Tensor<B, 4> = k_cache.unsqueeze_dim::<4>(1).repeat_dim(1, num_kv_groups);
-        k4.reshape([num_heads, seq_len, head_dim])
-    } else {
-        k_cache
-    };
-    let v_exp = if num_kv_groups > 1 {
-        let v4: Tensor<B, 4> = v_cache.unsqueeze_dim::<4>(1).repeat_dim(1, num_kv_groups);
-        v4.reshape([num_heads, seq_len, head_dim])
-    } else {
-        v_cache
-    };
-
-    let scores = q_4d.matmul(k_exp.swap_dims(1, 2)).mul_scalar(scale);
-    // Causal mask
-    let mask = Tensor::<B, 2>::ones([seq_len, seq_len], &scores.device())
-        .triu(1)
-        .mul_scalar(-1e9f32);
-    let scores = scores + mask.unsqueeze_dim::<3>(0);
-    let attn_weights = activation::softmax(scores, 2);
-    let context = attn_weights.matmul(v_exp); // [num_heads, seq, head_dim]
-
-    let attn_out = context.swap_dims(0, 1).reshape([seq_len, q_dim]); // [seq, 4096]
-
-    // 8. Output gate
-    let attn_gated = attn_out * sigmoid_2d(gate);
-
-    // 9. O projection + residual
-    let o_out = attn_gated.matmul(layer.o_proj.clone());
-    let out = x + o_out;
-
-    // 10. MLP
-    let x_norm2 = rms_norm_1plus(out.clone(), &layer.post_attn_norm_gamma);
-    let gate_mlp = x_norm2.clone().matmul(layer.gate_proj.clone());
-    let up = x_norm2.matmul(layer.up_proj.clone());
-    let mlp_out = silu_2d(gate_mlp).mul(up).matmul(layer.down_proj.clone());
-
-    out + mlp_out
+/// Prefill the prompt; logits for its last position.
+pub fn forward_prefill_gpu(model: &GpuModel, weights: &ModelWeights, tokens: &[u32], cache: &mut GpuHybridCache) -> Vec<f32> {
+    let x = run_layers(model, embed_rows(model, weights, tokens), cache, true);
+    let seq = tokens.len();
+    head_logits(model, x.slice([seq - 1..seq, 0..model.hidden]))
 }
 
-/// Apply split-half RoPE for prefill (multiple positions).
-/// x: [seq*heads, rotary_dim]
-fn apply_prefill_rope_gpu<B: Backend>(
-    x: Tensor<B, 2>,
-    cos_table: &Tensor<B, 2>,
-    sin_table: &Tensor<B, 2>,
-    seq_len: usize,
-    num_heads: usize,
-    half_rot: usize,
-) -> Tensor<B, 2> {
-    let rotary_dim = half_rot * 2;
-    let total = seq_len * num_heads;
-
-    let x_first = x.clone().slice([0..total, 0..half_rot]);
-    let x_second = x.slice([0..total, half_rot..rotary_dim]);
-
-    // Build cos/sin for each (position, head) pair: positions 0..seq_len, repeated per head
-    // cos_table: [max_pos, half_rot] → slice [0..seq_len, :] → [seq_len, half_rot]
-    let cos_seq = cos_table.clone().slice([0..seq_len, 0..half_rot]); // [seq, half_rot]
-    let sin_seq = sin_table.clone().slice([0..seq_len, 0..half_rot]);
-
-    // Repeat for each head: [seq, 1, half_rot] → [seq, heads, half_rot] → [seq*heads, half_rot]
-    let cos: Tensor<B, 3> = cos_seq.unsqueeze_dim::<3>(1).repeat_dim(1, num_heads);
-    let cos = cos.reshape([total, half_rot]);
-    let sin: Tensor<B, 3> = sin_seq.unsqueeze_dim::<3>(1).repeat_dim(1, num_heads);
-    let sin = sin.reshape([total, half_rot]);
-
-    let new_first = x_first.clone() * cos.clone() - x_second.clone() * sin.clone();
-    let new_second = x_second * cos + x_first * sin;
-
-    Tensor::cat(vec![new_first, new_second], 1)
-}
-
-// ============================================================
-// CPU lm_head
-// ============================================================
-
-fn lm_head_cpu(x: &[f32], embed: &[f32], vocab: usize, hidden: usize) -> Vec<f32> {
-    use rayon::prelude::*;
-
-    let chunk_size = 4096;
-    let mut logits = vec![0.0f32; vocab];
-
+/// One decode step; logits for the new token's position.
+pub fn forward_decode_gpu(model: &GpuModel, weights: &ModelWeights, token: u32, cache: &mut GpuHybridCache) -> Vec<f32> {
+    if !profiling() {
+        let x = run_layers(model, embed_rows(model, weights, &[token]), cache, false);
+        return head_logits(model, x);
+    }
+    // INCORD_GPU_PROFILE=1: where one decode step spends its time.
+    let t0 = Instant::now();
+    let x0 = embed_rows(model, weights, &[token]);
+    let t_embed = t0.elapsed();
+    let x = run_layers(model, x0, cache, false);
+    let t_submit = t0.elapsed();
+    let logits = head_logits(model, x);
+    let t_all = t0.elapsed();
+    eprintln!(
+        "[profile] embed {:.1?} | layers submitted {:.1?} | head + GPU finish + readback {:.1?} | total {:.1?}",
+        t_embed,
+        t_submit - t_embed,
+        t_all - t_submit,
+        t_all
+    );
     logits
-        .par_chunks_mut(chunk_size)
-        .enumerate()
-        .for_each(|(chunk_idx, chunk)| {
-            let start = chunk_idx * chunk_size;
-            for (j, out) in chunk.iter_mut().enumerate() {
-                let v = start + j;
-                if v >= vocab {
-                    break;
-                }
-                let row = &embed[v * hidden..(v + 1) * hidden];
-                let mut dot = 0.0f32;
-                for d in 0..hidden {
-                    dot += x[d] * row[d];
-                }
-                *out = dot;
-            }
-        });
+}
 
-    logits
+fn profiling() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("INCORD_GPU_PROFILE").is_some_and(|v| v != "0"))
+}
+
+/// Reject models the GPU path cannot run yet.
+fn check_supported(weights: &ModelWeights) -> Result<(), String> {
+    if weights.has_rotated() {
+        return Err("model has rotated weights, not supported on the GPU path yet".into());
+    }
+    if weights.has_low_bit() {
+        return Err("model has Q3/Q2/E8 weights, not supported on the GPU path yet".into());
+    }
+    Ok(())
+}
+
+/// Logits after prefilling `prompt`, then after each token of `then`
+/// (teacher-forced), all on the GPU. Used to check GPU against CPU.
+pub fn logits_gpu(weights: &ModelWeights, device: &Device, prompt: &[u32], then: &[u32]) -> Result<Vec<Vec<f32>>, String> {
+    check_supported(weights)?;
+    let model = load_model_gpu(weights, device)?;
+    let mut cache = GpuHybridCache::new(&model.config, device);
+    let mut out = vec![forward_prefill_gpu(&model, weights, prompt, &mut cache)];
+    for &t in then {
+        out.push(forward_decode_gpu(&model, weights, t, &mut cache));
+    }
+    Ok(out)
 }
 
 // ============================================================
@@ -923,13 +513,7 @@ impl Rng {
     }
 }
 
-fn sample_token_top_k(
-    logits: &[f32],
-    temperature: f32,
-    top_p: f32,
-    top_k: usize,
-    rng: &mut Rng,
-) -> u32 {
+fn sample_token_top_k(logits: &[f32], temperature: f32, top_p: f32, top_k: usize, rng: &mut Rng) -> u32 {
     if temperature <= 0.0 {
         return logits
             .iter()
@@ -940,28 +524,17 @@ fn sample_token_top_k(
     }
 
     let inv_temp = 1.0 / temperature;
-
-    // Top-k: find k largest logits
-    let mut indexed: Vec<(u32, f32)> = logits
-        .iter()
-        .enumerate()
-        .map(|(i, &l)| (i as u32, l))
-        .collect();
+    let mut indexed: Vec<(u32, f32)> = logits.iter().enumerate().map(|(i, &l)| (i as u32, l)).collect();
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     indexed.truncate(top_k);
 
-    // Softmax over top-k
     let max_logit = indexed[0].1;
-    let mut probs: Vec<(u32, f32)> = indexed
-        .iter()
-        .map(|&(i, l)| (i, ((l - max_logit) * inv_temp).exp()))
-        .collect();
+    let mut probs: Vec<(u32, f32)> = indexed.iter().map(|&(i, l)| (i, ((l - max_logit) * inv_temp).exp())).collect();
     let sum: f32 = probs.iter().map(|(_, p)| p).sum();
     for (_, p) in probs.iter_mut() {
         *p /= sum;
     }
 
-    // Top-p within top-k
     let mut cumsum = 0.0f32;
     let mut cutoff = probs.len();
     for (i, &(_, p)) in probs.iter().enumerate() {
@@ -990,9 +563,8 @@ fn apply_presence_penalty(logits: &mut [f32], generated: &[u32], penalty: f32) {
     }
     let mut seen = vec![false; logits.len()];
     for &tok in generated {
-        let idx = tok as usize;
-        if idx < seen.len() {
-            seen[idx] = true;
+        if let Some(s) = seen.get_mut(tok as usize) {
+            *s = true;
         }
     }
     for (idx, &was_seen) in seen.iter().enumerate() {
@@ -1007,14 +579,12 @@ fn apply_repetition_penalty(logits: &mut [f32], generated: &[u32], penalty: f32)
         return;
     }
     let window = generated.len().min(64);
-    let recent = &generated[generated.len() - window..];
-    for &tok in recent {
-        let idx = tok as usize;
-        if idx < logits.len() {
-            if logits[idx] > 0.0 {
-                logits[idx] /= penalty;
+    for &tok in &generated[generated.len() - window..] {
+        if let Some(l) = logits.get_mut(tok as usize) {
+            if *l > 0.0 {
+                *l /= penalty;
             } else {
-                logits[idx] *= penalty;
+                *l *= penalty;
             }
         }
     }
@@ -1024,179 +594,105 @@ fn apply_repetition_penalty(logits: &mut [f32], generated: &[u32], penalty: f32)
 // Main entry point
 // ============================================================
 
-pub fn generate_gpu(
-    weights: &ModelWeights,
-    tokenizer: &IncordTokenizer,
-    prompt: &str,
-    params: &GenerateParams,
-) -> Result<(), String> {
-    if weights.has_rotated() {
-        // The GPU forward does not apply the Hadamard input transform yet.
-        return Err("model has rotated weights, not supported on the GPU path yet".into());
-    }
-    if weights.has_low_bit() {
-        return Err("model has Q3/Q2 weights, not supported on the GPU path yet".into());
-    }
+pub fn generate_gpu(weights: &ModelWeights, tokenizer: &IncordTokenizer, prompt: &str, params: &GenerateParams) -> Result<(), String> {
+    check_supported(weights)?;
     let result = std::cell::RefCell::new(None);
 
     std::thread::scope(|s| {
-        let builder = std::thread::Builder::new()
-            .name("gpu-llm".into())
-            .stack_size(128 * 1024 * 1024);
+        let builder = std::thread::Builder::new().name("gpu-llm".into()).stack_size(128 * 1024 * 1024);
         let handle = builder.spawn_scoped(s, || {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                generate_gpu_inner(weights, tokenizer, prompt, params)
-            }))
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| generate_gpu_inner(weights, tokenizer, prompt, params)))
         });
-        match handle {
-            Ok(h) => {
-                let join_result = h.join();
-                *result.borrow_mut() = Some(match join_result {
-                    Ok(Ok(inner)) => inner,
-                    Ok(Err(panic_payload)) => {
-                        let msg = if let Some(s) = panic_payload.downcast_ref::<String>() {
-                            format!("GPU panic: {s}")
-                        } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                            format!("GPU panic: {s}")
-                        } else {
-                            "GPU panic: unknown error (likely out of VRAM)".to_string()
-                        };
-                        Err(msg)
-                    }
-                    Err(_) => Err("GPU thread panicked unexpectedly".to_string()),
-                });
-            }
-            Err(e) => {
-                *result.borrow_mut() = Some(Err(format!("Failed to spawn GPU thread: {e}")));
-            }
-        }
+        *result.borrow_mut() = Some(match handle {
+            Ok(h) => match h.join() {
+                Ok(Ok(inner)) => inner,
+                Ok(Err(panic_payload)) => {
+                    let msg = panic_payload
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown error (likely out of VRAM)");
+                    Err(format!("GPU panic: {msg}"))
+                }
+                Err(_) => Err("GPU thread panicked unexpectedly".to_string()),
+            },
+            Err(e) => Err(format!("Failed to spawn GPU thread: {e}")),
+        });
     });
 
-    result
-        .into_inner()
-        .unwrap_or(Err("No result from GPU thread".into()))
+    result.into_inner().unwrap_or(Err("No result from GPU thread".into()))
+}
+
+/// The GPU to run on: CUDA device 0 in a CUDA build, otherwise the first
+/// discrete GPU through wgpu. Not `Device::default()`: on Windows the default
+/// wgpu adapter can be the software renderer, which runs on the CPU.
+pub fn gpu_device() -> Device {
+    #[cfg(feature = "gpu-cuda")]
+    {
+        Device::cuda(0)
+    }
+    #[cfg(all(feature = "gpu", not(feature = "gpu-cuda")))]
+    {
+        Device::wgpu(cortex::tensor::DeviceKind::DiscreteGpu(0))
+    }
+    // Apple silicon has no discrete GPU; its default adapter is the GPU.
+    #[cfg(all(feature = "gpu-metal", not(any(feature = "gpu", feature = "gpu-cuda"))))]
+    {
+        Device::default()
+    }
 }
 
 fn detect_free_vram_mb() -> Option<usize> {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(output) = std::process::Command::new("nvidia-smi")
-            .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
-            .output()
-        {
-            if let Ok(s) = String::from_utf8(output.stdout) {
-                if let Some(first_line) = s.lines().next() {
-                    if let Ok(mb) = first_line.trim().parse::<usize>() {
-                        return Some(mb);
-                    }
-                }
-            }
-        }
-    }
-    None
+    let output = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    String::from_utf8(output.stdout).ok()?.lines().next()?.trim().parse().ok()
 }
 
-fn generate_gpu_inner(
-    weights: &ModelWeights,
-    tokenizer: &IncordTokenizer,
-    prompt: &str,
-    params: &GenerateParams,
-) -> Result<(), String> {
-    type B = cortex::backend::Wgpu;
-
-    let raw_model_mb = weights.memory_bytes() / (1024 * 1024);
-    let is_q8 = matches!(weights.format_name.to_lowercase().as_str(), "q8" | "qr08");
-    // Q8 weights expand from i8 to f32 on GPU (4x size in VRAM); Q4 weights remain packed.
-    let gpu_weights_mb = if is_q8 { raw_model_mb * 4 } else { raw_model_mb };
-    let needed_vram_mb = gpu_weights_mb + 800;
-
-    // Upfront VRAM detection BEFORE starting any model allocation
+fn generate_gpu_inner(weights: &ModelWeights, tokenizer: &IncordTokenizer, prompt: &str, params: &GenerateParams) -> Result<(), String> {
+    // Q4/Q8 stay quantized on the device; headroom for cache and activations.
+    let needed_vram_mb = weights.memory_bytes() / (1024 * 1024) + 800;
     if let Some(free_mb) = detect_free_vram_mb() {
-        eprintln!(
-            "Smart VRAM Check: {free_mb}MB free VRAM available, ~{needed_vram_mb}MB required for full GPU model ({})",
-            weights.format_name
-        );
+        eprintln!("VRAM: {free_mb} MB free, ~{needed_vram_mb} MB needed ({})", weights.format_name);
         if free_mb < needed_vram_mb {
-            eprintln!(
-                "Pre-check: Insufficient GPU VRAM to load all {} layers ({free_mb}MB free < ~{needed_vram_mb}MB required).",
-                weights.config.num_layers
-            );
-            eprintln!("Bypassing GPU load before allocation to prevent Out-of-Memory panic. Routing directly to CPU.");
-            return Err(format!(
-                "Pre-check: {free_mb}MB free VRAM is insufficient for full GPU load (~{needed_vram_mb}MB needed)"
-            ));
+            return Err(format!("{free_mb} MB free VRAM is not enough (~{needed_vram_mb} MB needed)"));
         }
     }
 
-    let device: <B as Backend>::Device = Default::default();
-    let _test: Tensor<B, 1> = Tensor::zeros([1], &device);
-    eprintln!("GPU initialized successfully");
-
-    // Allocation probe for needed memory
-    {
-        let probe_mb = (needed_vram_mb / 2).max(512);
-        let probe_elements = probe_mb * 1024 * 1024 / 4;
-        let probe_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _probe: Tensor<B, 1> = Tensor::zeros([probe_elements], &device);
-            let _ = _probe.slice([0..1]).to_data();
-        }));
-        if probe_result.is_err() {
-            eprintln!("Pre-check: GPU allocation probe of {probe_mb}MB failed. Insufficient VRAM.");
-            return Err(format!("GPU has insufficient VRAM (failed {probe_mb}MB probe)"));
-        }
-        eprintln!("VRAM probe: {probe_mb}MB OK");
-    }
-
-    eprintln!("Estimated VRAM needed: ~{}MB", needed_vram_mb);
-
-    // Load to GPU
+    let device = gpu_device();
+    eprintln!("GPU device: {device:?}");
     let t0 = Instant::now();
-    let model = load_model_gpu::<B>(weights, &device);
+    let model = load_model_gpu(weights, &device)?;
     eprintln!("Weights loaded to GPU in {:.1?}", t0.elapsed());
 
-    // Tokenize
     let tokens = tokenizer.format_chat(prompt, params.think, params.max_new_tokens);
     eprintln!("Prompt tokens: {}", tokens.len());
 
-    let config = &model.config;
-    let mut cache = GpuHybridCache::<B>::new(config, &device);
+    let mut cache = GpuHybridCache::new(&model.config, &device);
     let mut generated_tokens: Vec<u32> = Vec::new();
-    let mut in_think_block = params.think; // prompt already contains <think>\n
+    let mut in_think_block = params.think;
     let mut think_content = String::new();
     let mut think_tokens = 0u32;
     let mut rng = Rng::new();
 
-    // Prefill
     let t0 = Instant::now();
-    let mut logits = forward_prefill_gpu(&model, &tokens, &mut cache);
+    let mut logits = forward_prefill_gpu(&model, weights, &tokens, &mut cache);
     let prefill_time = t0.elapsed();
-    let seq_len = tokens.len();
     eprintln!(
-        "Prefill: {seq_len} tokens in {prefill_time:.1?} ({:.1} tok/s)",
-        seq_len as f64 / prefill_time.as_secs_f64()
+        "Prefill (GPU): {} tokens in {prefill_time:.1?} ({:.1} tok/s)",
+        tokens.len(),
+        tokens.len() as f64 / prefill_time.as_secs_f64()
     );
 
-    // Sample first token
     if !in_think_block && params.temperature > 0.0 {
         apply_presence_penalty(&mut logits, &generated_tokens, params.presence_penalty);
     }
-    let mut next_token_id = sample_token_top_k(
-        &logits,
-        params.temperature,
-        params.top_p,
-        params.top_k,
-        &mut rng,
-    );
-    eprintln!(
-        "First token: {} (id={})",
-        tokenizer.decode(&[next_token_id]),
-        next_token_id
-    );
+    let mut next_token_id = sample_token_top_k(&logits, params.temperature, params.top_p, params.top_k, &mut rng);
 
     let mut decode_tokens = 0u32;
     let decode_start = Instant::now();
 
-    // Decode loop
     for step in 0..params.max_new_tokens {
         if next_token_id == params.eos_token_id
             || next_token_id == crate::tokenizer::IM_END
@@ -1205,23 +701,16 @@ fn generate_gpu_inner(
             eprintln!("\n[EOS after {step} tokens (id={next_token_id})]");
             break;
         }
-
         generated_tokens.push(next_token_id);
 
-        // Handle think blocks
         if next_token_id == crate::tokenizer::THINK_START {
             in_think_block = true;
             if params.show_think {
                 eprint!("<think>");
-                std::io::stderr().flush().ok();
             }
         } else if next_token_id == crate::tokenizer::THINK_END {
             in_think_block = false;
-            eprintln!(
-                "\n[thinking done: {} tokens, {} chars]",
-                think_tokens,
-                think_content.len()
-            );
+            eprintln!("\n[thinking done: {think_tokens} tokens, {} chars]", think_content.len());
             if params.show_think {
                 eprintln!("</think>");
             }
@@ -1234,10 +723,8 @@ fn generate_gpu_inner(
                 think_tokens += 1;
                 if params.show_think {
                     eprint!("{token_text}");
-                    std::io::stderr().flush().ok();
                 } else if think_tokens % 50 == 0 {
                     eprint!("[thinking: {think_tokens} tokens...] ");
-                    std::io::stderr().flush().ok();
                 }
             } else {
                 print!("{token_text}");
@@ -1245,7 +732,7 @@ fn generate_gpu_inner(
             }
         }
 
-        // Sentence-boundary stop only at the very end of token budget (last 10 tokens) to avoid cutting words in half
+        // Stop at a sentence end only within the last 10 tokens of the budget.
         if !in_think_block && step >= params.max_new_tokens.saturating_sub(10) {
             let piece = tokenizer.decode(&[next_token_id]);
             let trimmed = piece.trim_end();
@@ -1254,17 +741,13 @@ fn generate_gpu_inner(
                 break;
             }
         }
-
-        // Loop detection
         if crate::generate::is_stuck_in_loop(&generated_tokens) {
-            eprintln!("\n[loop detected at step {}, forcing EOS]", decode_tokens);
+            eprintln!("\n[loop detected at step {decode_tokens}, forcing EOS]");
             break;
         }
 
-        // GPU decode
-        let mut logits = forward_decode_gpu(&model, next_token_id as usize, &mut cache);
+        let mut logits = forward_decode_gpu(&model, weights, next_token_id, &mut cache);
 
-        // Penalties
         if in_think_block {
             apply_presence_penalty(&mut logits, &generated_tokens, params.presence_penalty);
             logits[params.eos_token_id as usize] = f32::NEG_INFINITY;
@@ -1275,49 +758,208 @@ fn generate_gpu_inner(
             apply_presence_penalty(&mut logits, &generated_tokens, params.presence_penalty);
         }
 
-        // Think budget
         if in_think_block && think_tokens >= params.think_budget as u32 {
             next_token_id = crate::tokenizer::THINK_END;
-            eprintln!(
-                "\n[think budget reached ({} tokens), forcing </think>]",
-                params.think_budget
-            );
+            eprintln!("\n[think budget reached ({} tokens), forcing </think>]", params.think_budget);
         } else {
-            next_token_id = sample_token_top_k(
-                &logits,
-                params.temperature,
-                params.top_p,
-                params.top_k,
-                &mut rng,
-            );
+            next_token_id = sample_token_top_k(&logits, params.temperature, params.top_p, params.top_k, &mut rng);
         }
         decode_tokens += 1;
-
-        if decode_tokens % 50 == 0 {
-            let elapsed = decode_start.elapsed();
-            let tps = decode_tokens as f64 / elapsed.as_secs_f64();
-            eprint!("[{decode_tokens} tokens, {tps:.1} tok/s] ");
-            std::io::stderr().flush().ok();
-        }
     }
 
     if in_think_block {
-        eprintln!(
-            "\n[WARNING: thinking did not finish within {} tokens]",
-            params.max_new_tokens
-        );
+        eprintln!("\n[WARNING: thinking did not finish within {} tokens]", params.max_new_tokens);
     }
-
     println!();
-
     let decode_elapsed = decode_start.elapsed();
     if decode_tokens > 0 {
         eprintln!(
-            "Decode: {} tokens in {decode_elapsed:.1?} ({:.2} tok/s)",
-            decode_tokens,
+            "Decode (GPU): {decode_tokens} tokens in {decode_elapsed:.1?} ({:.2} tok/s)",
             decode_tokens as f64 / decode_elapsed.as_secs_f64()
         );
     }
-
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! GPU vs CPU on small random models. The CPU path (`gemv.rs`) is the
+    //! reference; the GPU must give the same next-token logits after the
+    //! prompt and after every following token.
+
+    use super::*;
+    use crate::config::LayerType;
+    use crate::gemv::{
+        DeltaNetLayerWeights, F16Weight, FullAttnLayerWeights, HybridCache, HybridLayerWeights, Q4Weight,
+        Q8Weight, Weight, forward_decode, prefill,
+    };
+    use crate::quant::{Rounding, quantize_q4, quantize_q8};
+    use half::f16;
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Fmt {
+        Q4,
+        Q8,
+    }
+
+    struct Gen(u64);
+    impl Gen {
+        fn vals(&mut self, len: usize, amp: f32) -> Vec<f32> {
+            (0..len)
+                .map(|_| {
+                    self.0 ^= self.0 << 13;
+                    self.0 ^= self.0 >> 7;
+                    self.0 ^= self.0 << 17;
+                    ((self.0 >> 40) as f32 / (1u64 << 23) as f32 - 1.0) * amp
+                })
+                .collect()
+        }
+        /// `[k, n]` weight; groups of 32 need n % 32 == 0, else F16.
+        fn weight(&mut self, k: usize, n: usize, fmt: Fmt) -> Weight {
+            let w = self.vals(k * n, 0.2);
+            if n % 32 != 0 {
+                return Weight::F16(F16Weight { data: w.iter().map(|&v| f16::from_f32(v)).collect(), k, n });
+            }
+            match fmt {
+                Fmt::Q4 => {
+                    let (p, s) = quantize_q4(&w, k, n, Rounding::Rtn);
+                    Weight::Q4(Q4Weight { packed: p.into(), scales: s.into(), k, n })
+                }
+                Fmt::Q8 => {
+                    let (d, s) = quantize_q8(&w, k, n, Rounding::Rtn);
+                    Weight::Q8(Q8Weight { data: d.into(), scales: s.into(), k, n })
+                }
+            }
+        }
+        fn gamma(&mut self, len: usize) -> Vec<f16> {
+            self.vals(len, 0.3).iter().map(|&v| f16::from_f32(1.0 + v)).collect()
+        }
+    }
+
+    /// Small model: `qwen_like` = DeltaNet + gated attention with QK norms;
+    /// otherwise full attention only, plain query, no QK norms (MiniCPM-like).
+    fn tiny_model(qwen_like: bool, fmt: Fmt) -> ModelWeights {
+        let mut c = crate::gemv::mock::tiny_config();
+        c.vocab_size = 512;
+        c.tie_word_embeddings = false;
+        c.layer_types = if qwen_like {
+            vec![LayerType::DeltaNet, LayerType::FullAttn, LayerType::DeltaNet, LayerType::FullAttn]
+        } else {
+            vec![LayerType::FullAttn; 3]
+        };
+        c.num_layers = c.layer_types.len();
+        let (h, inter, q_dim, kv_dim) = (c.hidden_size, c.intermediate_size, c.attn_q_dim(), c.attn_kv_dim());
+        let base: u64 = if qwen_like { 0x51 } else { 0x77 };
+        let mut g = Gen((base ^ ((fmt as u64) << 8)) | 1);
+
+        let layers = c
+            .layer_types
+            .iter()
+            .map(|lt| match lt {
+                LayerType::FullAttn => HybridLayerWeights::FullAttn(FullAttnLayerWeights {
+                    q_proj: g.weight(h, if qwen_like { 2 * q_dim } else { q_dim }, fmt),
+                    k_proj: g.weight(h, kv_dim, fmt),
+                    v_proj: g.weight(h, kv_dim, fmt),
+                    o_proj: g.weight(q_dim, h, fmt),
+                    q_norm: if qwen_like { g.gamma(c.attn_head_dim) } else { Vec::new() },
+                    k_norm: if qwen_like { g.gamma(c.attn_head_dim) } else { Vec::new() },
+                    gate_proj: g.weight(h, inter, fmt),
+                    up_proj: g.weight(h, inter, fmt),
+                    down_proj: g.weight(inter, h, fmt),
+                    input_norm: g.gamma(h),
+                    post_attn_norm: g.gamma(h),
+                }),
+                LayerType::DeltaNet => HybridLayerWeights::DeltaNet(DeltaNetLayerWeights {
+                    in_proj_qkv: g.weight(h, c.deltanet_qkv_dim(), fmt),
+                    in_proj_a: g.weight(h, c.num_v_heads, fmt),
+                    in_proj_b: g.weight(h, c.num_v_heads, fmt),
+                    in_proj_z: g.weight(h, c.deltanet_v_dim(), fmt),
+                    out_proj: g.weight(c.deltanet_v_dim(), h, fmt),
+                    conv1d_weight: g.vals(c.deltanet_qkv_dim() * c.conv_kernel_size, 0.5),
+                    a_log: g.vals(c.num_v_heads, 0.5),
+                    dt_bias: g.vals(c.num_v_heads, 0.5),
+                    attn_norm_weight: g.gamma(c.deltanet_head_dim),
+                    gate_proj: g.weight(h, inter, fmt),
+                    up_proj: g.weight(h, inter, fmt),
+                    down_proj: g.weight(inter, h, fmt),
+                    input_norm: g.gamma(h),
+                    post_attn_norm: g.gamma(h),
+                }),
+            })
+            .collect();
+
+        let half = c.rope_dim() / 2;
+        let max_pos = c.max_position_embeddings;
+        let (mut cos, mut sin) = (Vec::new(), Vec::new());
+        for p in 0..max_pos {
+            for i in 0..half {
+                let a = p as f64 / 10_000f64.powf(2.0 * i as f64 / c.rope_dim() as f64);
+                cos.push(a.cos() as f32);
+                sin.push(a.sin() as f32);
+            }
+        }
+        ModelWeights {
+            layers,
+            embed: g.weight(c.vocab_size, h, Fmt::Q8),
+            lm_head: g.weight(c.vocab_size, h, fmt),
+            vocab: c.vocab_size,
+            hidden: h,
+            final_norm: g.gamma(h),
+            rope_cos: cos,
+            rope_sin: sin,
+            format_name: "test",
+            vision: None,
+            config: c,
+        }
+    }
+
+    fn cpu_logits(w: &ModelWeights, prompt: &[u32], then: &[u32]) -> Vec<Vec<f32>> {
+        let mut cache = HybridCache::new(&w.config);
+        let mut out = vec![prefill(w, prompt, &mut cache)];
+        for &t in then {
+            out.push(forward_decode(w, t as usize, &mut cache));
+        }
+        out
+    }
+
+    fn argmax(v: &[f32]) -> usize {
+        (0..v.len()).max_by(|&a, &b| v[a].total_cmp(&v[b])).unwrap()
+    }
+
+    fn check(qwen_like: bool, fmt: Fmt) {
+        let w = tiny_model(qwen_like, fmt);
+        let prompt = [3u32, 17, 42, 99, 7, 256, 11, 400];
+        let then = [5u32, 77, 300, 12];
+        let cpu = cpu_logits(&w, &prompt, &then);
+        let gpu = logits_gpu(&w, &gpu_device(), &prompt, &then).expect("GPU forward");
+        assert_eq!(cpu.len(), gpu.len());
+        for (step, (c, g)) in cpu.iter().zip(&gpu).enumerate() {
+            let scale = c.iter().fold(0f32, |m, v| m.max(v.abs()));
+            let diff = c.iter().zip(g).fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+            eprintln!("step {step}: max |cpu - gpu| = {diff:.2e} (logit scale {scale:.2})");
+            // The CPU keeps its KV cache in f16; the GPU in f32.
+            assert!(diff <= 1e-2 * scale, "step {step}: max |cpu - gpu| {diff} vs logit scale {scale}");
+            assert_eq!(argmax(c), argmax(g), "step {step}: top token differs");
+        }
+    }
+
+    #[test]
+    fn gpu_matches_cpu_minicpm_like_q4() {
+        check(false, Fmt::Q4);
+    }
+
+    #[test]
+    fn gpu_matches_cpu_minicpm_like_q8() {
+        check(false, Fmt::Q8);
+    }
+
+    #[test]
+    fn gpu_matches_cpu_qwen_like_q4() {
+        check(true, Fmt::Q4);
+    }
+
+    #[test]
+    fn gpu_matches_cpu_qwen_like_q8() {
+        check(true, Fmt::Q8);
+    }
 }

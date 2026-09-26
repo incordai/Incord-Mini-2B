@@ -1,171 +1,155 @@
-//! GPU weight loading for Incord.
+//! GPU weight loading for Incord (cortex-v2).
 //!
-//! Converts CPU ModelWeights (Q4 or F16) into Cortex GPU tensors.
-//! Q4 weights are uploaded as packed quantized tensors with on-the-fly
-//! GPU dequantization during matmul.
+//! Converts CPU `ModelWeights` into Cortex GPU tensors. Q4 and Q8 weights stay
+//! quantized on the device (block-32 symmetric, f16 scales) and are multiplied
+//! by cortex's fused dequant-matmul; F16 weights are uploaded as f32.
+//!
+//! The output head is uploaded like any other weight. The embedding stays in
+//! `ModelWeights` on the CPU: the forward looks up one row per token.
 
-use cortex::prelude::*;
 use cortex::tensor::quantization::{
     BlockSize, QuantLevel, QuantMode, QuantParam, QuantScheme, QuantStore, QuantValue,
 };
-use cortex::tensor::{DType, TensorData};
+use cortex::tensor::{DType, Device, Tensor, TensorData};
 use half::f16;
 
 use crate::config::IncordConfig;
-use crate::gemv::{
-    DeltaNetLayerWeights, FullAttnLayerWeights, HybridLayerWeights, ModelWeights, Weight,
-};
+use crate::gemv::{DeltaNetLayerWeights, FullAttnLayerWeights, HybridLayerWeights, ModelWeights, Weight};
 
 // ============================================================
 // GPU model structures
 // ============================================================
 
-pub struct GpuModel<B: Backend> {
-    pub layers: Vec<GpuHybridLayer<B>>,
-    pub embed_f32: Vec<f32>,
-    pub embed_vocab: usize,
-    pub embed_hidden: usize,
-    pub final_norm_gamma: Tensor<B, 1>,
-    pub rope_cos: Tensor<B, 2>,
-    pub rope_sin: Tensor<B, 2>,
+pub struct GpuModel {
+    pub layers: Vec<GpuHybridLayer>,
+    pub hidden: usize,
+    pub vocab: usize,
+    pub final_norm_gamma: Tensor<1>,
+    /// Output head `[vocab, hidden]` in its stored format; logits are
+    /// `lm_head · h`, so its quant groups run along the reduced dim.
+    pub lm_head: Tensor<2>,
+    /// RoPE tables `[max_pos, rope_dim / 2]`.
+    pub rope_cos: Tensor<2>,
+    pub rope_sin: Tensor<2>,
     pub config: IncordConfig,
+    pub device: Device,
 }
 
-pub enum GpuHybridLayer<B: Backend> {
-    DeltaNet(GpuDeltaNetLayer<B>),
-    FullAttn(GpuFullAttnLayer<B>),
+pub enum GpuHybridLayer {
+    DeltaNet(GpuDeltaNetLayer),
+    FullAttn(GpuFullAttnLayer),
 }
 
-pub struct GpuDeltaNetLayer<B: Backend> {
-    pub in_proj_qkv: Tensor<B, 2>,
-    pub in_proj_a: Tensor<B, 2>,
-    pub in_proj_b: Tensor<B, 2>,
-    pub in_proj_z: Tensor<B, 2>,
-    pub out_proj: Tensor<B, 2>,
-    pub conv1d_weight: Tensor<B, 2>,    // [qkv_dim, kernel_size]
-    pub a_log: Tensor<B, 1>,            // [num_v_heads]
-    pub dt_bias: Tensor<B, 1>,          // [num_v_heads]
-    pub attn_norm_weight: Tensor<B, 1>, // [head_dim] — plain gamma (NOT 1+gamma)
-    pub gate_proj: Tensor<B, 2>,
-    pub up_proj: Tensor<B, 2>,
-    pub down_proj: Tensor<B, 2>,
-    pub input_norm_gamma: Tensor<B, 1>,
-    pub post_attn_norm_gamma: Tensor<B, 1>,
+pub struct GpuDeltaNetLayer {
+    pub in_proj_qkv: Tensor<2>,
+    pub in_proj_a: Tensor<2>,
+    pub in_proj_b: Tensor<2>,
+    pub in_proj_z: Tensor<2>,
+    pub out_proj: Tensor<2>,
+    pub conv1d_weight: Tensor<2>,    // [qkv_dim, kernel_size]
+    pub a_log: Tensor<1>,            // [num_v_heads]
+    pub dt_bias: Tensor<1>,          // [num_v_heads]
+    pub attn_norm_weight: Tensor<1>, // [head_dim]
+    pub gate_proj: Tensor<2>,
+    pub up_proj: Tensor<2>,
+    pub down_proj: Tensor<2>,
+    pub input_norm_gamma: Tensor<1>,
+    pub post_attn_norm_gamma: Tensor<1>,
 }
 
-pub struct GpuFullAttnLayer<B: Backend> {
-    pub q_proj: Tensor<B, 2>,
-    pub k_proj: Tensor<B, 2>,
-    pub v_proj: Tensor<B, 2>,
-    pub o_proj: Tensor<B, 2>,
-    pub q_norm: Tensor<B, 1>,
-    pub k_norm: Tensor<B, 1>,
-    pub gate_proj: Tensor<B, 2>,
-    pub up_proj: Tensor<B, 2>,
-    pub down_proj: Tensor<B, 2>,
-    pub input_norm_gamma: Tensor<B, 1>,
-    pub post_attn_norm_gamma: Tensor<B, 1>,
+pub struct GpuFullAttnLayer {
+    pub q_proj: Tensor<2>,
+    pub k_proj: Tensor<2>,
+    pub v_proj: Tensor<2>,
+    pub o_proj: Tensor<2>,
+    /// Per-head QK norms; `None` when the model has none (e.g. Llama-style).
+    pub q_norm: Option<Tensor<1>>,
+    pub k_norm: Option<Tensor<1>>,
+    /// q_proj also emits an output gate per head (`[Q, gate]` interleaved),
+    /// detected from its width exactly as the CPU path does.
+    pub gated: bool,
+    pub gate_proj: Tensor<2>,
+    pub up_proj: Tensor<2>,
+    pub down_proj: Tensor<2>,
+    pub input_norm_gamma: Tensor<1>,
+    pub post_attn_norm_gamma: Tensor<1>,
 }
 
 // ============================================================
-// Q4 format conversion (ported from QOR3B)
+// Weight conversion
 // ============================================================
 
-fn q4_scheme() -> QuantScheme {
+/// incord's Q4/Q8 layout: groups of 32 along the output dim `n`, symmetric,
+/// f16 scales. Cortex packs along the last dim (`PackedU32(0)`), low bits
+/// first, which is the same element order.
+fn block32_scheme(value: QuantValue) -> QuantScheme {
     QuantScheme {
-        value: QuantValue::Q4S,
-        param: QuantParam::F32,
+        value,
+        param: QuantParam::F16,
         store: QuantStore::PackedU32(0),
         level: QuantLevel::Block(BlockSize::new([32])),
         mode: QuantMode::Symmetric,
     }
 }
 
-fn convert_q4_packed(packed: &[u8]) -> Vec<u8> {
-    packed.iter().map(|&b| b ^ 0x88).collect()
+/// Packed values padded to the 4-byte scale alignment, then the f16 scales.
+fn quantized_bytes(mut values: Vec<u8>, scales: &[f16]) -> Vec<u8> {
+    while values.len() % 4 != 0 {
+        values.push(0);
+    }
+    values.reserve(scales.len() * 2);
+    for s in scales {
+        values.extend(s.to_le_bytes());
+    }
+    values
 }
 
-fn q4_weight_to_gpu<B: Backend>(
-    packed: &[u8],
-    scales: &[f16],
-    k: usize,
-    n: usize,
-    device: &B::Device,
-) -> Tensor<B, 2> {
-    let burn_packed = convert_q4_packed(packed);
-    let scales_f32: Vec<f32> = scales.iter().map(|s| s.to_f32()).collect();
-    let scale_bytes: Vec<u8> = scales_f32.iter().flat_map(|s| s.to_le_bytes()).collect();
-
-    let mut combined = Vec::with_capacity(burn_packed.len() + scale_bytes.len());
-    combined.extend_from_slice(&burn_packed);
-    combined.extend_from_slice(&scale_bytes);
-
-    let scheme = q4_scheme();
-    let data = TensorData::from_bytes_vec(combined, vec![k, n], DType::QFloat(scheme));
+fn q4_weight_to_gpu(packed: &[u8], scales: &[f16], k: usize, n: usize, device: &Device) -> Tensor<2> {
+    // incord stores each nibble as q + 8; cortex reads signed nibbles.
+    let values = packed.iter().map(|&b| b ^ 0x88).collect();
+    let data = TensorData::from_bytes_vec(
+        quantized_bytes(values, scales),
+        [k, n],
+        DType::QFloat(block32_scheme(QuantValue::Q4S)),
+    );
     Tensor::from_data(data, device)
 }
 
-fn f16_weight_to_gpu<B: Backend>(
-    data: &[f16],
-    k: usize,
-    n: usize,
-    device: &B::Device,
-) -> Tensor<B, 2> {
+fn q8_weight_to_gpu(q: &[i8], scales: &[f16], k: usize, n: usize, device: &Device) -> Tensor<2> {
+    let values = q.iter().map(|&v| v as u8).collect();
+    let data = TensorData::from_bytes_vec(
+        quantized_bytes(values, scales),
+        [k, n],
+        DType::QFloat(block32_scheme(QuantValue::Q8S)),
+    );
+    Tensor::from_data(data, device)
+}
+
+fn f16_weight_to_gpu(data: &[f16], k: usize, n: usize, device: &Device) -> Tensor<2> {
     let f32_data: Vec<f32> = data.iter().map(|v| v.to_f32()).collect();
     Tensor::from_data(TensorData::new(f32_data, [k, n]), device)
 }
 
-fn dequant_q8_to_f32(data: &[i8], scales: &[f16], k: usize, n: usize) -> Vec<f32> {
-    let mut out = Vec::with_capacity(k * n);
-    let group_size = 32;
-    for (group_idx, &scale) in scales.iter().enumerate() {
-        let s = scale.to_f32();
-        let start = group_idx * group_size;
-        let end = (start + group_size).min(data.len());
-        for &val in &data[start..end] {
-            out.push(val as f32 * s);
-        }
-    }
-    out
-}
-
-fn q8_weight_to_gpu<B: Backend>(
-    data: &[i8],
-    scales: &[f16],
-    k: usize,
-    n: usize,
-    device: &B::Device,
-) -> Tensor<B, 2> {
-    let f32_data = dequant_q8_to_f32(data, scales, k, n);
-    Tensor::from_data(TensorData::new(f32_data, [k, n]), device)
-}
-
-fn weight_to_gpu<B: Backend>(w: &Weight, device: &B::Device) -> Tensor<B, 2> {
+fn weight_to_gpu(w: &Weight, device: &Device) -> Result<Tensor<2>, String> {
     match w {
-        Weight::F16(fw) => f16_weight_to_gpu::<B>(&fw.data, fw.k, fw.n, device),
-        Weight::Q4(qw) => q4_weight_to_gpu::<B>(&qw.packed, &qw.scales, qw.k, qw.n, device),
-        Weight::Q8(qw) => q8_weight_to_gpu::<B>(&qw.data, &qw.scales, qw.k, qw.n, device),
-        Weight::LowBit(_) | Weight::Rotated(..) => {
-            unreachable!("generate_gpu rejects rotated and sub-4-bit models before upload")
-        }
+        Weight::F16(fw) => Ok(f16_weight_to_gpu(&fw.data, fw.k, fw.n, device)),
+        Weight::Q4(qw) => Ok(q4_weight_to_gpu(&qw.packed, &qw.scales, qw.k, qw.n, device)),
+        Weight::Q8(qw) => Ok(q8_weight_to_gpu(&qw.data, &qw.scales, qw.k, qw.n, device)),
+        Weight::LowBit(_) => Err("Q3/Q2/E8 weights are not supported on the GPU path yet".into()),
+        Weight::Rotated(..) => Err("rotated weights are not supported on the GPU path yet".into()),
     }
 }
 
-fn norm_to_gpu<B: Backend>(gamma: &[f16], device: &B::Device) -> Tensor<B, 1> {
+fn norm_to_gpu(gamma: &[f16], device: &Device) -> Tensor<1> {
     let f32_data: Vec<f32> = gamma.iter().map(|v| v.to_f32()).collect();
     Tensor::from_data(TensorData::new(f32_data, [gamma.len()]), device)
 }
 
-fn f32_vec_to_gpu_1d<B: Backend>(data: &[f32], device: &B::Device) -> Tensor<B, 1> {
+fn f32_vec_to_gpu_1d(data: &[f32], device: &Device) -> Tensor<1> {
     Tensor::from_data(TensorData::new(data.to_vec(), [data.len()]), device)
 }
 
-fn f32_vec_to_gpu_2d<B: Backend>(
-    data: &[f32],
-    rows: usize,
-    cols: usize,
-    device: &B::Device,
-) -> Tensor<B, 2> {
+fn f32_vec_to_gpu_2d(data: &[f32], rows: usize, cols: usize, device: &Device) -> Tensor<2> {
     Tensor::from_data(TensorData::new(data.to_vec(), [rows, cols]), device)
 }
 
@@ -173,136 +157,75 @@ fn f32_vec_to_gpu_2d<B: Backend>(
 // Model loading
 // ============================================================
 
-pub fn load_model_gpu<B: Backend>(weights: &ModelWeights, device: &B::Device) -> GpuModel<B> {
+pub fn load_model_gpu(weights: &ModelWeights, device: &Device) -> Result<GpuModel, String> {
     let config = &weights.config;
-
-    eprintln!(
-        "Loading {} layers to GPU ({})...",
-        config.num_layers, weights.format_name
-    );
+    eprintln!("Loading {} layers to GPU ({})...", config.num_layers, weights.format_name);
 
     let mut layers = Vec::with_capacity(config.num_layers);
     for (i, lw) in weights.layers.iter().enumerate() {
         if i % 6 == 0 {
             eprintln!("  GPU layer {i}/{}...", config.num_layers);
         }
-        match lw {
-            HybridLayerWeights::DeltaNet(d) => {
-                layers.push(GpuHybridLayer::DeltaNet(load_deltanet_layer::<B>(
-                    d, config, device,
-                )));
-            }
-            HybridLayerWeights::FullAttn(f) => {
-                layers.push(GpuHybridLayer::FullAttn(load_fullattn_layer::<B>(
-                    f, device,
-                )));
-            }
-        }
+        layers.push(match lw {
+            HybridLayerWeights::DeltaNet(d) => GpuHybridLayer::DeltaNet(load_deltanet_layer(d, config, device)?),
+            HybridLayerWeights::FullAttn(f) => GpuHybridLayer::FullAttn(load_fullattn_layer(f, config, device)?),
+        });
     }
-    eprintln!(
-        "  GPU layer {}/{}... done",
-        config.num_layers, config.num_layers
-    );
 
-    // Embedding: keep on CPU (vocab=248K is too large for VRAM)
-    let embed_f32 = match &weights.embed {
-        Weight::F16(fw) => fw.data.iter().map(|v| v.to_f32()).collect(),
-        Weight::Q4(qw) => dequant_q4_to_f32(&qw.packed, &qw.scales, qw.k, qw.n),
-        Weight::Q8(qw) => dequant_q8_to_f32(&qw.data, &qw.scales, qw.k, qw.n),
-        Weight::LowBit(_) | Weight::Rotated(..) => {
-            unreachable!("generate_gpu rejects rotated and sub-4-bit models before upload")
-        }
-    };
-
-    let final_norm_gamma = norm_to_gpu::<B>(&weights.final_norm, device);
-
-    // RoPE tables for full attention (partial RoPE, rope_dim/2 = 32 entries per position)
-    let rope_half = config.rope_dim() / 2; // 32
+    let final_norm_gamma = norm_to_gpu(&weights.final_norm, device);
+    let rope_half = config.rope_dim() / 2;
     let max_pos = weights.rope_cos.len() / rope_half;
-    let rope_cos = Tensor::from_data(
-        TensorData::new(weights.rope_cos.clone(), [max_pos, rope_half]),
-        device,
-    );
-    let rope_sin = Tensor::from_data(
-        TensorData::new(weights.rope_sin.clone(), [max_pos, rope_half]),
-        device,
-    );
+    let rope_cos = f32_vec_to_gpu_2d(&weights.rope_cos, max_pos, rope_half, device);
+    let rope_sin = f32_vec_to_gpu_2d(&weights.rope_sin, max_pos, rope_half, device);
 
-    GpuModel {
+    Ok(GpuModel {
         layers,
-        embed_f32,
-        embed_vocab: config.vocab_size,
-        embed_hidden: config.hidden_size,
+        hidden: weights.hidden,
+        vocab: weights.vocab,
         final_norm_gamma,
+        lm_head: weight_to_gpu(&weights.lm_head, device)?,
         rope_cos,
         rope_sin,
         config: config.clone(),
-    }
+        device: device.clone(),
+    })
 }
 
-fn load_deltanet_layer<B: Backend>(
-    d: &DeltaNetLayerWeights,
-    config: &IncordConfig,
-    device: &B::Device,
-) -> GpuDeltaNetLayer<B> {
+fn load_deltanet_layer(d: &DeltaNetLayerWeights, config: &IncordConfig, device: &Device) -> Result<GpuDeltaNetLayer, String> {
     let qkv_dim = config.deltanet_qkv_dim();
     let kernel = config.conv_kernel_size;
-    GpuDeltaNetLayer {
-        in_proj_qkv: weight_to_gpu::<B>(&d.in_proj_qkv, device),
-        in_proj_a: weight_to_gpu::<B>(&d.in_proj_a, device),
-        in_proj_b: weight_to_gpu::<B>(&d.in_proj_b, device),
-        in_proj_z: weight_to_gpu::<B>(&d.in_proj_z, device),
-        out_proj: weight_to_gpu::<B>(&d.out_proj, device),
-        conv1d_weight: f32_vec_to_gpu_2d::<B>(&d.conv1d_weight, qkv_dim, kernel, device),
-        a_log: f32_vec_to_gpu_1d::<B>(&d.a_log, device),
-        dt_bias: f32_vec_to_gpu_1d::<B>(&d.dt_bias, device),
-        attn_norm_weight: norm_to_gpu::<B>(&d.attn_norm_weight, device),
-        gate_proj: weight_to_gpu::<B>(&d.gate_proj, device),
-        up_proj: weight_to_gpu::<B>(&d.up_proj, device),
-        down_proj: weight_to_gpu::<B>(&d.down_proj, device),
-        input_norm_gamma: norm_to_gpu::<B>(&d.input_norm, device),
-        post_attn_norm_gamma: norm_to_gpu::<B>(&d.post_attn_norm, device),
-    }
+    Ok(GpuDeltaNetLayer {
+        in_proj_qkv: weight_to_gpu(&d.in_proj_qkv, device)?,
+        in_proj_a: weight_to_gpu(&d.in_proj_a, device)?,
+        in_proj_b: weight_to_gpu(&d.in_proj_b, device)?,
+        in_proj_z: weight_to_gpu(&d.in_proj_z, device)?,
+        out_proj: weight_to_gpu(&d.out_proj, device)?,
+        conv1d_weight: f32_vec_to_gpu_2d(&d.conv1d_weight, qkv_dim, kernel, device),
+        a_log: f32_vec_to_gpu_1d(&d.a_log, device),
+        dt_bias: f32_vec_to_gpu_1d(&d.dt_bias, device),
+        attn_norm_weight: norm_to_gpu(&d.attn_norm_weight, device),
+        gate_proj: weight_to_gpu(&d.gate_proj, device)?,
+        up_proj: weight_to_gpu(&d.up_proj, device)?,
+        down_proj: weight_to_gpu(&d.down_proj, device)?,
+        input_norm_gamma: norm_to_gpu(&d.input_norm, device),
+        post_attn_norm_gamma: norm_to_gpu(&d.post_attn_norm, device),
+    })
 }
 
-fn load_fullattn_layer<B: Backend>(
-    f: &FullAttnLayerWeights,
-    device: &B::Device,
-) -> GpuFullAttnLayer<B> {
-    GpuFullAttnLayer {
-        q_proj: weight_to_gpu::<B>(&f.q_proj, device),
-        k_proj: weight_to_gpu::<B>(&f.k_proj, device),
-        v_proj: weight_to_gpu::<B>(&f.v_proj, device),
-        o_proj: weight_to_gpu::<B>(&f.o_proj, device),
-        q_norm: norm_to_gpu::<B>(&f.q_norm, device),
-        k_norm: norm_to_gpu::<B>(&f.k_norm, device),
-        gate_proj: weight_to_gpu::<B>(&f.gate_proj, device),
-        up_proj: weight_to_gpu::<B>(&f.up_proj, device),
-        down_proj: weight_to_gpu::<B>(&f.down_proj, device),
-        input_norm_gamma: norm_to_gpu::<B>(&f.input_norm, device),
-        post_attn_norm_gamma: norm_to_gpu::<B>(&f.post_attn_norm, device),
-    }
-}
-
-fn dequant_q4_to_f32(packed: &[u8], scales: &[f16], k: usize, n: usize) -> Vec<f32> {
-    let groups_per_row = n / 32;
-    let mut out = vec![0.0f32; k * n];
-
-    for ki in 0..k {
-        for g in 0..groups_per_row {
-            let group_idx = ki * groups_per_row + g;
-            let scale = scales[group_idx].to_f32();
-            let col_start = g * 32;
-            let pack_start = group_idx * 16;
-
-            for j in (0..32).step_by(2) {
-                let byte = packed[pack_start + j / 2];
-                let q0 = (byte & 0x0F) as f32 - 8.0;
-                let q1 = (byte >> 4) as f32 - 8.0;
-                out[ki * n + col_start + j] = q0 * scale;
-                out[ki * n + col_start + j + 1] = q1 * scale;
-            }
-        }
-    }
-    out
+fn load_fullattn_layer(f: &FullAttnLayerWeights, config: &IncordConfig, device: &Device) -> Result<GpuFullAttnLayer, String> {
+    let optional_norm = |g: &[f16]| (!g.is_empty()).then(|| norm_to_gpu(g, device));
+    Ok(GpuFullAttnLayer {
+        q_proj: weight_to_gpu(&f.q_proj, device)?,
+        k_proj: weight_to_gpu(&f.k_proj, device)?,
+        v_proj: weight_to_gpu(&f.v_proj, device)?,
+        o_proj: weight_to_gpu(&f.o_proj, device)?,
+        q_norm: optional_norm(&f.q_norm),
+        k_norm: optional_norm(&f.k_norm),
+        gated: f.q_proj.n() == 2 * config.attn_q_dim(),
+        gate_proj: weight_to_gpu(&f.gate_proj, device)?,
+        up_proj: weight_to_gpu(&f.up_proj, device)?,
+        down_proj: weight_to_gpu(&f.down_proj, device)?,
+        input_norm_gamma: norm_to_gpu(&f.input_norm, device),
+        post_attn_norm_gamma: norm_to_gpu(&f.post_attn_norm, device),
+    })
 }

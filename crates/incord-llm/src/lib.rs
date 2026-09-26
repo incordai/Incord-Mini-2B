@@ -17,9 +17,9 @@ pub mod tasks;
 pub mod tokenizer;
 pub mod vision;
 
-#[cfg(any(feature = "gpu", feature = "gpu-metal"))]
+#[cfg(any(feature = "gpu", feature = "gpu-cuda", feature = "gpu-metal"))]
 pub mod gpu_inference;
-#[cfg(any(feature = "gpu", feature = "gpu-metal"))]
+#[cfg(any(feature = "gpu", feature = "gpu-cuda", feature = "gpu-metal"))]
 pub mod gpu_loader;
 
 // incord's bundled standalone HTTP server. Downstream consumers (e.g. the
