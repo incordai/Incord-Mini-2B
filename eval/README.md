@@ -50,3 +50,23 @@ off. `compare` counts the questions a candidate lost or gained against the
 reference. With a few hundred questions, one standard error is 2-3 points,
 so treat smaller accuracy differences as noise. The lost/gained counts are
 the sharper signal.
+
+### Quick re-test after a change
+
+A full run takes hours. After a change, re-test only a chosen list instead:
+every question the previous candidate answered differently from the
+reference, plus a fixed sample of 100 it answered the same. The sample catches
+a change that breaks what already worked.
+
+```text
+incord-eval compare --ref eval-data/tasks-f16.jsonl --cand eval-data/tasks-q4.jsonl \
+    --save-quick eval-data/quick.jsonl [--stable 100]
+incord-eval tasks --model <new.incord> --tokenizer tokenizer.json \
+    --ids eval-data/quick.jsonl --items eval-data/tasks-new.jsonl --max-new 512
+incord-eval compare --ref eval-data/tasks-f16.jsonl --cand eval-data/tasks-new.jsonl \
+    --ids eval-data/quick.jsonl
+```
+
+The last compare splits each task into `diff` rows (did the change bring
+answers back to the reference?) and `stable` rows, which should stay at
+100% same. Run the full benchmark again only for a final candidate.

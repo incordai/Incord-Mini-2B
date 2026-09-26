@@ -18,6 +18,16 @@
 //!     --items eval-data/tasks-f16.jsonl [--tasks arc,mmlu] [--limit 200]
 //! incord-eval compare --ref eval-data/tasks-f16.jsonl --cand eval-data/tasks-q4.jsonl
 //! ```
+//!
+//! Quick re-test after a change (instead of the full run): save the
+//! questions a candidate answers differently from the reference, plus a fixed
+//! sample it answers the same, then run only those:
+//!
+//! ```text
+//! incord-eval compare --ref tasks-f16.jsonl --cand tasks-q4.jsonl --save-quick quick.jsonl [--stable 100]
+//! incord-eval tasks --model new.incord --tokenizer tokenizer.json --ids quick.jsonl --items tasks-new.jsonl
+//! incord-eval compare --ref tasks-f16.jsonl --cand tasks-new.jsonl --ids quick.jsonl
+//! ```
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
@@ -55,8 +65,9 @@ const USAGE: &str = "usage:
   incord-eval score --model <candidate.incord> --ref <ref.bin> [--json <results.jsonl>] [--label <name>]
   incord-eval tasks --model <m.incord> --tokenizer <tokenizer.json> --items <items.jsonl>
                     [--data eval-data/tasks] [--tasks arc,mmlu,hellaswag,winogrande,gsm8k]
-                    [--limit N] [--max-new 384] [--json <summary.jsonl>] [--label <name>]
-  incord-eval compare --ref <items.jsonl> --cand <items.jsonl>";
+                    [--limit N | --ids <quick.jsonl>] [--max-new 384] [--json <summary.jsonl>] [--label <name>]
+  incord-eval compare --ref <items.jsonl> --cand <items.jsonl>
+                      [--save-quick <quick.jsonl> [--stable 100]] [--ids <quick.jsonl>]";
 
 /// `--key value` lookup.
 fn opt<'a>(args: &'a [String], key: &str) -> Option<&'a str> {
@@ -360,6 +371,12 @@ fn cmd_tasks(args: &[String]) -> Result<(), String> {
         None => Task::ALL.to_vec(),
     };
 
+    // A quick list replaces the default subsample: those exact questions only.
+    let only: Option<BTreeMap<(String, String), String>> = opt(args, "--ids").map(read_ids).transpose()?;
+    if only.is_some() && limit.is_some() {
+        return Err("--ids and --limit cannot be combined".into());
+    }
+
     let tok = IncordTokenizer::from_file(tok_path).map_err(|e| format!("load tokenizer {tok_path}: {e}"))?;
     let w = load_model(model)?;
     let done: HashSet<(String, String)> = read_items(items_path)?.iter().map(item_key).collect();
@@ -373,8 +390,15 @@ fn cmd_tasks(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("open {items_path}: {e}"))?;
 
     for task in task_list {
-        let items = tasks::load(data, task)?.subsample(limit.unwrap_or_else(|| default_limit(task)));
+        let items = match &only {
+            Some(ids) => tasks::load(data, task)?
+                .retain_ids(|id| ids.contains_key(&(task.name().to_string(), id.to_string()))),
+            None => tasks::load(data, task)?.subsample(limit.unwrap_or_else(|| default_limit(task))),
+        };
         let total = items.len();
+        if total == 0 {
+            continue;
+        }
         let t0 = Instant::now();
         let mut ran = 0usize;
         let mut write = |v: serde_json::Value| -> Result<(), String> {
@@ -446,10 +470,59 @@ fn cmd_tasks(args: &[String]) -> Result<(), String> {
 
 /// Question-by-question comparison of two `tasks` runs over the questions
 /// both answered.
+/// Quick-test list file: one `{"task", "id", "kind"}` line per question,
+/// `kind` is "diff" (answered differently from the reference) or "stable".
+fn read_ids(path: &str) -> Result<BTreeMap<(String, String), String>, String> {
+    let list = read_items(path)?;
+    if list.is_empty() {
+        return Err(format!("{path}: no questions listed"));
+    }
+    Ok(list
+        .iter()
+        .map(|v| (item_key(v), v["kind"].as_str().unwrap_or("listed").to_string()))
+        .collect())
+}
+
+/// The questions for a quick re-test: every question the candidate answers
+/// differently from the reference, plus `stable` evenly spaced questions it
+/// answers the same (to catch a change breaking what already worked).
+fn quick_set(
+    reference: &BTreeMap<(String, String), serde_json::Value>,
+    cand: &[serde_json::Value],
+    stable: usize,
+) -> Vec<((String, String), &'static str)> {
+    let (mut diff, mut same) = (Vec::new(), Vec::new());
+    for c in cand {
+        let key = item_key(c);
+        let Some(r) = reference.get(&key) else { continue };
+        if r["pred"] == c["pred"] { same.push(key) } else { diff.push(key) }
+    }
+    let n = same.len();
+    let take = stable.min(n);
+    let mut out: Vec<_> = diff.into_iter().map(|k| (k, "diff")).collect();
+    out.extend((0..take).map(|j| (same[j * n / take].clone(), "stable")));
+    out
+}
+
 fn cmd_compare(args: &[String]) -> Result<(), String> {
     let ref_path = req(args, "--ref")?;
     let cand_path = req(args, "--cand")?;
     let reference: BTreeMap<_, _> = read_items(ref_path)?.into_iter().map(|v| (item_key(&v), v)).collect();
+    let cand = read_items(cand_path)?;
+
+    if let Some(out) = opt(args, "--save-quick") {
+        let set = quick_set(&reference, &cand, num(args, "--stable", 100)?);
+        let mut f = BufWriter::new(File::create(out).map_err(|e| format!("create {out}: {e}"))?);
+        for ((task, id), kind) in &set {
+            writeln!(f, "{}", serde_json::json!({"task": task, "id": id, "kind": kind}))
+                .map_err(|e| format!("write {out}: {e}"))?;
+        }
+        f.flush().map_err(|e| format!("write {out}: {e}"))?;
+        let diffs = set.iter().filter(|(_, k)| *k == "diff").count();
+        println!("wrote {out}: {diffs} differing + {} stable questions", set.len() - diffs);
+    }
+    // With a quick list, rows split into its "diff" and "stable" parts.
+    let kinds = opt(args, "--ids").map(read_ids).transpose()?;
 
     #[derive(Default)]
     struct Row {
@@ -461,11 +534,18 @@ fn cmd_compare(args: &[String]) -> Result<(), String> {
         gained: usize,
     }
     let mut rows: BTreeMap<String, Row> = BTreeMap::new();
-    for c in read_items(cand_path)? {
-        let key = item_key(&c);
+    for c in &cand {
+        let key = item_key(c);
         let Some(r) = reference.get(&key) else { continue };
+        let group = match &kinds {
+            Some(k) => match k.get(&key) {
+                Some(kind) => format!("{}/{kind}", key.0),
+                None => continue,
+            },
+            None => key.0,
+        };
         let (ro, co) = (r["correct"].as_bool() == Some(true), c["correct"].as_bool() == Some(true));
-        let row = rows.entry(key.0).or_default();
+        let row = rows.entry(group).or_default();
         row.n += 1;
         row.ref_ok += ro as usize;
         row.cand_ok += co as usize;
@@ -477,11 +557,11 @@ fn cmd_compare(args: &[String]) -> Result<(), String> {
         return Err(format!("{ref_path} and {cand_path} share no questions"));
     }
     println!("ref   {ref_path}\ncand  {cand_path}");
-    println!("{:<11} {:>5} {:>8} {:>8} {:>8} {:>6} {:>6}", "task", "n", "ref", "cand", "same", "lost", "gained");
+    println!("{:<17} {:>5} {:>8} {:>8} {:>8} {:>6} {:>6}", "task", "n", "ref", "cand", "same", "lost", "gained");
     let pct = |a: usize, n: usize| a as f64 * 100.0 / n as f64;
     for (task, r) in &rows {
         println!(
-            "{task:<11} {:>5} {:>7.2}% {:>7.2}% {:>7.2}% {:>6} {:>6}",
+            "{task:<17} {:>5} {:>7.2}% {:>7.2}% {:>7.2}% {:>6} {:>6}",
             r.n,
             pct(r.ref_ok, r.n),
             pct(r.cand_ok, r.n),
@@ -491,4 +571,34 @@ fn cmd_compare(args: &[String]) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn item(task: &str, id: &str, pred: u64) -> serde_json::Value {
+        json!({"task": task, "id": id, "pred": pred, "correct": pred == 0})
+    }
+
+    #[test]
+    fn quick_set_takes_every_difference_and_an_even_stable_sample() {
+        let reference: BTreeMap<_, _> = (0..10)
+            .map(|i| item("arc", &format!("q{i}"), 0))
+            .map(|v| (item_key(&v), v))
+            .collect();
+        // q2 and q7 answered differently; q9 has no reference and is ignored.
+        let cand: Vec<_> = (0..10)
+            .map(|i| item("arc", &format!("q{i}"), if i == 2 || i == 7 { 1 } else { 0 }))
+            .chain([item("arc", "extra", 1)])
+            .collect();
+        let set = quick_set(&reference, &cand, 4);
+        let ids = |kind| set.iter().filter(|(_, k)| *k == kind).map(|((_, id), _)| id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids("diff"), vec!["q2", "q7"]);
+        // 8 same answers (q0,q1,q3,q4,q5,q6,q8,q9), 4 evenly spaced: indices 0,2,4,6.
+        assert_eq!(ids("stable"), vec!["q0", "q3", "q5", "q8"]);
+        // Asking for more stable questions than exist takes them all, once.
+        assert_eq!(quick_set(&reference, &cand, 50).len(), 2 + 8);
+    }
 }

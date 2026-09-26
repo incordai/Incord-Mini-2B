@@ -123,6 +123,15 @@ impl Items {
             Items::Gen(v) => Items::Gen(pick(v, limit)),
         }
     }
+
+    /// Keep only the questions whose id passes `keep` (a quick re-test of a
+    /// chosen list instead of the evenly spaced default set).
+    pub fn retain_ids(self, keep: impl Fn(&str) -> bool) -> Items {
+        match self {
+            Items::Mc(v) => Items::Mc(v.into_iter().filter(|x| keep(&x.id)).collect()),
+            Items::Gen(v) => Items::Gen(v.into_iter().filter(|x| keep(&x.id)).collect()),
+        }
+    }
 }
 
 /// Load every row of `dir/<task>/page-*.json`, in file order.
@@ -424,6 +433,18 @@ mod tests {
         let Items::Gen(s) = Items::Gen(v).subsample(4) else { unreachable!() };
         let ids: Vec<_> = s.iter().map(|g| g.id.as_str()).collect();
         assert_eq!(ids, vec!["0", "2", "5", "7"]);
+    }
+
+    #[test]
+    fn retain_ids_keeps_only_listed_questions() {
+        let v: Vec<GenItem> = (0..5)
+            .map(|i| GenItem { id: format!("gsm-{i}"), question: String::new(), answer: 0.0 })
+            .collect();
+        let Items::Gen(s) = Items::Gen(v).retain_ids(|id| id == "gsm-1" || id == "gsm-4") else {
+            unreachable!()
+        };
+        let ids: Vec<_> = s.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(ids, vec!["gsm-1", "gsm-4"]);
     }
 
     #[test]
