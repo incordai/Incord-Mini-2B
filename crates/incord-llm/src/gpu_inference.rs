@@ -15,7 +15,7 @@ use std::time::Instant;
 use crate::config::IncordConfig;
 use crate::gemv::{ModelWeights, embed_lookup};
 use crate::generate::GenerateParams;
-use crate::gpu_loader::{GpuDeltaNetLayer, GpuFullAttnLayer, GpuHybridLayer, GpuModel, load_model_gpu};
+use crate::gpu_loader::{GpuDeltaNetLayer, GpuFullAttnLayer, GpuHybridLayer, GpuMat, GpuModel, load_model_gpu};
 use crate::tokenizer::IncordTokenizer;
 
 // ============================================================
@@ -90,11 +90,11 @@ fn softplus_1d(x: Tensor<1>) -> Tensor<1> {
 }
 
 /// SwiGLU MLP with its pre-norm and residual.
-fn mlp_block(out: Tensor<2>, norm: &Tensor<1>, gate: &Tensor<2>, up: &Tensor<2>, down: &Tensor<2>) -> Tensor<2> {
+fn mlp_block(out: Tensor<2>, norm: &Tensor<1>, gate: &GpuMat, up: &GpuMat, down: &GpuMat) -> Tensor<2> {
     let x_norm = rms_norm(out.clone(), norm);
-    let g = x_norm.clone().matmul(gate.clone());
-    let u = x_norm.matmul(up.clone());
-    out + activation::silu(g).mul(u).matmul(down.clone())
+    let g = gate.apply(x_norm.clone());
+    let u = up.apply(x_norm);
+    out + down.apply(activation::silu(g).mul(u))
 }
 
 /// Split q_proj output `[rows, width]` into Q `[rows, q_dim]` and, for gated
@@ -127,7 +127,7 @@ fn forward_deltanet_decode_gpu(x: Tensor<2>, layer: &GpuDeltaNetLayer, state: &m
     let scale = 1.0 / (hd as f32).sqrt();
 
     let x_norm = rms_norm(x.clone(), &layer.input_norm_gamma);
-    let qkv = x_norm.clone().matmul(layer.in_proj_qkv.clone());
+    let qkv = layer.in_proj_qkv.apply(x_norm.clone());
 
     // Depthwise causal conv over the last `ks` inputs of every channel.
     let conv_input = Tensor::cat(vec![state.conv_buf.clone(), qkv.reshape([qkv_dim, 1])], 1);
@@ -142,8 +142,8 @@ fn forward_deltanet_decode_gpu(x: Tensor<2>, layer: &GpuDeltaNetLayer, state: &m
     let q = l2_normalize_rows(q).mul_scalar(scale);
     let k = l2_normalize_rows(k);
 
-    let a_proj = x_norm.clone().matmul(layer.in_proj_a.clone()).reshape([num_v]);
-    let b_proj = x_norm.clone().matmul(layer.in_proj_b.clone()).reshape([num_v]);
+    let a_proj = layer.in_proj_a.apply(x_norm.clone()).reshape([num_v]);
+    let b_proj = layer.in_proj_b.apply(x_norm.clone()).reshape([num_v]);
     let alpha = (layer.a_log.clone().exp() * softplus_1d(a_proj + layer.dt_bias.clone())).neg().exp();
     let beta = activation::sigmoid(b_proj);
 
@@ -159,8 +159,8 @@ fn forward_deltanet_decode_gpu(x: Tensor<2>, layer: &GpuDeltaNetLayer, state: &m
     let y = state.s.clone().matmul(q_exp.unsqueeze_dim::<3>(2)).reshape([num_v, hd]);
 
     let y_normed = rms_norm(y, &layer.attn_norm_weight);
-    let z = activation::silu(x_norm.matmul(layer.in_proj_z.clone())).reshape([num_v, hd]);
-    let out = x + (y_normed * z).reshape([1, v_dim]).matmul(layer.out_proj.clone());
+    let z = activation::silu(layer.in_proj_z.apply(x_norm)).reshape([num_v, hd]);
+    let out = x + layer.out_proj.apply((y_normed * z).reshape([1, v_dim]));
 
     mlp_block(out, &layer.post_attn_norm_gamma, &layer.gate_proj, &layer.up_proj, &layer.down_proj)
 }
@@ -169,51 +169,78 @@ fn forward_deltanet_decode_gpu(x: Tensor<2>, layer: &GpuDeltaNetLayer, state: &m
 // Full attention: single token
 // ============================================================
 
-/// Split-half RoPE on `x: [rows, rotary_dim]` with one cos/sin row per x row.
-fn rope_rows(x: Tensor<2>, cos: Tensor<2>, sin: Tensor<2>, half: usize) -> Tensor<2> {
-    let rows = x.dims()[0];
-    let first = x.clone().slice([0..rows, 0..half]);
-    let second = x.slice([0..rows, half..2 * half]);
-    let new_first = first.clone() * cos.clone() - second.clone() * sin.clone();
-    let new_second = second * cos + first * sin;
-    Tensor::cat(vec![new_first, new_second], 1)
-}
-
-/// Partial RoPE on every head of `x: [positions * heads, head_dim]` for the
-/// consecutive positions `start..start + positions`.
-fn apply_partial_rope(x: Tensor<2>, rope_cos: &Tensor<2>, rope_sin: &Tensor<2>, start: usize, positions: usize, heads: usize, head_dim: usize, rotary_dim: usize) -> Tensor<2> {
+/// Split-half partial RoPE on `x: [positions, heads, head_dim]` for the
+/// consecutive positions `start..start + positions`, every head at once:
+/// `rot = x_rot * cos2 + swap_halves(x_rot) * sin2` (the `[cos, cos]` and
+/// `[-sin, sin]` tables broadcast over heads), pass-through dims unchanged.
+fn apply_rope(x: Tensor<3>, model: &GpuModel, start: usize, rotary_dim: usize) -> Tensor<3> {
     if rotary_dim == 0 {
         return x;
     }
+    let [positions, heads, head_dim] = x.dims();
     let half = rotary_dim / 2;
-    let rows = positions * heads;
-    let expand = |t: &Tensor<2>| {
-        t.clone()
-            .slice([start..start + positions, 0..half])
-            .unsqueeze_dim::<3>(1)
-            .repeat_dim(1, heads)
-            .reshape([rows, half])
-    };
-    let rotated = rope_rows(x.clone().slice([0..rows, 0..rotary_dim]), expand(rope_cos), expand(rope_sin), half);
+    let cos = model.rope_cos2.clone().slice([start..start + positions, 0..rotary_dim]).unsqueeze_dim::<3>(1);
+    let sin = model.rope_sin2.clone().slice([start..start + positions, 0..rotary_dim]).unsqueeze_dim::<3>(1);
+    let x_rot = x.clone().slice([0..positions, 0..heads, 0..rotary_dim]);
+    let swapped = Tensor::cat(
+        vec![
+            x_rot.clone().slice([0..positions, 0..heads, half..rotary_dim]),
+            x_rot.clone().slice([0..positions, 0..heads, 0..half]),
+        ],
+        2,
+    );
+    let rotated = x_rot * cos + swapped * sin;
     if rotary_dim == head_dim {
         return rotated;
     }
-    Tensor::cat(vec![rotated, x.slice([0..rows, rotary_dim..head_dim])], 1)
+    Tensor::cat(vec![rotated, x.slice([0..positions, 0..heads, rotary_dim..head_dim])], 2)
 }
 
-/// Expand KV heads `[kv_heads, seq, hd]` to `[heads, seq, hd]` (GQA).
-fn expand_kv(t: Tensor<3>, heads: usize, groups: usize) -> Tensor<3> {
-    if groups == 1 {
-        return t;
+// INCORD_GPU_PROFILE=1: host-side submission time per attention-layer
+// section, summed over the layers of one decode step.
+const SECTIONS: [&str; 7] = ["norm", "qkv matmul", "qk-norm+rope", "kv cache", "attention", "o_proj", "mlp"];
+thread_local! {
+    static SECTION_TIME: std::cell::RefCell<[std::time::Duration; 7]> = const { std::cell::RefCell::new([std::time::Duration::ZERO; 7]) };
+    static SECTION_MARK: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+fn section_start(device: &Device) {
+    if profiling() {
+        if profile_level() >= 2 {
+            device.sync().expect("GPU sync");
+        }
+        SECTION_MARK.set(Some(Instant::now()));
     }
-    let [kvh, seq, hd] = t.dims();
-    debug_assert_eq!(kvh * groups, heads);
-    t.unsqueeze_dim::<4>(1).repeat_dim(1, groups).reshape([heads, seq, hd])
+}
+
+fn section_end(i: usize, device: &Device) {
+    if profiling() {
+        if profile_level() >= 2 {
+            device.sync().expect("GPU sync");
+        }
+        let now = Instant::now();
+        if let Some(t) = SECTION_MARK.get() {
+            SECTION_TIME.with(|s| s.borrow_mut()[i] += now - t);
+        }
+        SECTION_MARK.set(Some(now));
+    }
+}
+
+fn take_sections() -> String {
+    SECTION_TIME.with(|s| {
+        let mut s = s.borrow_mut();
+        let out = SECTIONS.iter().zip(s.iter()).map(|(n, d)| format!("{n} {d:.1?}")).collect::<Vec<_>>().join(", ");
+        *s = [std::time::Duration::ZERO; 7];
+        out
+    })
 }
 
 /// Attention over `seq` new positions starting at `start` (prefill when
 /// start == 0, decode when seq == 1). Updates the KV cache.
-fn attention_block(x: Tensor<2>, layer: &GpuFullAttnLayer, kv: &mut GpuKvCacheEntry, config: &IncordConfig, rope_cos: &Tensor<2>, rope_sin: &Tensor<2>) -> Tensor<2> {
+fn attention_block(x: Tensor<2>, layer: &GpuFullAttnLayer, kv: &mut GpuKvCacheEntry, model: &GpuModel) -> Tensor<2> {
+    let dev = &model.device;
+    section_start(dev);
+    let config = &model.config;
     let seq = x.dims()[0];
     let heads = config.num_attn_heads;
     let kv_heads = config.num_kv_heads;
@@ -223,9 +250,11 @@ fn attention_block(x: Tensor<2>, layer: &GpuFullAttnLayer, kv: &mut GpuKvCacheEn
     let start = kv.seq_len;
 
     let x_norm = rms_norm(x.clone(), &layer.input_norm_gamma);
-    let (q, gate) = split_q_gate(x_norm.clone().matmul(layer.q_proj.clone()), layer, seq, heads, hd);
-    let k = x_norm.clone().matmul(layer.k_proj.clone());
-    let v = x_norm.matmul(layer.v_proj.clone());
+    section_end(0, dev);
+    let (q, gate) = split_q_gate(layer.q_proj.apply(x_norm.clone()), layer, seq, heads, hd);
+    let k = layer.k_proj.apply(x_norm.clone());
+    let v = layer.v_proj.apply(x_norm);
+    section_end(1, dev);
 
     let mut q = q.reshape([seq * heads, hd]);
     let mut k = k.reshape([seq * kv_heads, hd]);
@@ -235,12 +264,15 @@ fn attention_block(x: Tensor<2>, layer: &GpuFullAttnLayer, kv: &mut GpuKvCacheEn
     if let Some(g) = &layer.k_norm {
         k = rms_norm(k, g);
     }
-    let q = apply_partial_rope(q, rope_cos, rope_sin, start, seq, heads, hd, rotary_dim);
-    let k = apply_partial_rope(k, rope_cos, rope_sin, start, seq, kv_heads, hd, rotary_dim);
+    // RoPE on Q and K together: [seq, heads + kv_heads, hd].
+    let qk = apply_rope(Tensor::cat(vec![q.reshape([seq, heads, hd]), k.reshape([seq, kv_heads, hd])], 1), model, start, rotary_dim);
+    let q = qk.clone().slice([0..seq, 0..heads, 0..hd]);
+    let k = qk.slice([0..seq, heads..heads + kv_heads, 0..hd]);
+    section_end(2, dev);
 
     // [seq, heads, hd] -> [heads, seq, hd]
-    let q = q.reshape([seq, heads, hd]).swap_dims(0, 1);
-    let k_new = k.reshape([seq, kv_heads, hd]).swap_dims(0, 1);
+    let q = q.swap_dims(0, 1);
+    let k_new = k.swap_dims(0, 1);
     let v_new = v.reshape([seq, kv_heads, hd]).swap_dims(0, 1);
     let (k_all, v_all) = match (kv.k.take(), kv.v.take()) {
         (Some(pk), Some(pv)) => (Tensor::cat(vec![pk, k_new], 1), Tensor::cat(vec![pv, v_new], 1)),
@@ -250,24 +282,33 @@ fn attention_block(x: Tensor<2>, layer: &GpuFullAttnLayer, kv: &mut GpuKvCacheEn
     let total = kv.seq_len;
     kv.k = Some(k_all.clone());
     kv.v = Some(v_all.clone());
+    section_end(3, dev);
 
+    // GQA without copying K/V per query head: heads are kv-major
+    // (h = kv * groups + g), so Q regroups to [kv_heads, groups * seq, hd]
+    // and every group shares its KV head's cache in one matmul.
     let groups = config.num_kv_groups();
-    let k_exp = expand_kv(k_all, heads, groups);
-    let v_exp = expand_kv(v_all, heads, groups);
-    let mut scores = q.matmul(k_exp.swap_dims(1, 2)).mul_scalar(1.0 / (hd as f32).sqrt()); // [heads, seq, total]
+    let q = q.reshape([kv_heads, groups * seq, hd]);
+    let mut scores = q.matmul(k_all.swap_dims(1, 2)).mul_scalar(1.0 / (hd as f32).sqrt()); // [kv, groups*seq, total]
     if seq > 1 {
-        // New position i (absolute start + i) may not see absolute positions > start + i.
+        // New position i (absolute start + i) may not see absolute positions > start + i;
+        // rows are (group, position), so the [seq, total] mask repeats per group.
         let mask = Tensor::<2>::ones([seq, total], &x.device()).triu(start as i64 + 1).mul_scalar(-1e9f32);
+        let mask = mask.unsqueeze_dim::<3>(0).repeat_dim(0, groups).reshape([groups * seq, total]);
         scores = scores + mask.unsqueeze_dim::<3>(0);
     }
-    let context = activation::softmax(scores, 2).matmul(v_exp); // [heads, seq, hd]
-    let mut attn = context.swap_dims(0, 1).reshape([seq, q_dim]);
+    let context = activation::softmax(scores, 2).matmul(v_all); // [kv, groups*seq, hd]
+    let mut attn = context.reshape([heads, seq, hd]).swap_dims(0, 1).reshape([seq, q_dim]);
     if let Some(g) = gate {
         attn = attn * activation::sigmoid(g);
     }
-    let out = x + attn.matmul(layer.o_proj.clone());
+    section_end(4, dev);
+    let out = x + layer.o_proj.apply(attn);
+    section_end(5, dev);
 
-    mlp_block(out, &layer.post_attn_norm_gamma, &layer.gate_proj, &layer.up_proj, &layer.down_proj)
+    let out = mlp_block(out, &layer.post_attn_norm_gamma, &layer.gate_proj, &layer.up_proj, &layer.down_proj);
+    section_end(6, dev);
+    out
 }
 
 // ============================================================
@@ -294,10 +335,10 @@ fn prefill_deltanet_layer_gpu(x: Tensor<2>, layer: &GpuDeltaNetLayer, state: &mu
     let x_norm = rms_norm(x.clone(), &layer.input_norm_gamma);
     let to_vec1 = |t: Tensor<1>| t.into_data().to_vec::<f32>().unwrap();
     let to_vec2 = |t: Tensor<2>| t.into_data().to_vec::<f32>().unwrap();
-    let qkv_cpu = to_vec2(x_norm.clone().matmul(layer.in_proj_qkv.clone()));
-    let a_cpu = to_vec2(x_norm.clone().matmul(layer.in_proj_a.clone()));
-    let b_cpu = to_vec2(x_norm.clone().matmul(layer.in_proj_b.clone()));
-    let z_all = x_norm.matmul(layer.in_proj_z.clone());
+    let qkv_cpu = to_vec2(layer.in_proj_qkv.apply(x_norm.clone()));
+    let a_cpu = to_vec2(layer.in_proj_a.apply(x_norm.clone()));
+    let b_cpu = to_vec2(layer.in_proj_b.apply(x_norm.clone()));
+    let z_all = layer.in_proj_z.apply(x_norm);
 
     let conv_w = to_vec2(layer.conv1d_weight.clone());
     let a_exp_table: Vec<f32> = to_vec1(layer.a_log.clone()).iter().map(|v| v.exp()).collect();
@@ -385,7 +426,7 @@ fn prefill_deltanet_layer_gpu(x: Tensor<2>, layer: &GpuDeltaNetLayer, state: &mu
     state.conv_buf = Tensor::from_data(TensorData::new(conv_buf, [qkv_dim, buf_len]), &device);
     state.conv_pos += seq_len;
 
-    let out = x + (y_gpu * activation::silu(z_all)).matmul(layer.out_proj.clone());
+    let out = x + layer.out_proj.apply(y_gpu * activation::silu(z_all));
     mlp_block(out, &layer.post_attn_norm_gamma, &layer.gate_proj, &layer.up_proj, &layer.down_proj)
 }
 
@@ -420,7 +461,7 @@ fn run_layers(model: &GpuModel, mut x: Tensor<2>, cache: &mut GpuHybridCache, pr
                 }
             }
             (GpuHybridLayer::FullAttn(fl), GpuCacheEntry::KvCache(kv)) => {
-                attention_block(x, fl, kv, config, &model.rope_cos, &model.rope_sin)
+                attention_block(x, fl, kv, model)
             }
             _ => panic!("Layer/cache type mismatch at layer {i}"),
         };
@@ -450,18 +491,28 @@ pub fn forward_decode_gpu(model: &GpuModel, weights: &ModelWeights, token: u32, 
     let logits = head_logits(model, x);
     let t_all = t0.elapsed();
     eprintln!(
-        "[profile] embed {:.1?} | layers submitted {:.1?} | head + GPU finish + readback {:.1?} | total {:.1?}",
+        "[profile] embed {:.1?} | layers submitted {:.1?} | head + GPU finish + readback {:.1?} | total {:.1?}\n[sections] {}",
         t_embed,
         t_submit - t_embed,
         t_all - t_submit,
-        t_all
+        t_all,
+        take_sections()
     );
     logits
 }
 
 fn profiling() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("INCORD_GPU_PROFILE").is_some_and(|v| v != "0"))
+    profile_level() > 0
+}
+
+/// INCORD_GPU_PROFILE: 0/unset off; 1 host submission times; 2 also waits
+/// for the GPU at every section boundary, so a section's time includes its
+/// GPU work (slower, only for finding where GPU time goes).
+fn profile_level() -> u8 {
+    static LEVEL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *LEVEL.get_or_init(|| {
+        std::env::var("INCORD_GPU_PROFILE").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
+    })
 }
 
 /// Reject models the GPU path cannot run yet.

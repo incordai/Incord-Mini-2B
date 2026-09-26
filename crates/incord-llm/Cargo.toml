@@ -95,6 +95,20 @@ faer = { version = "0.24", default-features = false, features = ["std", "rayon"]
 git = "https://github.com/incordai/cortex.git"
 rev = "7d9b04c5e6a8d07eb87e138e0187f58fd651b518"
 default-features = false
+features = ["std", "extension"]
+optional = true
+
+# Our own GPU kernels (`gpu_kernels.rs`), launched on cortex's tensors: same
+# cortex-v2 commit, and the cubecl version cortex-v2 itself pins.
+[dependencies.cortex-cubecl]
+git = "https://github.com/incordai/cortex.git"
+rev = "7d9b04c5e6a8d07eb87e138e0187f58fd651b518"
+default-features = false
+optional = true
+
+[dependencies.cubecl]
+version = "=0.11.0-pre.2"
+default-features = false
 features = ["std"]
 optional = true
 
@@ -122,9 +136,9 @@ server = [
   "dep:prometheus", "dep:once_cell", "dep:parking_lot",
 ]
 
-gpu = ["dep:cortex", "cortex/wgpu", "cortex/autotune"]
-gpu-cuda = ["dep:cortex", "cortex/cuda", "cortex/autotune"]
-gpu-metal = ["dep:cortex", "cortex/metal", "cortex/autotune"]
+gpu = ["dep:cortex", "dep:cortex-cubecl", "dep:cubecl", "cortex/wgpu", "cortex/autotune"]
+gpu-cuda = ["dep:cortex", "dep:cortex-cubecl", "dep:cubecl", "cortex/cuda", "cortex/autotune"]
+gpu-metal = ["dep:cortex", "dep:cortex-cubecl", "dep:cubecl", "cortex/metal", "cortex/autotune"]
 mock-weights = []
 
 # Offline GPTQ quantizer (`incord-quantize`).
